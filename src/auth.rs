@@ -10,6 +10,7 @@ use crate::BootstrapOwner;
 
 mod session;
 pub use session::{AuthSettings, LoginRateLimiter, login, logout, me};
+pub(crate) use session::{AuthenticatedUser, require_csrf};
 
 pub async fn bootstrap_owner(
     pool: &PgPool,

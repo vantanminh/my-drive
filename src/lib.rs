@@ -2,11 +2,14 @@ mod api;
 mod auth;
 mod config;
 mod db;
+mod drive;
 mod health;
 mod storage;
 
 #[cfg(test)]
 mod auth_http_tests;
+#[cfg(test)]
+mod drive_http_tests;
 
 use anyhow::Context;
 use tokio::net::TcpListener;
