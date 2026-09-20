@@ -763,6 +763,14 @@ async fn cancel_upload(
         .remove_staging_file(session.staging_key)
         .await
         .map_err(TransferError::Storage)?;
+    sqlx::query(
+        "UPDATE upload_sessions SET staging_cleaned_at = now() \
+          WHERE id = $1 AND state = 'expired' AND staging_cleaned_at IS NULL",
+    )
+    .bind(id)
+    .execute(&state.pool)
+    .await
+    .map_err(map_database_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

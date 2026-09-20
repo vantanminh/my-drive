@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 3);
+    assert_eq!(migrator.iter().len(), 4);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -32,4 +32,8 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     let share_access = include_str!("../migrations/0003_share_access_sessions.sql");
     assert!(share_access.contains("token_digest BYTEA PRIMARY KEY"));
     assert!(share_access.contains("REFERENCES shares(id) ON DELETE CASCADE"));
+
+    let storage_maintenance = include_str!("../migrations/0004_storage_maintenance.sql");
+    assert!(storage_maintenance.contains("staging_cleaned_at"));
+    assert!(storage_maintenance.contains("last_checked_at"));
 }

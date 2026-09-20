@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod drive;
 mod health;
+mod maintenance;
 mod shares;
 mod storage;
 mod transfers;
@@ -12,6 +13,8 @@ mod transfers;
 mod auth_http_tests;
 #[cfg(test)]
 mod drive_http_tests;
+#[cfg(test)]
+mod maintenance_http_tests;
 #[cfg(test)]
 mod share_http_tests;
 #[cfg(test)]
@@ -49,6 +52,12 @@ pub async fn run() -> anyhow::Result<()> {
         owner_quota_bytes: config.owner_quota_bytes,
         upload_session_ttl_seconds: config.upload_session_ttl_seconds,
     };
+    let maintenance_settings = maintenance::Settings {
+        trash_retention_days: config.trash_retention_days,
+        upload_session_ttl_seconds: config.upload_session_ttl_seconds,
+    };
+    let maintenance_pool = pool.clone();
+    let maintenance_storage = storage.clone();
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server.
     drop(config);
@@ -63,6 +72,11 @@ pub async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind HTTP listener at {bind_addr}"))?;
 
+    tokio::spawn(maintenance::run_worker(
+        maintenance_pool,
+        maintenance_storage,
+        maintenance_settings,
+    ));
     info!(address = %bind_addr, "My Drive is listening");
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal())

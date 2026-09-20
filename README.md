@@ -10,8 +10,9 @@ The service now includes validated configuration, PostgreSQL migrations,
 first-owner bootstrap, a fail-closed storage mount guard, live/ready health
 endpoints, authenticated folder and trash APIs, resumable HDD-backed uploads,
 private downloads with byte ranges, quota checks, secure public shares, and a
-responsive browser client. Physical trash collection and scheduled maintenance
-jobs are later milestones.
+responsive browser client. A background maintenance worker expires abandoned
+upload sessions, purges trash after its retention period, and checks for
+missing payloads while preserving recoverable database state.
 
 ## Storage boundary
 
@@ -70,8 +71,25 @@ The client can repeat HEAD and resume after reconnecting. The database stores
 the committed offset; a retry truncates any uncommitted tail before writing.
 Finalization records its pending object and file IDs before the filesystem
 rename, so retrying after a process restart completes either side of the rename
-without duplicating the file. UPLOAD_SESSION_TTL controls session expiry.
-Expired staging cleanup is part of the operations milestone.
+without duplicating the file. UPLOAD_SESSION_TTL controls session expiry;
+expired and cancelled staging files are cleaned up by the maintenance worker.
+
+## Storage maintenance
+
+The service runs a maintenance pass at startup and once an hour. Each pass
+handles up to 100 expired uploads, trash roots, unreferenced storage objects,
+and ready payload checks. A failed filesystem operation leaves its cleanup
+marker or `deleting` state for the next pass to retry.
+
+TRASH_RETENTION_DAYS controls when a trashed root and its subtree are permanently
+removed; it defaults to 30 days and must be positive. The worker removes a
+storage object only after no file version or finalizing upload references it.
+It checks ready object paths in batches and logs a missing payload while
+preserving its PostgreSQL metadata for repair. Every purge records an
+`entry_purged` audit event. Monitor the JSON logs for
+`storage maintenance pass completed`, retry warnings, and missing-payload
+errors. Confirm TRASH_RETENTION_DAYS before deployment because this process
+permanently deletes expired trash.
 
 Private content is available at GET and HEAD
 /api/files/{id}/download. Responses are attachments with nosniff, a SHA-256
@@ -132,12 +150,15 @@ set `STORAGE_REQUIRE_MOUNT=true`, `STORAGE_EXPECTED_MOUNT`, and optionally
 ## Backup and restore
 
 A single HDD is not a backup. Back up a PostgreSQL dump, the HDD object tree,
-and required configuration to another disk, NAS, or offsite destination. Pause
-physical garbage collection while a backup runs. Restore the database and
-object tree together, then run the future reconciliation command before
-reopening access. A periodic restore test is required before relying on a
-backup. Detailed automation and verification are part of the operations
-milestone.
+and required configuration to another disk, NAS, or offsite destination. Until
+the backup tooling can pause maintenance, stop the app during a full object-tree
+copy or take a consistent filesystem snapshot so the retention worker cannot
+unlink payloads mid-copy. Restore the database and object tree together, then
+start the service and review maintenance logs for missing-payload errors before
+reopening access. The current check only verifies ready object paths; it does
+not verify checksums or repair missing bytes. A periodic restore test is
+required before relying on a backup. Backup automation and restore verification
+are the next operations slice.
 
 ## Web interface
 

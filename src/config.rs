@@ -101,6 +101,10 @@ impl Config {
         if upload_session_ttl_seconds == 0 || i64::try_from(upload_session_ttl_seconds).is_err() {
             return Err(ConfigError::Invalid("UPLOAD_SESSION_TTL"));
         }
+        let trash_retention_days = u64_value(vars, "TRASH_RETENTION_DAYS", 30)?;
+        if trash_retention_days == 0 || i64::try_from(trash_retention_days).is_err() {
+            return Err(ConfigError::Invalid("TRASH_RETENTION_DAYS"));
+        }
 
         Ok(Self {
             database_url,
@@ -115,7 +119,7 @@ impl Config {
             min_free_bytes: u64_value(vars, "MIN_FREE_BYTES", 5 * 1024 * 1024 * 1024)?,
             min_free_percent: f64_value(vars, "MIN_FREE_PERCENT", 5.0)?,
             upload_session_ttl_seconds,
-            trash_retention_days: u64_value(vars, "TRASH_RETENTION_DAYS", 30)?,
+            trash_retention_days,
             session_ttl_seconds,
             bootstrap_owner,
             cookie_secure: bool_value(vars, "COOKIE_SECURE", true)?,
@@ -310,6 +314,21 @@ mod tests {
         assert!(matches!(
             Config::from_vars(&vars),
             Err(ConfigError::Invalid("UPLOAD_SESSION_TTL"))
+        ));
+    }
+
+    #[test]
+    fn trash_retention_must_be_positive_and_fit_postgres_timestamps() {
+        let mut vars = base_vars();
+        vars.insert("TRASH_RETENTION_DAYS".to_owned(), "0".to_owned());
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("TRASH_RETENTION_DAYS"))
+        ));
+        vars.insert("TRASH_RETENTION_DAYS".to_owned(), u64::MAX.to_string());
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("TRASH_RETENTION_DAYS"))
         ));
     }
 }

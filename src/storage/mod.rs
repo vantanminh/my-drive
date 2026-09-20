@@ -77,9 +77,7 @@ impl LocalStorage {
     }
 
     pub fn health(&self) -> Result<(), StorageError> {
-        if self.require_mount {
-            self.validate_mount()?;
-        }
+        self.ensure_mounted()?;
 
         let (free_bytes, total_bytes) = self.capacity()?;
         if free_bytes < self.required_free_bytes(total_bytes) {
@@ -88,10 +86,15 @@ impl LocalStorage {
         Ok(())
     }
 
-    pub fn check_write_capacity(&self, additional_bytes: u64) -> Result<(), StorageError> {
+    pub fn ensure_mounted(&self) -> Result<(), StorageError> {
         if self.require_mount {
             self.validate_mount()?;
         }
+        Ok(())
+    }
+
+    pub fn check_write_capacity(&self, additional_bytes: u64) -> Result<(), StorageError> {
+        self.ensure_mounted()?;
         let (free_bytes, total_bytes) = self.capacity()?;
         if additional_bytes > free_bytes
             || free_bytes - additional_bytes < self.required_free_bytes(total_bytes)
@@ -143,6 +146,7 @@ impl LocalStorage {
     }
 
     pub async fn create_staging_file(&self, staging_key: Uuid) -> Result<(), StorageError> {
+        self.ensure_mounted()?;
         let file = tokio_fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -154,6 +158,7 @@ impl LocalStorage {
     }
 
     pub async fn remove_staging_file(&self, staging_key: Uuid) -> Result<(), StorageError> {
+        self.ensure_mounted()?;
         match tokio_fs::remove_file(self.staging_path(staging_key)).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -166,10 +171,10 @@ impl LocalStorage {
         staging_key: Uuid,
         storage_key: &str,
     ) -> Result<PathBuf, StorageError> {
+        self.ensure_mounted()?;
         let source = self.staging_path(staging_key);
         let destination = self.object_path(storage_key)?;
-        let parent = destination.parent().ok_or(StorageError::UnsafeKey)?;
-        tokio_fs::create_dir_all(parent).await?;
+        let parent = self.ensure_object_parent(storage_key, true).await?;
         let source_exists = tokio_fs::try_exists(&source).await?;
         let destination_exists = tokio_fs::try_exists(&destination).await?;
         match (source_exists, destination_exists) {
@@ -186,7 +191,7 @@ impl LocalStorage {
                     }
                     Err(error) => return Err(StorageError::Io(error)),
                 }
-                sync_directory_chain(parent, &self.root.join("objects"))?;
+                sync_directory_chain(&parent, &self.root.join("objects"))?;
                 sync_directory(&self.root.join("uploads"))?;
             }
             (false, true) => {}
@@ -198,7 +203,97 @@ impl LocalStorage {
     }
 
     pub async fn open_object(&self, storage_key: &str) -> Result<tokio_fs::File, StorageError> {
-        Ok(tokio_fs::File::open(self.object_path(storage_key)?).await?)
+        self.ensure_mounted()?;
+        let path = self.object_path(storage_key)?;
+        self.ensure_object_parent(storage_key, false).await?;
+        let metadata = tokio_fs::symlink_metadata(&path).await?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(StorageError::UnsafeKey);
+        }
+        Ok(tokio_fs::File::open(path).await?)
+    }
+
+    pub async fn object_exists(&self, storage_key: &str) -> Result<bool, StorageError> {
+        self.ensure_mounted()?;
+        let path = self.object_path(storage_key)?;
+        match self.ensure_object_parent(storage_key, false).await {
+            Ok(_) => {}
+            Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+        match tokio_fs::symlink_metadata(&path).await {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => Ok(true),
+            Ok(_) => Err(StorageError::UnsafeKey),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(StorageError::Io(error)),
+        }
+    }
+
+    pub async fn remove_object(&self, storage_key: &str) -> Result<(), StorageError> {
+        self.ensure_mounted()?;
+        let path = self.object_path(storage_key)?;
+        let parent = match self.ensure_object_parent(storage_key, false).await {
+            Ok(parent) => parent,
+            Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        match tokio_fs::symlink_metadata(&path).await {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+                tokio_fs::remove_file(&path).await?;
+                sync_directory(&parent)?;
+                Ok(())
+            }
+            Ok(_) => Err(StorageError::UnsafeKey),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(StorageError::Io(error)),
+        }
+    }
+
+    async fn ensure_object_parent(
+        &self,
+        storage_key: &str,
+        create_missing: bool,
+    ) -> Result<PathBuf, StorageError> {
+        let destination = self.object_path(storage_key)?;
+        let mut components = storage_key.split('/');
+        let first = components.next().ok_or(StorageError::UnsafeKey)?;
+        let second = components.next().ok_or(StorageError::UnsafeKey)?;
+        let mut current = self.root.join("objects");
+        for (index, component) in [None, Some(first), Some(second)].into_iter().enumerate() {
+            if let Some(component) = component {
+                current.push(component);
+            }
+            match tokio_fs::symlink_metadata(&current).await {
+                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {}
+                Ok(_) => return Err(StorageError::UnsafeKey),
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound && create_missing && index > 0 =>
+                {
+                    match tokio_fs::create_dir(&current).await {
+                        Ok(()) => {
+                            let parent = current.parent().ok_or(StorageError::UnsafeKey)?;
+                            sync_directory(parent)?;
+                        }
+                        Err(create_error)
+                            if create_error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(create_error) => return Err(StorageError::Io(create_error)),
+                    }
+                    let metadata = tokio_fs::symlink_metadata(&current).await?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(StorageError::UnsafeKey);
+                    }
+                }
+                Err(error) => return Err(StorageError::Io(error)),
+            }
+        }
+        destination
+            .parent()
+            .map(PathBuf::from)
+            .ok_or(StorageError::UnsafeKey)
     }
 
     fn capacity(&self) -> Result<(u64, u64), StorageError> {
@@ -344,5 +439,39 @@ mod tests {
             LocalStorage::initialize(&config),
             Err(StorageError::LowSpace)
         ));
+    }
+
+    #[tokio::test]
+    async fn object_removal_is_idempotent_and_refuses_non_file_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let storage = LocalStorage::initialize(&config(root.clone(), false)).unwrap();
+        let object_id = Uuid::new_v4();
+        let key = LocalStorage::storage_key(object_id);
+        let staging_key = Uuid::new_v4();
+        storage.create_staging_file(staging_key).await.unwrap();
+        tokio_fs::write(storage.staging_path(staging_key), b"payload")
+            .await
+            .unwrap();
+        let path = storage
+            .promote_staging_file(staging_key, &key)
+            .await
+            .unwrap();
+        assert!(storage.object_exists(&key).await.unwrap());
+
+        storage.remove_object(&key).await.unwrap();
+        storage.remove_object(&key).await.unwrap();
+        assert!(!path.exists());
+        assert!(!storage.object_exists(&key).await.unwrap());
+
+        let obstructed_id = Uuid::new_v4();
+        let obstructed_key = LocalStorage::storage_key(obstructed_id);
+        let obstructed_path = storage.object_path(&obstructed_key).unwrap();
+        fs::create_dir_all(&obstructed_path).unwrap();
+        assert!(matches!(
+            storage.remove_object(&obstructed_key).await,
+            Err(StorageError::UnsafeKey)
+        ));
+        assert!(obstructed_path.is_dir());
     }
 }
