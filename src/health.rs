@@ -2,12 +2,17 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use sqlx::PgPool;
 
-use crate::storage::LocalStorage;
+use crate::{
+    auth::{AuthSettings, LoginRateLimiter},
+    storage::LocalStorage,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub storage: LocalStorage,
+    pub auth_settings: AuthSettings,
+    pub login_rate_limiter: LoginRateLimiter,
 }
 
 #[derive(Serialize)]

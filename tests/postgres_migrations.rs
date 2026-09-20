@@ -18,18 +18,21 @@ async fn postgres_applies_schema_and_rejects_ambiguous_or_cyclic_entries() {
         .expect("apply migrations");
     assert_schema(&pool).await;
 
-    let owner_id = insert_owner(&pool, "owner@example.test").await;
+    let suffix = Uuid::new_v4();
+    let owner_id = insert_owner(&pool, &format!("owner-{suffix}@example.test")).await;
     let root_folder = Uuid::new_v4();
-    insert_folder(&pool, root_folder, owner_id, None, "Photos").await;
+    let root_name = format!("Photos-{suffix}");
+    insert_folder(&pool, root_folder, owner_id, None, &root_name).await;
 
     let child_folder = Uuid::new_v4();
     insert_folder(&pool, child_folder, owner_id, Some(root_folder), "2026").await;
 
     let duplicate_name = sqlx::query(
-        "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) VALUES ($1, $2, NULL, 'file', 'photos')",
+        "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) VALUES ($1, $2, NULL, 'file', $3)",
     )
     .bind(Uuid::new_v4())
     .bind(owner_id)
+    .bind(root_name.to_lowercase())
     .execute(&pool)
     .await;
     assert!(
@@ -44,7 +47,7 @@ async fn postgres_applies_schema_and_rejects_ambiguous_or_cyclic_entries() {
         .await;
     assert!(cycle.is_err(), "folder moves must not create cycles");
 
-    let other_owner = insert_owner(&pool, "second@example.test").await;
+    let other_owner = insert_owner(&pool, &format!("second-{suffix}@example.test")).await;
     let cross_owner_parent = sqlx::query(
         "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) VALUES ($1, $2, $3, 'folder', 'foreign')",
     )

@@ -5,6 +5,9 @@ mod db;
 mod health;
 mod storage;
 
+#[cfg(test)]
+mod auth_http_tests;
+
 use anyhow::Context;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -28,10 +31,19 @@ pub async fn run() -> anyhow::Result<()> {
         .context("bootstrap first owner")?;
 
     let bind_addr = config.bind_addr;
+    let auth_settings = auth::AuthSettings {
+        cookie_secure: config.cookie_secure,
+        session_ttl_seconds: config.session_ttl_seconds,
+    };
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server.
     drop(config);
-    let state = health::AppState { pool, storage };
+    let state = health::AppState {
+        pool,
+        storage,
+        auth_settings,
+        login_rate_limiter: auth::LoginRateLimiter::default(),
+    };
     let listener = TcpListener::bind(bind_addr)
         .await
         .with_context(|| format!("bind HTTP listener at {bind_addr}"))?;

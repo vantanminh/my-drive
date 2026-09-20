@@ -8,6 +8,9 @@ use uuid::Uuid;
 
 use crate::BootstrapOwner;
 
+mod session;
+pub use session::{AuthSettings, LoginRateLimiter, login, logout, me};
+
 pub async fn bootstrap_owner(
     pool: &PgPool,
     credentials: Option<&BootstrapOwner>,
@@ -69,7 +72,7 @@ pub fn password_hash(password: &str) -> anyhow::Result<String> {
         .to_string())
 }
 
-fn valid_email(email: &str) -> bool {
+pub(crate) fn valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
     };

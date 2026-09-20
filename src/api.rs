@@ -3,20 +3,27 @@ use std::time::Instant;
 use axum::{
     Router,
     body::Body,
+    extract::DefaultBodyLimit,
     http::{HeaderValue, Request, header::HeaderName},
     middleware::{self, Next},
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::health::{self, AppState};
 
-pub fn router(state: AppState) -> Router {
+pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
+        .route(
+            "/api/auth/login",
+            post(crate::auth::login).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/api/auth/me", get(crate::auth::me))
+        .route("/api/auth/logout", post(crate::auth::logout))
         .layer(middleware::from_fn(request_id_and_trace))
         .with_state(state)
 }

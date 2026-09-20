@@ -39,7 +39,10 @@ cargo run
 
 The service applies embedded SQL migrations before listening. No default owner
 or password exists. Liveness is available at `/health/live`; readiness at
-`/health/ready` checks PostgreSQL and HDD health.
+`/health/ready` checks PostgreSQL and HDD health. Owner login uses Argon2id,
+stores browser session digests in PostgreSQL, sets HttpOnly/SameSite cookies,
+and requires CSRF tokens on state-changing authenticated requests. Production
+cookies are Secure; local development can use `COOKIE_SECURE=false`.
 
 ## Single-server Compose deployment
 

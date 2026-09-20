@@ -127,6 +127,7 @@ mod tests {
             min_free_percent: 0.0,
             upload_session_ttl_seconds: 60,
             trash_retention_days: 30,
+            session_ttl_seconds: 60,
             bootstrap_owner: None,
             cookie_secure: true,
         }

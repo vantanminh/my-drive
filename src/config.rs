@@ -16,6 +16,7 @@ pub struct Config {
     pub min_free_percent: f64,
     pub upload_session_ttl_seconds: u64,
     pub trash_retention_days: u64,
+    pub session_ttl_seconds: u64,
     pub bootstrap_owner: Option<BootstrapOwner>,
     pub cookie_secure: bool,
 }
@@ -92,6 +93,10 @@ impl Config {
                 })
             }
         };
+        let session_ttl_seconds = u64_value(vars, "SESSION_TTL", 604_800)?;
+        if session_ttl_seconds == 0 || i64::try_from(session_ttl_seconds).is_err() {
+            return Err(ConfigError::Invalid("SESSION_TTL"));
+        }
 
         Ok(Self {
             database_url,
@@ -107,6 +112,7 @@ impl Config {
             min_free_percent: f64_value(vars, "MIN_FREE_PERCENT", 5.0)?,
             upload_session_ttl_seconds: u64_value(vars, "UPLOAD_SESSION_TTL", 86_400)?,
             trash_retention_days: u64_value(vars, "TRASH_RETENTION_DAYS", 30)?,
+            session_ttl_seconds,
             bootstrap_owner,
             cookie_secure: bool_value(vars, "COOKIE_SECURE", true)?,
         })
@@ -270,6 +276,21 @@ mod tests {
         assert!(matches!(
             Config::from_vars(&vars),
             Err(ConfigError::Invalid("MIN_FREE_PERCENT"))
+        ));
+    }
+
+    #[test]
+    fn session_ttl_must_be_positive_and_fit_postgres_timestamps() {
+        let mut vars = base_vars();
+        vars.insert("SESSION_TTL".to_owned(), "0".to_owned());
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("SESSION_TTL"))
+        ));
+        vars.insert("SESSION_TTL".to_owned(), u64::MAX.to_string());
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("SESSION_TTL"))
         ));
     }
 }
