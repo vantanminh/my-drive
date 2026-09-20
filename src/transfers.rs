@@ -40,7 +40,7 @@ const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id";
 
 #[derive(Debug, Error)]
-enum TransferError {
+pub(crate) enum TransferError {
     #[error("invalid request")]
     BadRequest,
     #[error("resource not found")]
@@ -784,7 +784,7 @@ async fn download_head(
     download_response(&state, user.id, id, &headers, true).await
 }
 
-async fn download_response(
+pub(crate) async fn download_response(
     state: &AppState,
     owner_id: Uuid,
     id: Uuid,

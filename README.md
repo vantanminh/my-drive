@@ -86,6 +86,24 @@ POST /api/entries/{id}/restore inspect or change entries.
 GET /api/drive/search?q=... searches visible names, and
 GET /api/drive/trash lists trashed entries.
 
+## Public share API
+
+Authenticated owners create shares with POST /api/shares, list them with
+GET /api/shares, and revoke one with POST /api/shares/{id}/revoke. Creation
+accepts a file or folder ID plus optional `expires_at`, `password`,
+`allow_download`, and `max_downloads`. The response contains a one-time
+`share_url` at `/s/{opaque-token}`. PostgreSQL stores only the token digest;
+copy the returned URL when creating the share.
+
+GET /api/public/shares/{token} returns file metadata or a paginated folder
+listing. Folder links accept `folder_id`, `limit`, and `offset` query values.
+POST /api/public/shares/{token}/unlock verifies an optional password and sets
+a 30-minute HttpOnly access cookie scoped to that share. Five failed password
+attempts lock the share for 15 minutes. GET
+/api/public/shares/{token}/download/{entry_id} streams an allowed file and
+supports the same byte-range behavior as private downloads. Revocation,
+expiry, trashing a shared folder, or reaching `max_downloads` disables access.
+
 ## Single-server Compose deployment
 
 1. Mount the HDD by filesystem UUID at `/srv/my-drive/data` and ensure the

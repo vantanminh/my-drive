@@ -389,6 +389,24 @@ async fn trash_entry(
     .await
     .map_err(map_database_error)?;
     sqlx::query(
+        "WITH RECURSIVE subtree(id) AS ( \
+             SELECT id FROM drive_entries WHERE id = $1 AND owner_id = $2 \
+             UNION ALL \
+             SELECT child.id FROM drive_entries AS child \
+             JOIN subtree AS parent ON child.parent_id = parent.id \
+             WHERE child.owner_id = $2 \
+         ) \
+         DELETE FROM share_access_sessions AS access \
+          USING shares AS share \
+          WHERE access.share_id = share.id AND share.owner_id = $2 \
+            AND share.resource_id IN (SELECT id FROM subtree)",
+    )
+    .bind(id)
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query(
         "INSERT INTO audit_events (event_type, actor_id, resource_id) VALUES ('entry_trashed', $1, $2)",
     )
     .bind(user.id)
