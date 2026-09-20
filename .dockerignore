@@ -1,0 +1,11 @@
+.git
+.5harness
+.agents
+target
+docs
+tests
+frontend/node_modules
+frontend/dist
+.env
+.env.*
+*.log

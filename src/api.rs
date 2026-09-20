@@ -4,17 +4,23 @@ use axum::{
     Router,
     body::Body,
     extract::DefaultBodyLimit,
-    http::{HeaderValue, Request, header::HeaderName},
+    http::{HeaderValue, Request, StatusCode, header::HeaderName},
     middleware::{self, Next},
-    response::Response,
-    routing::{get, post},
+    response::{IntoResponse, Response},
+    routing::{any, get, post},
 };
+use std::path::PathBuf;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::health::{self, AppState};
 
 pub(crate) fn router(state: AppState) -> Router {
+    let static_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/dist");
+    let static_files = ServeDir::new(&static_root)
+        .append_index_html_on_directories(true)
+        .not_found_service(ServeFile::new(static_root.join("index.html")));
     Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
@@ -27,8 +33,37 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(crate::drive::router())
         .merge(crate::transfers::router())
         .merge(crate::shares::router())
+        .route("/api", any(api_not_found))
+        .route("/api/{*path}", any(api_not_found))
+        .route("/s/{token}", get(serve_frontend_index))
+        .fallback_service(static_files)
         .layer(middleware::from_fn(request_id_and_trace))
         .with_state(state)
+}
+
+async fn api_not_found() -> (StatusCode, axum::Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({ "error": "not_found" })),
+    )
+}
+
+async fn serve_frontend_index() -> Response {
+    let index_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/dist/index.html");
+    match tokio::fs::read(index_path).await {
+        Ok(contents) => {
+            let mut response = Response::new(Body::from(contents));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            response
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "could not read the frontend index");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+    }
 }
 
 async fn request_id_and_trace(request: Request<Body>, next: Next) -> Response {

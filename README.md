@@ -9,9 +9,9 @@ file contents and upload staging belong on a separately mounted HDD.
 The service now includes validated configuration, PostgreSQL migrations,
 first-owner bootstrap, a fail-closed storage mount guard, live/ready health
 endpoints, authenticated folder and trash APIs, resumable HDD-backed uploads,
-private downloads with byte ranges, quota checks, and upload/folder audit
-events. Public shares, the browser client, physical trash collection, and
-maintenance jobs are later milestones.
+private downloads with byte ranges, quota checks, secure public shares, and a
+responsive browser client. Physical trash collection and scheduled maintenance
+jobs are later milestones.
 
 ## Storage boundary
 
@@ -33,7 +33,8 @@ set a local `DATABASE_URL` and absolute `STORAGE_ROOT`, then use the explicit
 development-only `STORAGE_REQUIRE_MOUNT=false` setting. This setting must not be
 used for a production service. Set both owner bootstrap variables to create
 the first owner; the password must be at least 16 bytes. Remove those variables
-after the first successful bootstrap.
+after the first successful bootstrap. Install Node.js 22 or newer for the web
+client.
 
 ```powershell
 cargo run
@@ -137,3 +138,12 @@ object tree together, then run the future reconciliation command before
 reopening access. A periodic restore test is required before relying on a
 backup. Detailed automation and verification are part of the operations
 milestone.
+
+## Web interface
+
+The Vite development server runs separately from Axum. From the repository
+root, start the Rust service, then open a second terminal in frontend and run
+npm ci followed by npm run dev. Vite proxies same-origin /api requests to
+http://127.0.0.1:3000. The Rust service serves frontend/dist, including public
+/s/<token> links; the Docker image builds both client and server. An unknown
+/api route returns JSON 404 rather than the app shell.

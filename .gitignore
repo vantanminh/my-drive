@@ -11,8 +11,9 @@ harness.db-shm
 /target/
 
 # Frontend build output
-/web/node_modules/
-/web/dist/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/tsconfig.tsbuildinfo
 
 # Local configuration and generated runtime data
 .env
