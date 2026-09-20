@@ -12,7 +12,15 @@ pub struct AppState {
     pub pool: PgPool,
     pub storage: LocalStorage,
     pub auth_settings: AuthSettings,
+    pub transfer_settings: TransferSettings,
     pub login_rate_limiter: LoginRateLimiter,
+}
+
+#[derive(Clone, Copy)]
+pub struct TransferSettings {
+    pub max_file_size: u64,
+    pub owner_quota_bytes: u64,
+    pub upload_session_ttl_seconds: u64,
 }
 
 #[derive(Serialize)]

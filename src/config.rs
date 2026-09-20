@@ -97,6 +97,10 @@ impl Config {
         if session_ttl_seconds == 0 || i64::try_from(session_ttl_seconds).is_err() {
             return Err(ConfigError::Invalid("SESSION_TTL"));
         }
+        let upload_session_ttl_seconds = u64_value(vars, "UPLOAD_SESSION_TTL", 86_400)?;
+        if upload_session_ttl_seconds == 0 || i64::try_from(upload_session_ttl_seconds).is_err() {
+            return Err(ConfigError::Invalid("UPLOAD_SESSION_TTL"));
+        }
 
         Ok(Self {
             database_url,
@@ -110,7 +114,7 @@ impl Config {
             owner_quota_bytes: u64_value(vars, "OWNER_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)?,
             min_free_bytes: u64_value(vars, "MIN_FREE_BYTES", 5 * 1024 * 1024 * 1024)?,
             min_free_percent: f64_value(vars, "MIN_FREE_PERCENT", 5.0)?,
-            upload_session_ttl_seconds: u64_value(vars, "UPLOAD_SESSION_TTL", 86_400)?,
+            upload_session_ttl_seconds,
             trash_retention_days: u64_value(vars, "TRASH_RETENTION_DAYS", 30)?,
             session_ttl_seconds,
             bootstrap_owner,
@@ -291,6 +295,21 @@ mod tests {
         assert!(matches!(
             Config::from_vars(&vars),
             Err(ConfigError::Invalid("SESSION_TTL"))
+        ));
+    }
+
+    #[test]
+    fn upload_session_ttl_must_be_positive_and_fit_postgres_timestamps() {
+        let mut vars = base_vars();
+        vars.insert("UPLOAD_SESSION_TTL".to_owned(), "0".to_owned());
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("UPLOAD_SESSION_TTL"))
+        ));
+        vars.insert("UPLOAD_SESSION_TTL".to_owned(), u64::MAX.to_string());
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("UPLOAD_SESSION_TTL"))
         ));
     }
 }

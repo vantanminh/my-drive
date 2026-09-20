@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     Config, api,
     auth::{AuthSettings, LoginRateLimiter},
-    health::AppState,
+    health::{AppState, TransferSettings},
     storage::LocalStorage,
 };
 
@@ -382,6 +382,11 @@ fn make_app(pool: PgPool) -> (Router, tempfile::TempDir) {
         auth_settings: AuthSettings {
             cookie_secure: false,
             session_ttl_seconds: 3600,
+        },
+        transfer_settings: TransferSettings {
+            max_file_size: 1024,
+            owner_quota_bytes: 4096,
+            upload_session_ttl_seconds: 3600,
         },
         login_rate_limiter: LoginRateLimiter::default(),
     });

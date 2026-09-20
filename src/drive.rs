@@ -21,7 +21,7 @@ const MAX_PAGE_SIZE: u16 = 200;
 const MAX_OFFSET: u32 = 1_000_000;
 
 #[derive(Debug, Error)]
-enum DriveError {
+pub(crate) enum DriveError {
     #[error("invalid request")]
     BadRequest,
     #[error("entry not found")]
@@ -474,7 +474,7 @@ async fn fetch_entry(
     .ok_or(DriveError::NotFound)
 }
 
-async fn ensure_active_entry(
+pub(crate) async fn ensure_active_entry(
     state: &AppState,
     owner_id: Uuid,
     id: Uuid,
@@ -506,7 +506,7 @@ async fn ensure_active_entry(
     }
 }
 
-fn require_request_csrf(
+pub(crate) fn require_request_csrf(
     headers: &HeaderMap,
     user: &AuthenticatedUser,
     settings: crate::auth::AuthSettings,
@@ -518,7 +518,7 @@ fn require_request_csrf(
     }
 }
 
-fn normalize_name(value: &str) -> Result<String, DriveError> {
+pub(crate) fn normalize_name(value: &str) -> Result<String, DriveError> {
     let name = value.trim();
     let length = name.chars().count();
     if length == 0

@@ -25,6 +25,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/auth/me", get(crate::auth::me))
         .route("/api/auth/logout", post(crate::auth::logout))
         .merge(crate::drive::router())
+        .merge(crate::transfers::router())
         .layer(middleware::from_fn(request_id_and_trace))
         .with_state(state)
 }

@@ -5,11 +5,14 @@ mod db;
 mod drive;
 mod health;
 mod storage;
+mod transfers;
 
 #[cfg(test)]
 mod auth_http_tests;
 #[cfg(test)]
 mod drive_http_tests;
+#[cfg(test)]
+mod transfer_http_tests;
 
 use anyhow::Context;
 use tokio::net::TcpListener;
@@ -38,6 +41,11 @@ pub async fn run() -> anyhow::Result<()> {
         cookie_secure: config.cookie_secure,
         session_ttl_seconds: config.session_ttl_seconds,
     };
+    let transfer_settings = health::TransferSettings {
+        max_file_size: config.max_file_size,
+        owner_quota_bytes: config.owner_quota_bytes,
+        upload_session_ttl_seconds: config.upload_session_ttl_seconds,
+    };
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server.
     drop(config);
@@ -45,6 +53,7 @@ pub async fn run() -> anyhow::Result<()> {
         pool,
         storage,
         auth_settings,
+        transfer_settings,
         login_rate_limiter: auth::LoginRateLimiter::default(),
     };
     let listener = TcpListener::bind(bind_addr)

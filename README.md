@@ -6,10 +6,12 @@ file contents and upload staging belong on a separately mounted HDD.
 
 ## Current implementation
 
-The first milestone provides validated configuration, PostgreSQL migrations,
-first-owner bootstrap, a fail-closed storage mount guard, and live/ready health
-endpoints. File management, resumable uploads, downloads, shares, the browser
-client, and maintenance jobs are being added in later milestones.
+The service now includes validated configuration, PostgreSQL migrations,
+first-owner bootstrap, a fail-closed storage mount guard, live/ready health
+endpoints, authenticated folder and trash APIs, resumable HDD-backed uploads,
+private downloads with byte ranges, quota checks, and upload/folder audit
+events. Public shares, the browser client, physical trash collection, and
+maintenance jobs are later milestones.
 
 ## Storage boundary
 
@@ -43,6 +45,46 @@ or password exists. Liveness is available at `/health/live`; readiness at
 stores browser session digests in PostgreSQL, sets HttpOnly/SameSite cookies,
 and requires CSRF tokens on state-changing authenticated requests. Production
 cookies are Secure; local development can use `COOKIE_SECURE=false`.
+
+## Drive and transfer API
+
+All private routes require the owner session cookie. Every state-changing
+request also sends the x-csrf-token value returned at login. Folder names are
+metadata; storage objects use generated UUID keys under
+objects/<2>/<2>/. Uploads are staged under generated names in uploads/.
+
+The resumable API follows offset-based PATCH semantics:
+
+1. POST /api/uploads with JSON containing filename, expected_size, and optional
+   parent_id. The response includes an upload ID and Location.
+2. HEAD /api/uploads/{id} returns Upload-Offset and Upload-Length.
+3. PATCH /api/uploads/{id} with Content-Type
+   application/offset+octet-stream, the current Upload-Offset, and the CSRF
+   header. Each PATCH is limited to 64 MiB. A stale offset gets 409 and the
+   server's current offset.
+4. POST /api/uploads/{id}/finalize verifies the size, hashes the staged bytes,
+   atomically moves them to the HDD object tree, and commits the file version.
+
+The client can repeat HEAD and resume after reconnecting. The database stores
+the committed offset; a retry truncates any uncommitted tail before writing.
+Finalization records its pending object and file IDs before the filesystem
+rename, so retrying after a process restart completes either side of the rename
+without duplicating the file. UPLOAD_SESSION_TTL controls session expiry.
+Expired staging cleanup is part of the operations milestone.
+
+Private content is available at GET and HEAD
+/api/files/{id}/download. Responses are attachments with nosniff, a SHA-256
+ETag, and Accept-Ranges: bytes. One byte range is supported per request;
+valid ranges return 206, and invalid or unsupported ranges return 416.
+Unknown file types remain downloads and are never served inline.
+
+GET /api/drive lists the current folder with bounded pagination and sorting.
+Use parent_id to open a folder. POST /api/folders creates a folder;
+GET /api/entries/{id}, PATCH /api/entries/{id}/rename,
+POST /api/entries/{id}/move, DELETE /api/entries/{id}, and
+POST /api/entries/{id}/restore inspect or change entries.
+GET /api/drive/search?q=... searches visible names, and
+GET /api/drive/trash lists trashed entries.
 
 ## Single-server Compose deployment
 

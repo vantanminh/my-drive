@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::{
     Config, api,
     auth::{self, AuthSettings, LoginRateLimiter},
-    health::AppState,
+    health::{AppState, TransferSettings},
     storage::LocalStorage,
 };
 
@@ -72,6 +72,11 @@ async fn browser_login_csrf_and_session_revocation_flow() {
         auth_settings: AuthSettings {
             cookie_secure: true,
             session_ttl_seconds: 3600,
+        },
+        transfer_settings: TransferSettings {
+            max_file_size: 1024,
+            owner_quota_bytes: 4096,
+            upload_session_ttl_seconds: 3600,
         },
         login_rate_limiter: LoginRateLimiter::default(),
     });
