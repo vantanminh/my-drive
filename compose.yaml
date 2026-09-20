@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mydrive
+      POSTGRES_USER: mydrive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the protected environment}
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_SSD:?Set POSTGRES_DATA_SSD to an SSD directory}
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mydrive -d mydrive"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://mydrive:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the protected environment}@db:5432/mydrive
+      BIND_ADDR: 0.0.0.0:3000
+      STORAGE_ROOT: /srv/my-drive/data
+      STORAGE_EXPECTED_MOUNT: /srv/my-drive/data
+      STORAGE_REQUIRE_MOUNT: "true"
+      STORAGE_REQUIRE_DEVICE_MATCH: "true"
+      STORAGE_EXPECTED_DEVICE: ${STORAGE_EXPECTED_DEVICE:?Set STORAGE_EXPECTED_DEVICE from findmnt}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-5368709120}
+      OWNER_QUOTA_BYTES: ${OWNER_QUOTA_BYTES:-107374182400}
+      MIN_FREE_BYTES: ${MIN_FREE_BYTES:-5368709120}
+      MIN_FREE_PERCENT: ${MIN_FREE_PERCENT:-5}
+      UPLOAD_SESSION_TTL: ${UPLOAD_SESSION_TTL:-86400}
+      TRASH_RETENTION_DAYS: ${TRASH_RETENTION_DAYS:-30}
+      BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL-}
+      BOOTSTRAP_OWNER_PASSWORD: ${BOOTSTRAP_OWNER_PASSWORD-}
+      COOKIE_SECURE: "true"
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - type: bind
+        source: ${STORAGE_DATA_HDD:?Set STORAGE_DATA_HDD to the mounted HDD data root}
+        target: /srv/my-drive/data
+        bind:
+          create_host_path: false
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

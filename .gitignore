@@ -1,0 +1,22 @@
+# 5harness local / derived (not SoT)
+.5harness/index/
+.5harness/local/
+.5harness/mutation.lock
+# Optional SQLite import residue (not SoT)
+harness.db
+harness.db-wal
+harness.db-shm
+
+# Rust build output
+/target/
+
+# Frontend build output
+/web/node_modules/
+/web/dist/
+
+# Local configuration and generated runtime data
+.env
+.env.*.local
+/data/
+/uploads/
+*.log
