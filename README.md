@@ -147,18 +147,101 @@ missing bind source on the root filesystem. For a native systemd installation,
 set `STORAGE_REQUIRE_MOUNT=true`, `STORAGE_EXPECTED_MOUNT`, and optionally
 `STORAGE_EXPECTED_DEVICE` in the restricted environment file.
 
-## Backup and restore
+## Encrypted backup and restore
 
-A single HDD is not a backup. Back up a PostgreSQL dump, the HDD object tree,
-and required configuration to another disk, NAS, or offsite destination. Until
-the backup tooling can pause maintenance, stop the app during a full object-tree
-copy or take a consistent filesystem snapshot so the retention worker cannot
-unlink payloads mid-copy. Restore the database and object tree together, then
-start the service and review maintenance logs for missing-payload errors before
-reopening access. The current check only verifies ready object paths; it does
-not verify checksums or repair missing bytes. A periodic restore test is
-required before relying on a backup. Backup automation and restore verification
-are the next operations slice.
+A single HDD is not a backup. Store encrypted backups on a mounted disk, NAS, or
+offsite destination that is separate from both the PostgreSQL filesystem and
+the HDD storage filesystem. The scripts require Linux or WSL, Docker Compose
+v2, `age`, GNU `tar`, Python 3, `sha256sum`, `realpath`, `stat`, and `flock`.
+Install `age` with the package manager for the backup host. Create an age
+identity and keep its private file offline or in a protected secrets store:
+
+```sh
+umask 077
+mkdir -p "$HOME/.config/my-drive"
+age-keygen -o "$HOME/.config/my-drive/age-identity"
+```
+
+Use `age-keygen -y` to derive the public recipient for backup. Backups encrypt
+the PostgreSQL dump, the `objects`, `uploads`, `trash`, and `previews` tree, the
+Compose file, and the protected environment file. The published bundle contains
+only age-encrypted payloads, a manifest, and SHA-256 checksums. The backup
+script stops the app while capturing the database and storage tree, then starts
+it again only if it was running before the backup.
+
+Create the destination directory after the other filesystem is mounted. The
+script refuses to create a missing destination and checks that its filesystem
+device differs from both configured data roots. A separate filesystem can
+still be in the same building; keep another copy offsite for disaster recovery.
+
+```sh
+sudo mkdir -p /mnt/backup/my-drive
+findmnt --target /mnt/backup/my-drive
+findmnt --target /var/lib/my-drive/postgres
+findmnt --target /srv/my-drive/data
+```
+
+Run backup as root so backup and restore share protected, deployment-scoped
+operation locks:
+
+```sh
+sudo env \
+  COMPOSE_FILE_PATH="$PWD/compose.yaml" \
+  APP_ENV_FILE="$PWD/.env" \
+  BACKUP_ROOT=/mnt/backup/my-drive \
+  AGE_RECIPIENT="$(age-keygen -y "$HOME/.config/my-drive/age-identity")" \
+  ./scripts/backup.sh
+```
+
+The command prints the backup directory and exact Compose project/database
+confirmation value. Preserve the printed path with your recovery notes.
+
+Verify a bundle while its PostgreSQL service is running. Verification checks
+the manifest and every bundle checksum, decrypts every age artifact, validates
+the storage archive, and asks `pg_restore` to inspect the dump. It does not
+stop the app or change the database.
+
+```sh
+COMPOSE_FILE_PATH="$PWD/compose.yaml" APP_ENV_FILE="$PWD/.env" \
+  AGE_IDENTITY="$HOME/.config/my-drive/age-identity" \
+  ./scripts/verify-backup.sh /mnt/backup/my-drive/my-drive-<backup-id>
+```
+
+Restore only after verifying the bundle and confirming the intended target.
+The Compose database service must be running. Restore imports into a temporary
+database and extracts into a new HDD staging directory before it changes the
+live database or storage. It checks each ready database object for a valid key,
+matching file size, and matching stored SHA-256 checksum. Set
+`CONFIRM_RESTORE_DB` to the exact `project/database` value printed by backup or
+reported by Compose:
+
+```sh
+sudo env \
+  COMPOSE_FILE_PATH="$PWD/compose.yaml" \
+  APP_ENV_FILE="$PWD/.env" \
+  AGE_IDENTITY="$HOME/.config/my-drive/age-identity" \
+  CONFIRM_RESTORE_DB=my-drive/mydrive \
+  ./scripts/restore.sh /mnt/backup/my-drive/my-drive-<backup-id>
+```
+
+When testing a backup against a separate staging Compose project, also set
+`CONFIRM_RESTORE_SOURCE` to the exact source shown in the mismatch error, such
+as `my-drive/mydrive as mydrive`. The target confirmation remains required.
+This extra confirmation prevents an accidental cross-project restore while
+allowing an intentional staging restore.
+
+Restore stops the app only if it was running before the operation, and starts
+it again after a successful restore or a confirmed rollback. If database or
+storage rollback cannot be confirmed, it leaves the app stopped and reports
+the recovery paths. A successful restore keeps the previous database under a
+generated `restoreold_*` name and the previous storage directories under
+`.pre-restore-*` on the HDD. Keep both until the restored service and files have
+been checked; remove them only after the recovery window has passed.
+
+Periodically test a recent backup by verifying and restoring it into isolated
+staging PostgreSQL and storage directories. Check representative file hashes,
+login, browsing, downloads, and the readiness endpoint before relying on the
+backup. Do not use production paths for restore drills.
 
 ## Web interface
 
