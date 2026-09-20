@@ -130,6 +130,7 @@ GitHub Actions builds the Docker image for every pull request. Pushes to
 tag; version tags such as `v1.2.3` publish matching image tags. The workflow
 builds `linux/amd64` from the repository's `Dockerfile` and publishes images to
 GitHub Container Registry (GHCR).
+The published GHCR image is public and can be pulled without logging in.
 
 On the Linux host, keep `compose.yaml` and a protected `.env` file. The app
 does not need the source checkout at runtime. Prepare the SSD and mounted HDD
@@ -147,13 +148,6 @@ docker compose pull app
 docker compose up -d
 docker compose ps
 docker compose logs -f app
-```
-
-If the GHCR package is private, authenticate before pulling with a GitHub
-token that has `read:packages` permission:
-
-```sh
-printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u vantanminh --password-stdin
 ```
 
 To build and run the image locally instead, run this from the repository root
