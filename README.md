@@ -123,6 +123,56 @@ attempts lock the share for 15 minutes. GET
 supports the same byte-range behavior as private downloads. Revocation,
 expiry, trashing a shared folder, or reaching `max_downloads` disables access.
 
+## Running a prebuilt Docker image
+
+GitHub Actions builds the Docker image for every pull request. Pushes to
+`master` publish `ghcr.io/vantanminh/my-drive:latest` and a commit-specific
+tag; version tags such as `v1.2.3` publish matching image tags. The workflow
+builds `linux/amd64` from the repository's `Dockerfile` and publishes images to
+GitHub Container Registry (GHCR).
+
+On the Linux host, keep `compose.yaml` and a protected `.env` file. The app
+does not need the source checkout at runtime. Prepare the SSD and mounted HDD
+paths as described below, then set `MY_DRIVE_IMAGE` in `.env` to the published
+tag you want to run. For the latest image from `master`, use:
+
+```dotenv
+MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:latest
+```
+
+Pull and start it:
+
+```sh
+docker compose pull app
+docker compose up -d
+docker compose ps
+docker compose logs -f app
+```
+
+If the GHCR package is private, authenticate before pulling with a GitHub
+token that has `read:packages` permission:
+
+```sh
+printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u vantanminh --password-stdin
+```
+
+To build and run the image locally instead, run this from the repository root
+on the target machine, then set the image name in `.env`:
+
+```sh
+docker build -t my-drive:local .
+```
+
+```dotenv
+MY_DRIVE_IMAGE=my-drive:local
+```
+
+Start it with `docker compose up -d`. Compose uses the local image when it is
+present; it does not need to build from source. You still need the Compose
+file, `.env`, PostgreSQL data directory, and mounted storage directory. The
+image includes the Rust service and built web client, but no secrets or
+persistent data.
+
 ## Single-server Compose deployment
 
 1. Mount the HDD by filesystem UUID at `/srv/my-drive/data` and ensure the
@@ -137,9 +187,11 @@ expiry, trashing a shared folder, or reaching `max_downloads` disables access.
    the device mounted inside the container before storage is initialized.
 4. Set `BOOTSTRAP_OWNER_EMAIL` and a unique `BOOTSTRAP_OWNER_PASSWORD` for the
    first run only. The password is Argon2id-hashed before it reaches PostgreSQL.
-5. Run `docker compose up -d --build`. The app binds to loopback; configure a
-   reverse proxy to terminate TLS. Do not expose the app port directly to the
-   public internet.
+5. Set `MY_DRIVE_IMAGE` in `.env` to the GHCR tag to deploy (or to
+   `my-drive:local` after building locally), then run `docker compose pull app`
+   and `docker compose up -d`. The app binds to loopback; configure a reverse
+   proxy to terminate TLS. Do not expose the app port directly to the public
+   internet.
 
 The Compose file binds PostgreSQL's data directory to the SSD and the payload
 root to the HDD. It uses `create_host_path: false` so Docker does not create a

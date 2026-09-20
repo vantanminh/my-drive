@@ -19,7 +19,8 @@ services:
       retries: 10
 
   app:
-    build: .
+    image: ${MY_DRIVE_IMAGE:-ghcr.io/vantanminh/my-drive:latest}
+    pull_policy: missing
     restart: unless-stopped
     depends_on:
       db:
