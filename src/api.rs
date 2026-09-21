@@ -30,10 +30,15 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/api/auth/me", get(crate::auth::me))
         .route("/api/auth/logout", post(crate::auth::logout))
+        .route(
+            "/api/auth/password",
+            post(crate::auth::change_password).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .merge(crate::drive::router())
         .merge(crate::transfers::router())
         .merge(crate::shares::router())
         .merge(crate::media_admin::router())
+        .merge(crate::admin_accounts::router())
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found))
         .route("/s/{token}", get(serve_frontend_index))

@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 5);
+    assert_eq!(migrator.iter().len(), 6);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -43,4 +43,11 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     assert!(media_indexing.contains("CREATE TABLE media_derivatives"));
     assert!(media_indexing.contains("CREATE TABLE media_index_control"));
     assert!(media_indexing.contains("INSERT INTO media_index_control (singleton) VALUES (TRUE)"));
+
+    let managed_accounts = include_str!("../migrations/0006_managed_accounts.sql");
+    assert!(managed_accounts.contains("managed_by UUID"));
+    assert!(managed_accounts.contains("quota_bytes BIGINT"));
+    assert!(managed_accounts.contains("disabled_at TIMESTAMPTZ"));
+    assert!(managed_accounts.contains("must_change_password BOOLEAN"));
+    assert!(managed_accounts.contains("validate_member_manager"));
 }

@@ -9,6 +9,7 @@ import { formatDate, formatSize, friendlyError } from '../format';
 import type { Entry, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
 import MediaViewer, { mediaKindFor } from './MediaViewer';
+import AccountManagementPanel from './AccountManagementPanel';
 
 type Props = {
   user: User;
@@ -439,6 +440,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [shareTarget, setShareTarget] = useState<Entry | null>(null);
   const [viewer, setViewer] = useState<Entry | null>(null);
   const [mediaIndexOpen, setMediaIndexOpen] = useState(false);
+  const [accountAdminOpen, setAccountAdminOpen] = useState(false);
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
     readSavedUploads().map((saved) => ({
@@ -871,6 +873,19 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           <div className="menu-popover account-popover">
             <span className="account-menu-email">{user.email}</span>
             <div className="menu-divider" />
+            {user.role === 'owner' && (
+              <>
+                <button onClick={(event) => {
+                  event.currentTarget.closest('details')?.removeAttribute('open');
+                  setSection('drive');
+                  setBreadcrumbs([]);
+                  setQuery('');
+                  setMediaIndexOpen(false);
+                  setAccountAdminOpen(true);
+                }}><Users size={15} /> Manage accounts</button>
+                <div className="menu-divider" />
+              </>
+            )}
             <button onClick={logout}><LogOut size={15} /> Sign out</button>
           </div>
         </details>
@@ -918,7 +933,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     aria-expanded={mediaIndexOpen}
                     aria-controls={mediaIndexOpen ? 'media-index-panel' : undefined}
                     aria-label={mediaIndexOpen ? 'Hide image indexing controls' : 'Show image indexing controls'}
-                    onClick={() => setMediaIndexOpen((open) => !open)}
+                    onClick={() => {
+                      setAccountAdminOpen(false);
+                      setMediaIndexOpen((open) => !open);
+                    }}
                   >
                     <Activity size={16} /> <span>{mediaIndexOpen ? 'Hide indexing' : 'Image indexing'}</span>
                   </button>
@@ -948,7 +966,9 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
           {section === 'drive' ? (
             user.role === 'owner' ? (
-              mediaIndexOpen ? <MediaIndexPanel onClose={() => setMediaIndexOpen(false)} /> : null
+              accountAdminOpen ? (
+                <AccountManagementPanel onClose={() => setAccountAdminOpen(false)} />
+              ) : mediaIndexOpen ? <MediaIndexPanel onClose={() => setMediaIndexOpen(false)} /> : null
             ) : null
           ) : null}
 

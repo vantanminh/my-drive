@@ -1,7 +1,9 @@
 import type {
   CreatedShare,
+  CreatedManagedAccount,
   Entry,
   EntryPage,
+  ManagedAccountPage,
   PublicShareView,
   ShareList,
   UploadCreated,
@@ -74,6 +76,7 @@ type RequestOptions = {
   headers?: HeadersInit;
   csrf?: boolean;
   signal?: AbortSignal;
+  cache?: RequestCache;
 };
 
 async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
@@ -92,7 +95,8 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
     body,
     headers,
     credentials: 'same-origin',
-    signal: options.signal
+    signal: options.signal,
+    cache: options.cache
   });
   if (!response.ok) {
     let code = 'request_failed';
@@ -112,6 +116,40 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
 
 export const api = {
   me: (signal?: AbortSignal) => request<User>('/api/auth/me', { signal }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<void>('/api/auth/password', {
+      method: 'POST',
+      json: { current_password: currentPassword, new_password: newPassword },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  managedAccounts: (offset = 0, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: '50' });
+    if (offset) query.set('offset', String(offset));
+    return request<ManagedAccountPage>('/api/admin/accounts?' + query.toString(), {
+      signal,
+      cache: 'no-store'
+    });
+  },
+  createManagedAccount: (email: string, quotaBytes: number) =>
+    request<CreatedManagedAccount>('/api/admin/accounts', {
+      method: 'POST',
+      json: { email, quotaBytes },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  updateManagedAccount: (id: string, update: { quotaBytes?: number; disabled?: boolean }) =>
+    request<void>('/api/admin/accounts/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      json: update,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  resetManagedAccountPassword: (id: string) =>
+    request<{ temporaryPassword: string }>(
+      '/api/admin/accounts/' + encodeURIComponent(id) + '/reset-password',
+      { method: 'POST', csrf: true, cache: 'no-store' }
+    ),
   mediaIndexStatus: (signal?: AbortSignal, beforeId?: number | null) => {
     const query = new URLSearchParams({ limit: '100' });
     if (beforeId != null) query.set('beforeId', String(beforeId));

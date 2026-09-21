@@ -1,3 +1,4 @@
+mod admin_accounts;
 mod api;
 mod auth;
 mod config;
@@ -11,6 +12,8 @@ mod shares;
 mod storage;
 mod transfers;
 
+#[cfg(test)]
+mod admin_accounts_http_tests;
 #[cfg(test)]
 mod auth_http_tests;
 #[cfg(test)]

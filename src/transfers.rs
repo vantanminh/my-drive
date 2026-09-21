@@ -49,6 +49,8 @@ pub(crate) enum TransferError {
     UnsupportedPreview,
     #[error("resource not found")]
     NotFound,
+    #[error("authentication is no longer valid")]
+    AuthenticationRequired,
     #[error("request conflicts with current state")]
     Conflict,
     #[error("upload offset does not match")]
@@ -86,6 +88,12 @@ impl IntoResponse for TransferError {
                 None,
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", None, None),
+            Self::AuthenticationRequired => (
+                StatusCode::UNAUTHORIZED,
+                "authentication_required",
+                None,
+                None,
+            ),
             Self::Conflict => (StatusCode::CONFLICT, "conflict", None, None),
             Self::OffsetConflict(offset) => {
                 (StatusCode::CONFLICT, "offset_mismatch", Some(offset), None)
@@ -239,6 +247,20 @@ struct ImageDerivative {
     checksum_sha256: String,
 }
 
+#[derive(FromRow)]
+struct AccountUploadQuota {
+    role: String,
+    quota_bytes: Option<i64>,
+    enabled: bool,
+}
+
+#[derive(FromRow)]
+struct QuotaUsage {
+    used_bytes: i64,
+    reserved_bytes: i64,
+    pending_bytes: i64,
+}
+
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/uploads", post(create_upload))
@@ -290,38 +312,59 @@ async fn create_upload(
         .execute(&mut *transaction)
         .await
         .map_err(map_database_error)?;
-    let used_bytes: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(version.size_bytes), 0)::BIGINT \
-           FROM drive_entries AS entry \
-           JOIN files AS file ON file.id = entry.id \
-           LEFT JOIN file_versions AS version ON version.id = file.current_version_id \
-          WHERE entry.owner_id = $1",
+    let account = sqlx::query_as::<_, AccountUploadQuota>(
+        "SELECT role, quota_bytes, disabled_at IS NULL AS enabled FROM users WHERE id = $1",
+    )
+    .bind(user.id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(TransferError::AuthenticationRequired)?;
+    if !account.enabled {
+        return Err(TransferError::AuthenticationRequired);
+    }
+    let quota_limit = if account.role == "member" {
+        u64::try_from(account.quota_bytes.ok_or(TransferError::Inconsistent)?)
+            .map_err(|_| TransferError::Inconsistent)?
+    } else {
+        state.transfer_settings.owner_quota_bytes
+    };
+    let usage = sqlx::query_as::<_, QuotaUsage>(
+        "SELECT \
+            (SELECT COALESCE(SUM(version.size_bytes), 0)::BIGINT \
+               FROM drive_entries AS entry \
+               JOIN files AS file ON file.id = entry.id \
+               JOIN file_versions AS version ON version.id = file.current_version_id \
+               JOIN storage_objects AS object ON object.id = version.storage_object_id \
+                    AND object.state = 'ready' \
+              WHERE entry.owner_id = $1) AS used_bytes, \
+            (SELECT COALESCE(SUM(expected_size), 0)::BIGINT \
+               FROM upload_sessions \
+              WHERE owner_id = $1 \
+                AND (state = 'finalizing' OR (state = 'active' AND expires_at > now()))) \
+                AS reserved_bytes, \
+            (SELECT COALESCE(SUM(expected_size - received_size), 0)::BIGINT \
+               FROM upload_sessions \
+              WHERE owner_id = $1 \
+                AND (state = 'finalizing' OR (state = 'active' AND expires_at > now()))) \
+                AS pending_bytes",
     )
     .bind(user.id)
     .fetch_one(&mut *transaction)
     .await
     .map_err(map_database_error)?;
-    let reserved_bytes: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(expected_size - received_size), 0)::BIGINT \
-           FROM upload_sessions \
-          WHERE owner_id = $1 AND state IN ('active', 'finalizing') AND expires_at > now()",
-    )
-    .bind(user.id)
-    .fetch_one(&mut *transaction)
-    .await
-    .map_err(map_database_error)?;
-    let required_reservation = u64::try_from(used_bytes.max(0))
+    let required_reservation = u64::try_from(usage.used_bytes.max(0))
         .unwrap_or(u64::MAX)
-        .checked_add(u64::try_from(reserved_bytes.max(0)).unwrap_or(u64::MAX))
+        .checked_add(u64::try_from(usage.reserved_bytes.max(0)).unwrap_or(u64::MAX))
         .and_then(|value| value.checked_add(request.expected_size))
         .ok_or(TransferError::QuotaExceeded)?;
-    if required_reservation > state.transfer_settings.owner_quota_bytes {
+    if required_reservation > quota_limit {
         return Err(TransferError::QuotaExceeded);
     }
     state
         .storage
         .check_write_capacity(
-            u64::try_from(reserved_bytes.max(0))
+            u64::try_from(usage.pending_bytes.max(0))
                 .unwrap_or(u64::MAX)
                 .checked_add(request.expected_size)
                 .ok_or(TransferError::PayloadTooLarge)?,

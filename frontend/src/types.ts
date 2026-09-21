@@ -2,6 +2,27 @@ export type User = {
   id: string;
   email: string;
   role: string;
+  must_change_password: boolean;
+};
+
+export type ManagedAccount = {
+  id: string;
+  email: string;
+  quotaBytes: number;
+  usedBytes: number;
+  reservedBytes: number;
+  disabledAt: string | null;
+  createdAt: string;
+};
+
+export type ManagedAccountPage = {
+  accounts: ManagedAccount[];
+  nextOffset: number | null;
+};
+
+export type CreatedManagedAccount = {
+  account: ManagedAccount;
+  temporaryPassword: string;
 };
 
 export type Entry = {

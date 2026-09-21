@@ -31,6 +31,7 @@ const LOGIN_FAILURE_LIMIT: usize = 10;
 const LOGIN_FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MAX_LOGIN_IDENTITIES: usize = 10_000;
 const MAX_LOGIN_PASSWORD_BYTES: usize = 1024;
+const MIN_NEW_PASSWORD_CHARS: usize = 12;
 const SESSION_TOKEN_BYTES: usize = 32;
 const CSRF_TOKEN_BYTES: usize = 32;
 
@@ -144,6 +145,7 @@ pub struct AuthenticatedUser {
     pub session_id: Uuid,
     pub email: String,
     pub role: String,
+    pub must_change_password: bool,
     csrf_token_digest: Vec<u8>,
 }
 
@@ -153,6 +155,7 @@ struct LoginUser {
     email: String,
     role: String,
     password_hash: String,
+    must_change_password: bool,
 }
 
 #[derive(FromRow)]
@@ -161,6 +164,7 @@ struct SessionUser {
     id: Uuid,
     email: String,
     role: String,
+    must_change_password: bool,
     csrf_token_digest: Vec<u8>,
 }
 
@@ -171,11 +175,19 @@ pub struct LoginRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordChangeRequest {
+    current_password: String,
+    new_password: String,
+}
+
 #[derive(Serialize)]
 struct UserResponse {
     id: Uuid,
     email: String,
     role: String,
+    must_change_password: bool,
 }
 
 #[derive(Serialize)]
@@ -202,7 +214,8 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
     }
 
     let user = match sqlx::query_as::<_, LoginUser>(
-        "SELECT id, email, role, password_hash FROM users WHERE lower(email) = $1",
+        "SELECT id, email, role, password_hash, must_change_password \
+           FROM users WHERE lower(email) = $1 AND disabled_at IS NULL",
     )
     .bind(&email)
     .fetch_optional(&state.pool)
@@ -283,6 +296,23 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
             return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
         }
     };
+    let account_password: Option<String> = match sqlx::query_scalar(
+        "SELECT password_hash FROM users \
+          WHERE id = $1 AND disabled_at IS NULL FOR SHARE",
+    )
+    .bind(user.id)
+    .fetch_optional(&mut *transaction)
+    .await
+    {
+        Ok(password_hash) => password_hash,
+        Err(error) => {
+            tracing::error!(error = %error, "could not revalidate account before session creation");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+    if account_password.as_deref() != Some(user.password_hash.as_str()) {
+        return api_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+    }
     let insert_session = sqlx::query(
         "INSERT INTO sessions (id, user_id, token_digest, csrf_token_digest, expires_at) VALUES ($1, $2, $3, $4, $5)",
     )
@@ -345,6 +375,128 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
 
 pub async fn me(State(_state): State<AppState>, user: AuthenticatedUser) -> Response {
     let mut response = (StatusCode::OK, Json(public_user_from_auth(&user))).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(payload): Json<PasswordChangeRequest>,
+) -> Response {
+    if !require_csrf(&headers, &user, state.auth_settings) {
+        return api_error(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if payload.current_password.len() > MAX_LOGIN_PASSWORD_BYTES
+        || payload.new_password.len() > MAX_LOGIN_PASSWORD_BYTES
+        || payload.new_password.chars().count() < MIN_NEW_PASSWORD_CHARS
+        || payload.current_password == payload.new_password
+    {
+        return api_error(StatusCode::BAD_REQUEST, "password_requirements");
+    }
+
+    let current_hash = match sqlx::query_scalar::<_, String>(
+        "SELECT password_hash FROM users WHERE id = $1 AND disabled_at IS NULL",
+    )
+    .bind(user.id)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(hash)) => hash,
+        Ok(None) => return api_error(StatusCode::UNAUTHORIZED, "authentication_required"),
+        Err(error) => {
+            tracing::error!(error = %error, "password change account lookup failed");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+    let encoded_hash = current_hash.clone();
+    let current_password = payload.current_password;
+    let current_password_valid = match tokio::task::spawn_blocking(move || {
+        verify_login_password(Some(encoded_hash), &current_password)
+    })
+    .await
+    {
+        Ok(valid) => valid,
+        Err(error) => {
+            tracing::error!(error = %error, "password verification worker failed");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+    if !current_password_valid {
+        return api_error(StatusCode::UNAUTHORIZED, "current_password_incorrect");
+    }
+
+    let password_to_hash = payload.new_password;
+    let new_hash =
+        match tokio::task::spawn_blocking(move || super::password_hash(&password_to_hash)).await {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(error)) => {
+                tracing::error!(error = %error, "new password hashing failed");
+                return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "password hashing worker failed");
+                return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+            }
+        };
+
+    let mut transaction = match state.pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::error!(error = %error, "could not begin password change transaction");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+    let changed = match sqlx::query(
+        "UPDATE users SET password_hash = $1, must_change_password = FALSE, updated_at = now() \
+          WHERE id = $2 AND password_hash = $3 AND disabled_at IS NULL",
+    )
+    .bind(new_hash)
+    .bind(user.id)
+    .bind(&current_hash)
+    .execute(&mut *transaction)
+    .await
+    {
+        Ok(result) => result.rows_affected() == 1,
+        Err(error) => {
+            tracing::error!(error = %error, "could not update account password");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+    if !changed {
+        return api_error(StatusCode::CONFLICT, "credentials_changed");
+    }
+    if let Err(error) = sqlx::query(
+        "UPDATE sessions SET revoked_at = now() \
+          WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL",
+    )
+    .bind(user.id)
+    .bind(user.session_id)
+    .execute(&mut *transaction)
+    .await
+    {
+        tracing::error!(error = %error, "could not revoke old account sessions");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+    }
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id) VALUES ('password_changed', $1)",
+    )
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await
+    {
+        tracing::error!(error = %error, "could not record password change audit event");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+    }
+    if let Err(error) = transaction.commit().await {
+        tracing::error!(error = %error, "could not commit password change");
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+    }
+
+    let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -471,20 +623,36 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         }
         let token_digest = Sha256::digest(raw_token).to_vec();
         let session = sqlx::query_as::<_, SessionUser>(
-            "SELECT sessions.id AS session_id, users.id, users.email, users.role, sessions.csrf_token_digest FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token_digest = $1 AND sessions.revoked_at IS NULL AND sessions.expires_at > now()",
+            "SELECT sessions.id AS session_id, users.id, users.email, users.role, \
+                    users.must_change_password, sessions.csrf_token_digest \
+               FROM sessions JOIN users ON users.id = sessions.user_id \
+              WHERE sessions.token_digest = $1 AND sessions.revoked_at IS NULL \
+                AND sessions.expires_at > now() AND users.disabled_at IS NULL",
         )
         .bind(token_digest)
         .fetch_optional(&state.pool)
         .await;
 
         match session {
-            Ok(Some(session)) => Ok(Self {
-                id: session.id,
-                session_id: session.session_id,
-                email: session.email,
-                role: session.role,
-                csrf_token_digest: session.csrf_token_digest,
-            }),
+            Ok(Some(session)) => {
+                let user = Self {
+                    id: session.id,
+                    session_id: session.session_id,
+                    email: session.email,
+                    role: session.role,
+                    must_change_password: session.must_change_password,
+                    csrf_token_digest: session.csrf_token_digest,
+                };
+                let allowed_while_changing_password = matches!(
+                    parts.uri.path(),
+                    "/api/auth/me" | "/api/auth/password" | "/api/auth/logout"
+                );
+                if user.must_change_password && !allowed_while_changing_password {
+                    Err(api_error(StatusCode::FORBIDDEN, "password_change_required"))
+                } else {
+                    Ok(user)
+                }
+            }
             Ok(None) => Err(api_error(
                 StatusCode::UNAUTHORIZED,
                 "authentication_required",
@@ -505,6 +673,7 @@ fn public_user(user: &LoginUser) -> UserResponse {
         id: user.id,
         email: user.email.clone(),
         role: user.role.clone(),
+        must_change_password: user.must_change_password,
     }
 }
 
@@ -513,7 +682,12 @@ fn public_user_from_auth(user: &AuthenticatedUser) -> UserResponse {
         id: user.id,
         email: user.email.clone(),
         role: user.role.clone(),
+        must_change_password: user.must_change_password,
     }
+}
+
+pub(crate) fn new_temporary_password() -> anyhow::Result<String> {
+    secure_token(CSRF_TOKEN_BYTES).map(|(_, encoded)| encoded)
 }
 
 fn verify_login_password(encoded_hash: Option<String>, password: &str) -> bool {
@@ -674,6 +848,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             email: "owner@example.test".to_owned(),
             role: "owner".to_owned(),
+            must_change_password: false,
             csrf_token_digest: Sha256::digest(raw_token).to_vec(),
         };
         let settings = AuthSettings {

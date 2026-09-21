@@ -29,6 +29,13 @@ export function friendlyError(error: unknown): string {
   if (error.status === 403 && error.code === 'csrf_failed') return 'Your session token expired. Sign in again to continue.';
   const messages: Record<string, string> = {
     invalid_credentials: 'That email and password do not match.',
+    current_password_incorrect: 'The current password is not correct.',
+    credentials_changed: 'Your account changed during this request. Sign in again and retry.',
+    email_exists: 'An account with this email address already exists.',
+    owner_required: 'Only the owner can manage accounts.',
+    quota_below_current_usage: 'The quota cannot be lower than the account’s current storage and active uploads.',
+    password_change_required: 'Change your temporary password before using the drive.',
+    password_requirements: 'Choose a different password with at least 12 characters.',
     too_many_attempts: 'Too many attempts. Wait a little before trying again.',
     invalid_request: 'Check the information and try again.',
     conflict: 'An item with that name already exists in this location.',
