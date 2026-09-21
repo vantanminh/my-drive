@@ -527,6 +527,7 @@ fn config(storage_root: &Path) -> Config {
         require_mount: false,
         require_device_match: false,
         expected_device: None,
+        media_preview: None,
         max_file_size: 1024 * 1024,
         owner_quota_bytes: 1024 * 1024,
         min_free_bytes: 0,
@@ -545,6 +546,7 @@ fn make_app(pool: PgPool, storage_root: &Path) -> Router {
     api::router(AppState {
         pool,
         storage,
+        media_preview: None,
         auth_settings: AuthSettings {
             cookie_secure: false,
             session_ttl_seconds: 3600,

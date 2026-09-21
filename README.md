@@ -20,22 +20,26 @@ missing payloads while preserving recoverable database state.
 - Mount the HDD at a stable path such as `/srv/my-drive/data` and set
   `STORAGE_ROOT` to that mount.
 - Never point the reverse proxy at `STORAGE_ROOT`; it is not a web root.
-- The app checks the expected mount before creating its `objects`, `uploads`,
-  `trash`, and `previews` directories. If a required mount is absent, startup
-  and readiness fail instead of creating payload directories on the SSD.
+- The app checks the expected HDD mount before creating its `objects`,
+  `uploads`, and `trash` directories. Keep generated preview files in the
+  separate SSD cache mount configured with `MEDIA_PREVIEW_ROOT`; if that mount
+  is unavailable, preview-cache writes stay disabled instead of falling back
+  to the HDD or another filesystem.
 - Compose requires `STORAGE_EXPECTED_DEVICE` to match the mounted filesystem's
   `major:minor` device number. This catches a bind-mounted fallback directory
-  when the HDD did not mount.
+  when the HDD did not mount. It also checks the preview SSD against
+  `MEDIA_PREVIEW_EXPECTED_DEVICE` and rejects using the HDD device for both.
 
 ## Development
 
 Install Rust stable and PostgreSQL 17 or newer. Copy `.env.example` to `.env`,
 set a local `DATABASE_URL` and absolute `STORAGE_ROOT`, then use the explicit
 development-only `STORAGE_REQUIRE_MOUNT=false` setting. This setting must not be
-used for a production service. Set both owner bootstrap variables to create
-the first owner; the password must be at least 16 bytes. Remove those variables
-after the first successful bootstrap. Install Node.js 22 or newer for the web
-client.
+used for a production service. Set `MEDIA_PREVIEW_ROOT` to a separate local
+cache directory and `MEDIA_PREVIEW_REQUIRE_MOUNT=false` when developing with
+preview storage. Set both owner bootstrap variables to create the first owner;
+the password must be at least 16 bytes. Remove those variables after the first
+successful bootstrap. Install Node.js 22 or newer for the web client.
 
 ```powershell
 cargo run
@@ -163,22 +167,28 @@ MY_DRIVE_IMAGE=my-drive:local
 
 Start it with `docker compose up -d`. Compose uses the local image when it is
 present; it does not need to build from source. You still need the Compose
-file, `.env`, PostgreSQL data directory, and mounted storage directory. The
-image includes the Rust service and built web client, but no secrets or
-persistent data.
+file, `.env`, PostgreSQL data directory, HDD payload directory, and SSD preview
+cache directory. The image includes the Rust service and built web client, but
+no secrets or persistent data.
 
 ## Single-server Compose deployment
 
 1. Mount the HDD by filesystem UUID at `/srv/my-drive/data` and ensure the
-   directory is writable by UID 10001. Mount the SSD-backed PostgreSQL directory
-   separately, for example `/var/lib/my-drive/postgres`.
+   directory is writable by UID 10001. Keep PostgreSQL and generated preview
+   cache on the SSD, for example `/var/lib/my-drive/postgres` and
+   `/var/lib/my-drive/previews`. The SSD preview directory must be on a
+   different filesystem from the HDD storage.
 2. Set the restricted deployment environment values shown in `.env.example`.
    Generate `POSTGRES_PASSWORD` with a password manager or
    `openssl rand -hex 32`. Set `STORAGE_DATA_HDD` to the mounted HDD path and
-   `POSTGRES_DATA_SSD` to the SSD path.
+   `POSTGRES_DATA_SSD` and `MEDIA_PREVIEW_DATA_SSD` to their SSD paths.
 3. Set `STORAGE_EXPECTED_DEVICE` to the output of
    `findmnt -n -o MAJ:MIN --target /srv/my-drive/data`. Compose compares it with
-   the device mounted inside the container before storage is initialized.
+   the device mounted inside the container before storage is initialized. Set
+   `MEDIA_PREVIEW_EXPECTED_DEVICE` from
+   `findmnt -n -o MAJ:MIN --target "$MEDIA_PREVIEW_DATA_SSD"`. Confirm the two
+   reported device IDs differ. Both HDD and preview SSD device checks are
+   required when preview storage is configured.
 4. Set `BOOTSTRAP_OWNER_EMAIL` and a unique `BOOTSTRAP_OWNER_PASSWORD` for the
    first run only. The password is Argon2id-hashed before it reaches PostgreSQL.
 5. Set `MY_DRIVE_IMAGE` in `.env` to the GHCR tag to deploy (or to
@@ -187,11 +197,13 @@ persistent data.
    proxy to terminate TLS. Do not expose the app port directly to the public
    internet.
 
-The Compose file binds PostgreSQL's data directory to the SSD and the payload
-root to the HDD. It uses `create_host_path: false` so Docker does not create a
-missing bind source on the root filesystem. For a native systemd installation,
-set `STORAGE_REQUIRE_MOUNT=true`, `STORAGE_EXPECTED_MOUNT`, and optionally
-`STORAGE_EXPECTED_DEVICE` in the restricted environment file.
+The Compose file binds PostgreSQL and preview cache directories to the SSD and
+the original payload root to the HDD. It uses `create_host_path: false` so
+Docker does not create a missing bind source on the root filesystem. Preview
+files are rebuildable cache data; the source files remain on the HDD. For a
+native systemd installation, configure separate `STORAGE_*` and
+`MEDIA_PREVIEW_*` roots, mount points, and expected device IDs in the restricted
+environment file. Keep device matching enabled for both mounts.
 
 ## Encrypted backup and restore
 

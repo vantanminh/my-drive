@@ -55,6 +55,7 @@ async fn browser_login_csrf_and_session_revocation_flow() {
         require_mount: false,
         require_device_match: false,
         expected_device: None,
+        media_preview: None,
         max_file_size: 1024,
         owner_quota_bytes: 4096,
         min_free_bytes: 0,
@@ -69,6 +70,7 @@ async fn browser_login_csrf_and_session_revocation_flow() {
     let app = api::router(AppState {
         pool: pool.clone(),
         storage,
+        media_preview: None,
         auth_settings: AuthSettings {
             cookie_secure: true,
             session_ttl_seconds: 3600,

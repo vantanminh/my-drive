@@ -24,7 +24,7 @@ use anyhow::Context;
 use tokio::net::TcpListener;
 use tracing::info;
 
-pub use config::{BootstrapOwner, Config, ConfigError};
+pub use config::{BootstrapOwner, Config, ConfigError, MediaPreviewConfig};
 
 pub async fn run() -> anyhow::Result<()> {
     let config = Config::from_env().context("load configuration")?;
@@ -32,6 +32,20 @@ pub async fn run() -> anyhow::Result<()> {
     // Validate and initialize the HDD root before connecting to PostgreSQL.
     // This prevents a missing mount from creating directories on the SSD.
     let storage = storage::LocalStorage::initialize(&config).context("initialize HDD storage")?;
+    let media_preview = config
+        .media_preview
+        .as_ref()
+        .map(storage::PreviewStorage::new);
+    if let Some(preview_storage) = &media_preview {
+        if let Err(error) = preview_storage.prepare() {
+            tracing::warn!(
+                error = %error,
+                "SSD media preview cache is unavailable; preview writes are disabled"
+            );
+        }
+    } else {
+        tracing::info!("SSD media preview cache is not configured; preview indexing is disabled");
+    }
     let pool = db::connect(&config.database_url)
         .await
         .context("connect to PostgreSQL")?;
@@ -64,6 +78,7 @@ pub async fn run() -> anyhow::Result<()> {
     let state = health::AppState {
         pool,
         storage,
+        media_preview,
         auth_settings,
         transfer_settings,
         login_rate_limiter: auth::LoginRateLimiter::default(),

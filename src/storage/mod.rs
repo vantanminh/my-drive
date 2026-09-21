@@ -1,4 +1,5 @@
 mod mount;
+mod preview;
 
 use std::{fs, io, path::PathBuf};
 
@@ -8,6 +9,8 @@ use tokio::fs as tokio_fs;
 use uuid::Uuid;
 
 use crate::Config;
+
+pub use preview::PreviewStorage;
 
 #[derive(Clone)]
 pub struct LocalStorage {
@@ -29,7 +32,7 @@ pub enum StorageError {
     #[error("configured storage path is not mounted")]
     MountMissing,
     #[cfg(target_os = "linux")]
-    #[error("storage device does not match STORAGE_EXPECTED_DEVICE")]
+    #[error("storage device does not match its configured expected device")]
     DeviceMismatch,
     #[cfg(not(target_os = "linux"))]
     #[error("mount verification is supported only on Linux")]
@@ -68,7 +71,7 @@ impl LocalStorage {
         }
         storage.root = fs::canonicalize(&storage.root)?;
 
-        for child in ["objects", "uploads", "trash", "previews"] {
+        for child in ["objects", "uploads", "trash"] {
             fs::create_dir_all(storage.root.join(child))?;
         }
         sync_directory(&storage.root)?;
@@ -373,6 +376,7 @@ mod tests {
             require_mount,
             require_device_match: false,
             expected_device: None,
+            media_preview: None,
             max_file_size: 1024,
             owner_quota_bytes: 4096,
             min_free_bytes: 0,
@@ -403,9 +407,10 @@ mod tests {
 
         let storage = LocalStorage::initialize(&config(root.clone(), false)).unwrap();
         assert_eq!(storage.root, fs::canonicalize(&root).unwrap());
-        for child in ["objects", "uploads", "trash", "previews"] {
+        for child in ["objects", "uploads", "trash"] {
             assert!(root.join(child).is_dir());
         }
+        assert!(!root.join("previews").exists());
     }
 
     #[test]

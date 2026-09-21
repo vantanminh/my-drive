@@ -33,6 +33,11 @@ services:
       STORAGE_REQUIRE_MOUNT: "true"
       STORAGE_REQUIRE_DEVICE_MATCH: "true"
       STORAGE_EXPECTED_DEVICE: ${STORAGE_EXPECTED_DEVICE:?Set STORAGE_EXPECTED_DEVICE from findmnt}
+      MEDIA_PREVIEW_ROOT: /srv/my-drive/previews
+      MEDIA_PREVIEW_EXPECTED_MOUNT: /srv/my-drive/previews
+      MEDIA_PREVIEW_REQUIRE_MOUNT: "true"
+      MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH: "true"
+      MEDIA_PREVIEW_EXPECTED_DEVICE: ${MEDIA_PREVIEW_EXPECTED_DEVICE:?Set MEDIA_PREVIEW_EXPECTED_DEVICE from findmnt}
       MAX_FILE_SIZE: ${MAX_FILE_SIZE:-5368709120}
       OWNER_QUOTA_BYTES: ${OWNER_QUOTA_BYTES:-107374182400}
       MIN_FREE_BYTES: ${MIN_FREE_BYTES:-5368709120}
@@ -48,6 +53,11 @@ services:
       - type: bind
         source: ${STORAGE_DATA_HDD:?Set STORAGE_DATA_HDD to the mounted HDD data root}
         target: /srv/my-drive/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MEDIA_PREVIEW_DATA_SSD:?Set MEDIA_PREVIEW_DATA_SSD to an SSD directory}
+        target: /srv/my-drive/previews
         bind:
           create_host_path: false
     ports:

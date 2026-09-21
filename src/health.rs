@@ -4,13 +4,14 @@ use sqlx::PgPool;
 
 use crate::{
     auth::{AuthSettings, LoginRateLimiter},
-    storage::LocalStorage,
+    storage::{LocalStorage, PreviewStorage},
 };
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub storage: LocalStorage,
+    pub media_preview: Option<PreviewStorage>,
     pub auth_settings: AuthSettings,
     pub transfer_settings: TransferSettings,
     pub login_rate_limiter: LoginRateLimiter,
@@ -35,6 +36,14 @@ pub async fn live() -> impl IntoResponse {
 pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     let database_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
     let storage = state.storage.health();
+    if let Some(preview_storage) = &state.media_preview
+        && let Err(error) = preview_storage.health()
+    {
+        tracing::warn!(
+            error = %error,
+            "media preview cache unavailable; indexing and preview delivery are degraded"
+        );
+    }
     match (database_ok, storage) {
         (true, Ok(())) => (StatusCode::OK, Json(HealthResponse { status: "ready" })),
         (false, _) => {

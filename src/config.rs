@@ -10,6 +10,7 @@ pub struct Config {
     pub require_mount: bool,
     pub require_device_match: bool,
     pub expected_device: Option<String>,
+    pub media_preview: Option<MediaPreviewConfig>,
     pub max_file_size: u64,
     pub owner_quota_bytes: u64,
     pub min_free_bytes: u64,
@@ -19,6 +20,15 @@ pub struct Config {
     pub session_ttl_seconds: u64,
     pub bootstrap_owner: Option<BootstrapOwner>,
     pub cookie_secure: bool,
+}
+
+#[derive(Clone)]
+pub struct MediaPreviewConfig {
+    pub root: PathBuf,
+    pub expected_mount: PathBuf,
+    pub require_mount: bool,
+    pub require_device_match: bool,
+    pub expected_device: Option<String>,
 }
 
 pub struct BootstrapOwner {
@@ -36,6 +46,10 @@ pub enum ConfigError {
     PartialBootstrapCredentials,
     #[error("STORAGE_EXPECTED_DEVICE is required when STORAGE_REQUIRE_DEVICE_MATCH is true")]
     MissingExpectedDevice,
+    #[error(
+        "MEDIA_PREVIEW_EXPECTED_DEVICE is required when preview device verification is enabled"
+    )]
+    MissingMediaPreviewDevice,
 }
 
 impl Config {
@@ -76,6 +90,80 @@ impl Config {
             return Err(ConfigError::Invalid("STORAGE_EXPECTED_DEVICE"));
         }
 
+        let media_preview = match nonempty(vars, "MEDIA_PREVIEW_ROOT") {
+            Some(value) => {
+                let root = path_from_value(value, "MEDIA_PREVIEW_ROOT")?;
+                let preview_expected_mount = match nonempty(vars, "MEDIA_PREVIEW_EXPECTED_MOUNT") {
+                    Some(value) => path_from_value(value, "MEDIA_PREVIEW_EXPECTED_MOUNT")?,
+                    None => root.clone(),
+                };
+                let preview_require_mount = bool_value(vars, "MEDIA_PREVIEW_REQUIRE_MOUNT", true)?;
+                let preview_require_device_match =
+                    bool_value(vars, "MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH", true)?;
+                let media_preview_device =
+                    nonempty(vars, "MEDIA_PREVIEW_EXPECTED_DEVICE").map(str::to_owned);
+
+                if preview_require_device_match && !preview_require_mount {
+                    return Err(ConfigError::Invalid("MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH"));
+                }
+                if preview_require_device_match && media_preview_device.is_none() {
+                    return Err(ConfigError::MissingMediaPreviewDevice);
+                }
+                if media_preview_device
+                    .as_deref()
+                    .is_some_and(|device| !valid_device_id(device))
+                {
+                    return Err(ConfigError::Invalid("MEDIA_PREVIEW_EXPECTED_DEVICE"));
+                }
+                if (require_mount || require_device_match) && !preview_require_mount {
+                    return Err(ConfigError::Invalid("MEDIA_PREVIEW_REQUIRE_MOUNT"));
+                }
+                if (require_mount || require_device_match) && !preview_require_device_match {
+                    return Err(ConfigError::Invalid("MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH"));
+                }
+                if preview_require_device_match && !require_device_match {
+                    return Err(ConfigError::Invalid("STORAGE_REQUIRE_DEVICE_MATCH"));
+                }
+
+                if root == storage_root
+                    || root.starts_with(&storage_root)
+                    || storage_root.starts_with(&root)
+                    || preview_expected_mount == expected_mount
+                    || preview_expected_mount.starts_with(&expected_mount)
+                    || expected_mount.starts_with(&preview_expected_mount)
+                {
+                    return Err(ConfigError::Invalid("MEDIA_PREVIEW_ROOT"));
+                }
+                if expected_device.is_some()
+                    && media_preview_device.as_deref() == expected_device.as_deref()
+                {
+                    return Err(ConfigError::Invalid("MEDIA_PREVIEW_EXPECTED_DEVICE"));
+                }
+
+                Some(MediaPreviewConfig {
+                    root,
+                    expected_mount: preview_expected_mount,
+                    require_mount: preview_require_mount,
+                    require_device_match: preview_require_device_match,
+                    expected_device: media_preview_device,
+                })
+            }
+            None => {
+                if [
+                    "MEDIA_PREVIEW_EXPECTED_MOUNT",
+                    "MEDIA_PREVIEW_REQUIRE_MOUNT",
+                    "MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH",
+                    "MEDIA_PREVIEW_EXPECTED_DEVICE",
+                ]
+                .iter()
+                .any(|name| nonempty(vars, name).is_some())
+                {
+                    return Err(ConfigError::Invalid("MEDIA_PREVIEW_ROOT"));
+                }
+                None
+            }
+        };
+
         let bootstrap_email = nonempty(vars, "BOOTSTRAP_OWNER_EMAIL");
         let bootstrap_password = nonempty(vars, "BOOTSTRAP_OWNER_PASSWORD");
         let bootstrap_owner = match (bootstrap_email, bootstrap_password) {
@@ -114,6 +202,7 @@ impl Config {
             require_mount,
             require_device_match,
             expected_device,
+            media_preview,
             max_file_size: u64_value(vars, "MAX_FILE_SIZE", 5 * 1024 * 1024 * 1024)?,
             owner_quota_bytes: u64_value(vars, "OWNER_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)?,
             min_free_bytes: u64_value(vars, "MIN_FREE_BYTES", 5 * 1024 * 1024 * 1024)?,
@@ -255,6 +344,102 @@ mod tests {
         assert!(matches!(
             Config::from_vars(&vars),
             Err(ConfigError::Invalid("STORAGE_EXPECTED_DEVICE"))
+        ));
+    }
+
+    #[test]
+    fn media_preview_storage_is_optional_for_existing_local_configurations() {
+        let config = Config::from_vars(&base_vars()).unwrap();
+        assert!(config.media_preview.is_none());
+    }
+
+    #[test]
+    fn configured_media_preview_requires_a_mount_and_device_identity() {
+        let mut vars = base_vars();
+        vars.insert(
+            "MEDIA_PREVIEW_ROOT".to_owned(),
+            "D:/my-drive-previews".to_owned(),
+        );
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::MissingMediaPreviewDevice)
+        ));
+
+        vars.insert("MEDIA_PREVIEW_EXPECTED_DEVICE".to_owned(), "8:2".to_owned());
+        vars.insert("STORAGE_REQUIRE_DEVICE_MATCH".to_owned(), "true".to_owned());
+        vars.insert("STORAGE_EXPECTED_DEVICE".to_owned(), "8:1".to_owned());
+        assert!(Config::from_vars(&vars).unwrap().media_preview.is_some());
+    }
+
+    #[test]
+    fn preview_device_verification_requires_hdd_device_verification_too() {
+        let mut vars = base_vars();
+        vars.insert(
+            "MEDIA_PREVIEW_ROOT".to_owned(),
+            "D:/my-drive-previews".to_owned(),
+        );
+        vars.insert("MEDIA_PREVIEW_EXPECTED_DEVICE".to_owned(), "8:2".to_owned());
+
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("STORAGE_REQUIRE_DEVICE_MATCH"))
+        ));
+    }
+
+    #[test]
+    fn mounted_production_preview_storage_cannot_disable_device_verification() {
+        let mut vars = base_vars();
+        vars.insert("STORAGE_REQUIRE_DEVICE_MATCH".to_owned(), "true".to_owned());
+        vars.insert("STORAGE_EXPECTED_DEVICE".to_owned(), "8:1".to_owned());
+        vars.insert(
+            "MEDIA_PREVIEW_ROOT".to_owned(),
+            "D:/my-drive-previews".to_owned(),
+        );
+        vars.insert(
+            "MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH".to_owned(),
+            "false".to_owned(),
+        );
+
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH"))
+        ));
+    }
+
+    #[test]
+    fn media_preview_storage_cannot_overlap_the_original_hdd_tree() {
+        let mut vars = base_vars();
+        vars.insert("STORAGE_REQUIRE_MOUNT".to_owned(), "false".to_owned());
+        vars.insert("MEDIA_PREVIEW_REQUIRE_MOUNT".to_owned(), "false".to_owned());
+        vars.insert(
+            "MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH".to_owned(),
+            "false".to_owned(),
+        );
+        vars.insert(
+            "MEDIA_PREVIEW_ROOT".to_owned(),
+            "C:/my-drive-data/previews".to_owned(),
+        );
+
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("MEDIA_PREVIEW_ROOT"))
+        ));
+    }
+
+    #[test]
+    fn media_preview_storage_cannot_share_the_hdd_device() {
+        let mut vars = base_vars();
+        vars.insert("STORAGE_REQUIRE_DEVICE_MATCH".to_owned(), "true".to_owned());
+        vars.insert("STORAGE_EXPECTED_DEVICE".to_owned(), "8:1".to_owned());
+        vars.insert(
+            "MEDIA_PREVIEW_ROOT".to_owned(),
+            "D:/my-drive-previews".to_owned(),
+        );
+        vars.insert("MEDIA_PREVIEW_EXPECTED_DEVICE".to_owned(), "8:1".to_owned());
+
+        assert!(matches!(
+            Config::from_vars(&vars),
+            Err(ConfigError::Invalid("MEDIA_PREVIEW_EXPECTED_DEVICE"))
         ));
     }
 

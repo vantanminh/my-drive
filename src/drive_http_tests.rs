@@ -365,6 +365,7 @@ fn make_app(pool: PgPool) -> (Router, tempfile::TempDir) {
         require_mount: false,
         require_device_match: false,
         expected_device: None,
+        media_preview: None,
         max_file_size: 1024,
         owner_quota_bytes: 4096,
         min_free_bytes: 0,
@@ -379,6 +380,7 @@ fn make_app(pool: PgPool) -> (Router, tempfile::TempDir) {
     let app = api::router(AppState {
         pool,
         storage,
+        media_preview: None,
         auth_settings: AuthSettings {
             cookie_secure: false,
             session_ttl_seconds: 3600,
