@@ -19,10 +19,10 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::{
-    Config, api,
+    Config, MediaPreviewConfig, api,
     auth::{AuthSettings, LoginRateLimiter},
     health::{AppState, TransferSettings},
-    storage::LocalStorage,
+    storage::{LocalStorage, PreviewStorage},
 };
 
 struct TestSession {
@@ -581,7 +581,23 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
     let other_owner_id = insert_owner(&pool).await;
     let other_session = insert_session(&pool, other_owner_id).await;
     let temporary_storage = tempfile::tempdir().expect("create temporary HDD storage");
-    let app = make_app(pool.clone(), temporary_storage.path());
+    let temporary_preview = tempfile::tempdir().expect("create temporary SSD preview storage");
+    let preview_config = MediaPreviewConfig {
+        root: temporary_preview.path().to_path_buf(),
+        expected_mount: temporary_preview.path().to_path_buf(),
+        require_mount: false,
+        require_device_match: false,
+        expected_device: None,
+    };
+    let previews = PreviewStorage::new(&preview_config);
+    previews
+        .prepare()
+        .expect("prepare temporary preview storage");
+    let app = make_app_with_preview(
+        pool.clone(),
+        temporary_storage.path(),
+        Some(previews.clone()),
+    );
 
     let image_id = seed_file(
         &pool,
@@ -682,6 +698,120 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
     assert_eq!(image_head.status(), StatusCode::OK);
     assert_eq!(image_head.headers()[CONTENT_TYPE], "image/png");
     assert!(response_bytes(image_head).await.is_empty());
+
+    let file_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_version_id FROM files WHERE id = $1")
+            .bind(image_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load fixture version id");
+    let derivative_bytes =
+        b"RIFF\x16\x00\x00\x00WEBPVP8 \x0a\x00\x00\x00\x00\x00\x00\x9d\x01\x2a\x20\x00\x10\x00"
+            .to_vec();
+    let derivative_checksum = format!("{:x}", Sha256::digest(&derivative_bytes));
+    previews
+        .publish_derivative(file_version_id, "viewer", 1, &derivative_bytes)
+        .await
+        .expect("publish WebP fixture derivative");
+    sqlx::query(
+        "INSERT INTO media_derivatives \
+            (file_version_id, variant, recipe_version, storage_key, mime_type, size_bytes, \
+             width, height, checksum_sha256) \
+         VALUES ($1, 'viewer', 1, $2, 'image/webp', $3, 32, 16, $4)",
+    )
+    .bind(file_version_id)
+    .bind(format!("{file_version_id}/viewer-v1.webp"))
+    .bind(i64::try_from(derivative_bytes.len()).unwrap())
+    .bind(&derivative_checksum)
+    .execute(&pool)
+    .await
+    .expect("record viewer derivative");
+
+    let indexed_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(indexed_preview.status(), StatusCode::OK);
+    assert_eq!(indexed_preview.headers()[CONTENT_TYPE], "image/webp");
+    assert_eq!(
+        indexed_preview.headers()["etag"],
+        format!("\"{derivative_checksum}\"")
+    );
+    assert_eq!(response_bytes(indexed_preview).await, derivative_bytes);
+
+    let indexed_range = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[("Range", "bytes=1-3")],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(indexed_range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(indexed_range.headers()[CONTENT_TYPE], "image/webp");
+    assert_eq!(
+        indexed_range.headers()[CONTENT_RANGE],
+        format!("bytes 1-3/{}", derivative_bytes.len())
+    );
+    assert_eq!(response_bytes(indexed_range).await, derivative_bytes[1..4]);
+
+    let indexed_not_modified = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[("If-None-Match", &format!("\"{derivative_checksum}\""))],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(indexed_not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert!(response_bytes(indexed_not_modified).await.is_empty());
+
+    let mut corrupt_checksum = derivative_checksum.clone();
+    let replacement = if corrupt_checksum.starts_with('0') {
+        '1'
+    } else {
+        '0'
+    };
+    corrupt_checksum.replace_range(..1, &replacement.to_string());
+    sqlx::query(
+        "UPDATE media_derivatives SET checksum_sha256 = $1 \
+          WHERE file_version_id = $2 AND variant = 'viewer' AND recipe_version = 1",
+    )
+    .bind(corrupt_checksum)
+    .bind(file_version_id)
+    .execute(&pool)
+    .await
+    .expect("corrupt fixture derivative checksum");
+    let corrupt_fallback = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(corrupt_fallback.status(), StatusCode::OK);
+    assert_eq!(corrupt_fallback.headers()[CONTENT_TYPE], "image/png");
+    assert_eq!(
+        response_bytes(corrupt_fallback).await,
+        b"\x89PNG\r\n\x1a\nabcdef"
+    );
 
     let foreign_preview = request(
         &app,
@@ -865,6 +995,14 @@ async fn simulate_finalization_crash(
 }
 
 fn make_app(pool: PgPool, storage_root: &Path) -> Router {
+    make_app_with_preview(pool, storage_root, None)
+}
+
+fn make_app_with_preview(
+    pool: PgPool,
+    storage_root: &Path,
+    media_preview: Option<PreviewStorage>,
+) -> Router {
     let config = Config {
         database_url: "postgres://not-used-in-test".to_owned(),
         bind_addr: "127.0.0.1:3000".parse::<SocketAddr>().unwrap(),
@@ -888,7 +1026,7 @@ fn make_app(pool: PgPool, storage_root: &Path) -> Router {
     api::router(AppState {
         pool,
         storage,
-        media_preview: None,
+        media_preview,
         auth_settings: AuthSettings {
             cookie_secure: false,
             session_ttl_seconds: 3600,

@@ -1,0 +1,1146 @@
+use std::{
+    fs::{self, OpenOptions},
+    io,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+
+use sha2::{Digest, Sha256};
+use sqlx::{FromRow, PgPool};
+use thiserror::Error;
+use tokio::{
+    fs as tokio_fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    time::{sleep, timeout},
+};
+use uuid::Uuid;
+
+use crate::storage::{LocalStorage, PreviewStorage, StorageError};
+
+const WORKER_LOCK_ID: i64 = 4_831_170_923_501;
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+const LEASE_SECONDS: i64 = 300;
+const TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_ATTEMPTS: i32 = 5;
+const MAX_SOURCE_BYTES: i64 = 100 * 1024 * 1024;
+const MAX_THUMBNAIL_BYTES: u64 = 24 * 1024 * 1024;
+const CARD_MAX_BYTES: usize = 512 * 1024;
+const VIEWER_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Error)]
+enum WorkerError {
+    #[error("database operation failed: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("storage operation failed: {0}")]
+    Storage(#[from] StorageError),
+    #[error("temporary file operation failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("source object does not match its committed version")]
+    SourceMismatch,
+    #[error("source object exceeds the configured byte limit")]
+    SourceTooLarge,
+}
+
+#[derive(Debug, FromRow)]
+struct ClaimedJob {
+    id: i64,
+    file_version_id: Uuid,
+    version_size_bytes: i64,
+    object_size_bytes: Option<i64>,
+    storage_key: Option<String>,
+    mime_detected: Option<String>,
+    object_checksum_sha256: Option<String>,
+    object_state: Option<String>,
+    attempts: i32,
+}
+
+#[derive(Clone, Copy)]
+enum FailureClass {
+    Unsupported,
+    Permanent,
+    Retryable,
+}
+
+struct JobFailure {
+    class: FailureClass,
+    code: &'static str,
+}
+
+struct GeneratedDerivative {
+    variant: &'static str,
+    width: i32,
+    height: i32,
+    bytes: Vec<u8>,
+    checksum: String,
+}
+
+struct TempPath(PathBuf);
+
+impl TempPath {
+    fn create(extension: &str) -> io::Result<Self> {
+        for _ in 0..8 {
+            let path = std::env::temp_dir().join(format!(
+                "my-drive-media-{}.{}",
+                Uuid::new_v4(),
+                extension
+            ));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(Self(path));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique image-index temporary file",
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+pub(crate) async fn run_worker(pool: PgPool, storage: LocalStorage, previews: PreviewStorage) {
+    loop {
+        let mut lock_connection = match pool.acquire().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(error = %error, "media index worker cannot connect to PostgreSQL");
+                sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        let lock_acquired = match sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(WORKER_LOCK_ID)
+            .fetch_one(&mut *lock_connection)
+            .await
+        {
+            Ok(acquired) => acquired,
+            Err(error) => {
+                tracing::warn!(error = %error, "media index worker could not acquire its singleton lock");
+                drop(lock_connection);
+                sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        if !lock_acquired {
+            tracing::warn!("another media index worker holds the singleton lock");
+            drop(lock_connection);
+            sleep(POLL_INTERVAL).await;
+            continue;
+        }
+
+        tracing::info!("media index worker acquired its singleton lock");
+        loop {
+            if let Err(error) = sqlx::query_scalar::<_, i32>("SELECT 1")
+                .fetch_one(&mut *lock_connection)
+                .await
+            {
+                tracing::warn!(error = %error, "media index singleton lock connection was lost");
+                break;
+            }
+            match run_once(&pool, &storage, &previews).await {
+                Ok(true) => {}
+                Ok(false) => sleep(POLL_INTERVAL).await,
+                Err(error) => {
+                    tracing::warn!(error = %error, "media index worker pass failed");
+                    sleep(POLL_INTERVAL).await;
+                }
+            }
+        }
+        drop(lock_connection);
+    }
+}
+
+async fn run_once(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    previews: &PreviewStorage,
+) -> Result<bool, WorkerError> {
+    storage.ensure_mounted()?;
+    previews.health()?;
+    backfill_batch(pool).await?;
+    fail_exhausted_leases(pool).await?;
+    let Some(job) = claim_one(pool).await? else {
+        return Ok(false);
+    };
+
+    let heartbeat_pool = pool.clone();
+    let job_id = job.id;
+    let attempt = job.attempts;
+    let heartbeat = tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(30)).await;
+            match sqlx::query(
+                "UPDATE media_index_jobs \
+                    SET lease_expires_at = now() + ($3::BIGINT * interval '1 second'), \
+                        updated_at = now() \
+                  WHERE id = $1 AND state = 'running' AND attempts = $2",
+            )
+            .bind(job_id)
+            .bind(attempt)
+            .bind(LEASE_SECONDS)
+            .execute(&heartbeat_pool)
+            .await
+            {
+                Ok(result) if result.rows_affected() == 1 => {}
+                Ok(_) => break,
+                Err(error) => {
+                    tracing::warn!(job_id, error = %error, "media index lease heartbeat failed");
+                }
+            }
+        }
+    });
+    let processing = process_job(pool, storage, previews, &job).await;
+    heartbeat.abort();
+    let _ = heartbeat.await;
+    match processing {
+        Ok(()) => tracing::info!(job_id = job.id, "image preview indexing completed"),
+        Err(failure) => {
+            tracing::warn!(
+                job_id = job.id,
+                error_code = failure.code,
+                "image preview indexing failed"
+            );
+            record_failure(pool, &job, failure).await?;
+        }
+    }
+    Ok(true)
+}
+
+async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+         SELECT version.id, 'image_preview', 1 \
+           FROM file_versions AS version \
+           JOIN files AS file ON file.current_version_id = version.id \
+           JOIN drive_entries AS entry ON entry.id = file.id \
+           JOIN storage_objects AS object ON object.id = version.storage_object_id \
+          WHERE entry.deleted_at IS NULL \
+            AND object.state = 'ready' \
+            AND object.mime_detected IN \
+                ('image/jpeg', 'image/png', 'image/webp', 'image/gif', \
+                 'image/avif', 'image/bmp', 'image/x-icon') \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM media_index_jobs AS existing \
+                 WHERE existing.file_version_id = version.id \
+                   AND existing.task = 'image_preview' AND existing.recipe_version = 1 \
+            ) \
+          ORDER BY version.created_at, version.id \
+          LIMIT 100 \
+         ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn fail_exhausted_leases(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE media_index_jobs \
+            SET state = 'failed', lease_expires_at = NULL, current_stage = NULL, \
+                error_code = 'decode_failed', last_error_at = now(), updated_at = now() \
+          WHERE task = 'image_preview' AND state = 'running' \
+            AND lease_expires_at <= now() AND attempts >= $1",
+    )
+    .bind(MAX_ATTEMPTS)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
+    sqlx::query_as::<_, ClaimedJob>(
+        "WITH candidate AS ( \
+             SELECT job.id \
+               FROM media_index_jobs AS job \
+              WHERE job.task = 'image_preview' AND job.attempts < $1 \
+                AND ( \
+                    (job.state IN ('queued', 'retry_wait') AND job.available_at <= now()) \
+                    OR (job.state = 'running' AND job.lease_expires_at <= now()) \
+                ) \
+                AND EXISTS (SELECT 1 FROM media_index_control WHERE singleton = TRUE AND paused = FALSE) \
+              ORDER BY COALESCE(job.lease_expires_at, job.available_at), job.id \
+              LIMIT 1 FOR UPDATE SKIP LOCKED \
+         ) \
+         UPDATE media_index_jobs AS job \
+            SET state = 'running', attempts = job.attempts + 1, available_at = now(), \
+                lease_expires_at = now() + ($2::BIGINT * interval '1 second'), \
+                current_stage = 'opening_source', processed_bytes = 0, error_code = NULL, \
+                last_error_at = NULL, updated_at = now() \
+           FROM candidate, file_versions AS version \
+           LEFT JOIN storage_objects AS object ON object.id = version.storage_object_id \
+          WHERE job.id = candidate.id AND version.id = job.file_version_id \
+         RETURNING job.id, job.file_version_id, version.size_bytes AS version_size_bytes, \
+                   object.size_bytes AS object_size_bytes, object.storage_key, \
+                   object.mime_detected, object.checksum_sha256 AS object_checksum_sha256, \
+                   object.state AS object_state, job.attempts",
+    )
+    .bind(MAX_ATTEMPTS)
+    .bind(LEASE_SECONDS)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn process_job(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    previews: &PreviewStorage,
+    job: &ClaimedJob,
+) -> Result<(), JobFailure> {
+    if job.object_state.as_deref() != Some("ready") {
+        return Err(permanent("input_missing"));
+    }
+    if job.version_size_bytes != job.object_size_bytes.unwrap_or(-1) || job.version_size_bytes <= 0
+    {
+        return Err(permanent("input_missing"));
+    }
+    if job.version_size_bytes > MAX_SOURCE_BYTES {
+        return Err(unsupported("resource_limit"));
+    }
+    let mime = job
+        .mime_detected
+        .as_deref()
+        .ok_or_else(|| unsupported("unsupported_format"))?;
+    if !supports_image_mime(mime) {
+        return Err(unsupported("unsupported_format"));
+    }
+    let storage_key = job
+        .storage_key
+        .as_deref()
+        .ok_or_else(|| permanent("input_missing"))?;
+
+    let input_extension = match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => return Err(unsupported("unsupported_format")),
+    };
+    let input_path =
+        TempPath::create(input_extension).map_err(|_| retryable("preview_storage_unavailable"))?;
+    let (actual_size, checksum, prefix) =
+        copy_source(pool, storage, job, storage_key, input_path.path())
+            .await
+            .map_err(|error| match error {
+                WorkerError::Storage(StorageError::Io(error))
+                    if error.kind() == io::ErrorKind::NotFound =>
+                {
+                    permanent("input_missing")
+                }
+                WorkerError::SourceMismatch => permanent("input_missing"),
+                WorkerError::SourceTooLarge => unsupported("resource_limit"),
+                _ => retryable("preview_storage_unavailable"),
+            })?;
+    if actual_size != job.version_size_bytes as u64 {
+        return Err(permanent("input_missing"));
+    }
+    if job
+        .object_checksum_sha256
+        .as_deref()
+        .is_none_or(|expected| !checksum.eq_ignore_ascii_case(expected))
+    {
+        return Err(permanent("decode_failed"));
+    }
+    if !matches_magic(mime, &prefix) {
+        return Err(permanent("decode_failed"));
+    }
+
+    set_stage(pool, job, "checking_dimensions", actual_size)
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?;
+    let mut generated = Vec::with_capacity(2);
+    let mut viewer_png: Option<TempPath> = None;
+    for (variant, side, maximum_bytes) in [
+        ("viewer", 1920_u32, VIEWER_MAX_BYTES),
+        ("card", 384_u32, CARD_MAX_BYTES),
+    ] {
+        set_stage(pool, job, &format!("thumbnailing_{variant}"), actual_size)
+            .await
+            .map_err(|_| retryable("preview_storage_unavailable"))?;
+        let thumbnail =
+            TempPath::create("png").map_err(|_| retryable("preview_storage_unavailable"))?;
+        let output =
+            TempPath::create("webp").map_err(|_| retryable("preview_storage_unavailable"))?;
+        let thumbnail_input = viewer_png
+            .as_ref()
+            .map_or(input_path.path(), TempPath::path);
+        thumbnail_to_png(thumbnail_input, thumbnail.path(), side)
+            .await
+            .map_err(map_decode_tool_error)?;
+        let thumbnail_size = tokio_fs::metadata(thumbnail.path())
+            .await
+            .map_err(|_| retryable("preview_storage_unavailable"))?
+            .len();
+        if thumbnail_size == 0 || thumbnail_size > MAX_THUMBNAIL_BYTES {
+            return Err(unsupported("resource_limit"));
+        }
+        encode_webp(thumbnail.path(), output.path())
+            .await
+            .map_err(map_decode_tool_error)?;
+        let output_size = tokio_fs::metadata(output.path())
+            .await
+            .map_err(|_| retryable("preview_storage_unavailable"))?
+            .len();
+        if output_size == 0 || output_size > maximum_bytes as u64 {
+            return Err(unsupported("resource_limit"));
+        }
+        let bytes = tokio_fs::read(output.path())
+            .await
+            .map_err(|_| retryable("preview_storage_unavailable"))?;
+        let (width, height) = validate_metadata_free_webp(&bytes, maximum_bytes)
+            .map_err(|_| permanent("decode_failed"))?;
+        if width > side || height > side {
+            return Err(permanent("decode_failed"));
+        }
+        if variant == "viewer" {
+            viewer_png = Some(thumbnail);
+        }
+        generated.push(GeneratedDerivative {
+            variant,
+            width: i32::try_from(width).map_err(|_| unsupported("resource_limit"))?,
+            height: i32::try_from(height).map_err(|_| unsupported("resource_limit"))?,
+            checksum: format!("{:x}", Sha256::digest(&bytes)),
+            bytes,
+        });
+    }
+
+    for derivative in &generated {
+        if !owns_lease(pool, job).await.unwrap_or(false) {
+            return Err(retryable("preview_storage_unavailable"));
+        }
+        set_stage(
+            pool,
+            job,
+            &format!("publishing_{}", derivative.variant),
+            actual_size,
+        )
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?;
+        previews
+            .publish_derivative(
+                job.file_version_id,
+                derivative.variant,
+                1,
+                &derivative.bytes,
+            )
+            .await
+            .map_err(|_| retryable("preview_storage_unavailable"))?;
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?;
+    let completed = sqlx::query(
+        "UPDATE media_index_jobs \
+            SET state = 'completed', lease_expires_at = NULL, current_stage = NULL, \
+                processed_bytes = $3, error_code = NULL, completed_at = now(), updated_at = now() \
+          WHERE id = $1 AND task = 'image_preview' AND state = 'running' AND attempts = $2",
+    )
+    .bind(job.id)
+    .bind(job.attempts)
+    .bind(actual_size as i64)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| retryable("preview_storage_unavailable"))?;
+    if completed.rows_affected() != 1 {
+        transaction
+            .rollback()
+            .await
+            .map_err(|_| retryable("preview_storage_unavailable"))?;
+        return Err(retryable("preview_storage_unavailable"));
+    }
+    for derivative in &generated {
+        sqlx::query(
+            "SELECT public.media_indexer_upsert_derivative( \
+                $1, $2, 1::smallint, $3, 'image/webp', $4, $5, $6, $7 \
+             )",
+        )
+        .bind(job.file_version_id)
+        .bind(derivative.variant)
+        .bind(format!(
+            "{}/{derivative_variant}-v1.webp",
+            job.file_version_id,
+            derivative_variant = derivative.variant
+        ))
+        .bind(i64::try_from(derivative.bytes.len()).unwrap_or(i64::MAX))
+        .bind(derivative.width)
+        .bind(derivative.height)
+        .bind(&derivative.checksum)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?;
+    Ok(())
+}
+
+async fn copy_source(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    job: &ClaimedJob,
+    storage_key: &str,
+    destination: &Path,
+) -> Result<(u64, String, Vec<u8>), WorkerError> {
+    let mut source = storage.open_object(storage_key).await?;
+    let source_metadata = source.metadata().await?;
+    if source_metadata.len() != job.version_size_bytes as u64
+        || source_metadata.len() > MAX_SOURCE_BYTES as u64
+    {
+        return Err(if source_metadata.len() > MAX_SOURCE_BYTES as u64 {
+            WorkerError::SourceTooLarge
+        } else {
+            WorkerError::SourceMismatch
+        });
+    }
+    let mut output = tokio_fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(destination)
+        .await?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut last_reported = 0_u64;
+    let mut prefix = Vec::with_capacity(12);
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = source.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > MAX_SOURCE_BYTES as u64 {
+            return Err(WorkerError::SourceTooLarge);
+        }
+        hasher.update(&buffer[..read]);
+        if prefix.len() < 12 {
+            let needed = 12 - prefix.len();
+            prefix.extend_from_slice(&buffer[..read.min(needed)]);
+        }
+        output.write_all(&buffer[..read]).await?;
+        if total - last_reported >= 4 * 1024 * 1024 {
+            set_stage(pool, job, "copying_source", total)
+                .await
+                .map_err(|error| WorkerError::Database(sqlx::Error::Protocol(error.to_string())))?;
+            last_reported = total;
+        }
+    }
+    output.sync_all().await?;
+    set_stage(pool, job, "checking_dimensions", total)
+        .await
+        .map_err(|error| WorkerError::Database(sqlx::Error::Protocol(error.to_string())))?;
+    Ok((total, format!("{:x}", hasher.finalize()), prefix))
+}
+
+async fn set_stage(
+    pool: &PgPool,
+    job: &ClaimedJob,
+    stage: &str,
+    processed_bytes: u64,
+) -> Result<(), sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE media_index_jobs \
+            SET current_stage = $3, processed_bytes = $4, \
+                lease_expires_at = now() + ($5::BIGINT * interval '1 second'), updated_at = now() \
+          WHERE id = $1 AND state = 'running' AND attempts = $2",
+    )
+    .bind(job.id)
+    .bind(job.attempts)
+    .bind(stage)
+    .bind(i64::try_from(processed_bytes).unwrap_or(i64::MAX))
+    .bind(LEASE_SECONDS)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(sqlx::Error::Protocol(
+            "media index job lease was lost".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn owns_lease(pool: &PgPool, job: &ClaimedJob) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM media_index_jobs \
+          WHERE id = $1 AND state = 'running' AND attempts = $2 \
+            AND lease_expires_at > now())",
+    )
+    .bind(job.id)
+    .bind(job.attempts)
+    .fetch_one(pool)
+    .await
+}
+
+async fn record_failure(
+    pool: &PgPool,
+    job: &ClaimedJob,
+    failure: JobFailure,
+) -> Result<(), sqlx::Error> {
+    let (state, delay) = match failure.class {
+        FailureClass::Unsupported => ("unsupported", 0_i64),
+        FailureClass::Permanent => ("failed", 0_i64),
+        FailureClass::Retryable if job.attempts >= MAX_ATTEMPTS => ("failed", 0_i64),
+        FailureClass::Retryable => {
+            let exponent = u32::try_from(job.attempts.saturating_sub(1))
+                .unwrap_or(0)
+                .min(8);
+            ("retry_wait", 10_i64.saturating_mul(1_i64 << exponent))
+        }
+    };
+    sqlx::query(
+        "UPDATE media_index_jobs \
+            SET state = $3, available_at = now() + ($4::BIGINT * interval '1 second'), \
+                lease_expires_at = NULL, current_stage = NULL, processed_bytes = 0, \
+                error_code = $5, last_error_at = now(), updated_at = now() \
+          WHERE id = $1 AND state = 'running' AND attempts = $2",
+    )
+    .bind(job.id)
+    .bind(job.attempts)
+    .bind(state)
+    .bind(delay)
+    .bind(failure.code)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn thumbnail_to_png(input: &Path, output: &Path, side: u32) -> Result<(), ToolError> {
+    let mut command = Command::new("my-drive-vips-thumbnailer");
+    command
+        .arg(input)
+        .arg(output)
+        .arg(side.to_string())
+        .env("VIPS_CONCURRENCY", "1")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let result = timeout(TOOL_TIMEOUT, command.status())
+        .await
+        .map_err(|_| ToolError::TimedOut)?
+        .map_err(|_| ToolError::Failed)?;
+    if result.success() {
+        Ok(())
+    } else if result.code() == Some(3) {
+        Err(ToolError::ResourceLimit)
+    } else {
+        Err(ToolError::Failed)
+    }
+}
+
+async fn encode_webp(input: &Path, output: &Path) -> Result<(), ToolError> {
+    let input = input.to_str().ok_or(ToolError::InvalidOutput)?;
+    let output = output.to_str().ok_or(ToolError::InvalidOutput)?;
+    let mut command = Command::new("cwebp");
+    command
+        .args([
+            "-quiet",
+            "-q",
+            "75",
+            "-alpha_q",
+            "100",
+            "-m",
+            "0",
+            "-metadata",
+            "none",
+            input,
+            "-o",
+            output,
+        ])
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let result = timeout(TOOL_TIMEOUT, command.status())
+        .await
+        .map_err(|_| ToolError::TimedOut)?
+        .map_err(|_| ToolError::Failed)?;
+    if result.success() {
+        Ok(())
+    } else {
+        Err(ToolError::Failed)
+    }
+}
+
+#[derive(Debug)]
+enum ToolError {
+    TimedOut,
+    Failed,
+    InvalidOutput,
+    ResourceLimit,
+}
+
+fn map_decode_tool_error(error: ToolError) -> JobFailure {
+    match error {
+        ToolError::TimedOut | ToolError::ResourceLimit => unsupported("resource_limit"),
+        ToolError::Failed | ToolError::InvalidOutput => permanent("decode_failed"),
+    }
+}
+
+fn matches_magic(mime: &str, prefix: &[u8]) -> bool {
+    match mime {
+        "image/jpeg" => prefix.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/png" => prefix.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/webp" => prefix.len() >= 12 && &prefix[..4] == b"RIFF" && &prefix[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
+fn supports_image_mime(mime: &str) -> bool {
+    matches!(mime, "image/jpeg" | "image/png" | "image/webp")
+}
+
+fn validate_metadata_free_webp(bytes: &[u8], max_bytes: usize) -> Result<(u32, u32), ()> {
+    if bytes.len() < 20
+        || bytes.len() > max_bytes
+        || &bytes[..4] != b"RIFF"
+        || &bytes[8..12] != b"WEBP"
+    {
+        return Err(());
+    }
+    let riff_length = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| ())?) as usize;
+    if riff_length.checked_add(8) != Some(bytes.len()) {
+        return Err(());
+    }
+
+    let mut offset = 12_usize;
+    let mut vp8_dimensions = None;
+    let mut extended_dimensions = None;
+    let mut saw_vp8 = false;
+    let mut saw_vp8l = false;
+    let mut saw_alpha = false;
+    let mut vp8l_has_alpha = false;
+    while offset < bytes.len() {
+        let header_end = offset.checked_add(8).ok_or(())?;
+        if header_end > bytes.len() {
+            return Err(());
+        }
+        let kind = &bytes[offset..offset + 4];
+        let chunk_size =
+            u32::from_le_bytes(bytes[offset + 4..header_end].try_into().map_err(|_| ())?) as usize;
+        let data_start = header_end;
+        let data_end = data_start.checked_add(chunk_size).ok_or(())?;
+        if data_end > bytes.len() {
+            return Err(());
+        }
+        let data = &bytes[data_start..data_end];
+        match kind {
+            b"VP8X" => {
+                if extended_dimensions.is_some() || data.len() < 10 || data[0] & 0x2e != 0 {
+                    return Err(());
+                }
+                let width =
+                    1 + u32::from(data[4]) + (u32::from(data[5]) << 8) + (u32::from(data[6]) << 16);
+                let height =
+                    1 + u32::from(data[7]) + (u32::from(data[8]) << 8) + (u32::from(data[9]) << 16);
+                extended_dimensions = Some((width, height));
+            }
+            b"ALPH" => {
+                if saw_alpha {
+                    return Err(());
+                }
+                saw_alpha = true;
+            }
+            b"VP8 " => {
+                if saw_vp8 || data.len() < 10 || data[3..6] != [0x9d, 0x01, 0x2a] {
+                    return Err(());
+                }
+                saw_vp8 = true;
+                let width = u16::from_le_bytes([data[6], data[7]]) & 0x3fff;
+                let height = u16::from_le_bytes([data[8], data[9]]) & 0x3fff;
+                vp8_dimensions = Some((u32::from(width), u32::from(height)));
+            }
+            b"VP8L" => {
+                if saw_vp8l || data.len() < 5 || data[0] != 0x2f {
+                    return Err(());
+                }
+                saw_vp8l = true;
+                vp8l_has_alpha = data[4] & 0x10 != 0;
+                let width = 1 + u32::from(data[1]) + (u32::from(data[2] & 0x3f) << 8);
+                let height = 1
+                    + u32::from(data[2] >> 6)
+                    + (u32::from(data[3]) << 2)
+                    + (u32::from(data[4] & 0x0f) << 10);
+                vp8_dimensions = Some((width, height));
+            }
+            _ => return Err(()),
+        }
+        if chunk_size & 1 == 1 && (data_end >= bytes.len() || bytes[data_end] != 0) {
+            return Err(());
+        }
+        offset = data_end.checked_add(chunk_size & 1).ok_or(())?;
+    }
+    if offset != bytes.len() || (saw_vp8 && saw_vp8l) || (!saw_vp8 && !saw_vp8l) {
+        return Err(());
+    }
+    let (width, height) = extended_dimensions.or(vp8_dimensions).ok_or(())?;
+    if width == 0 || height == 0 {
+        return Err(());
+    }
+    if extended_dimensions
+        .is_some_and(|dimensions| vp8_dimensions.is_some_and(|inner| inner != dimensions))
+    {
+        return Err(());
+    }
+    if extended_dimensions.is_some_and(|_| {
+        let has_alpha_flag = bytes.get(20).is_some_and(|flags| flags & 0x10 != 0);
+        has_alpha_flag != (saw_alpha || vp8l_has_alpha)
+    }) {
+        return Err(());
+    }
+    Ok((width, height))
+}
+
+fn unsupported(code: &'static str) -> JobFailure {
+    JobFailure {
+        class: FailureClass::Unsupported,
+        code,
+    }
+}
+
+fn permanent(code: &'static str) -> JobFailure {
+    JobFailure {
+        class: FailureClass::Permanent,
+        code,
+    }
+}
+
+fn retryable(code: &'static str) -> JobFailure {
+    JobFailure {
+        class: FailureClass::Retryable,
+        code,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{backfill_batch, matches_magic, supports_image_mime, validate_metadata_free_webp};
+    use sqlx::{PgPool, postgres::PgPoolOptions};
+    use uuid::Uuid;
+
+    #[test]
+    fn worker_preview_registry_only_accepts_static_jpeg_png_and_webp() {
+        for mime in ["image/jpeg", "image/png", "image/webp"] {
+            assert!(supports_image_mime(mime), "{mime}");
+        }
+        for mime in ["image/gif", "image/avif", "image/bmp", "image/x-icon"] {
+            assert!(!supports_image_mime(mime), "{mime}");
+        }
+    }
+
+    #[test]
+    fn decoder_registry_checks_sniffed_mime_against_content_signature() {
+        assert!(matches_magic("image/jpeg", &[0xff, 0xd8, 0xff, 0]));
+        assert!(matches_magic("image/png", b"\x89PNG\r\n\x1a\nrest"));
+        assert!(matches_magic("image/webp", b"RIFF\x00\x00\x00\x00WEBP"));
+        assert!(!matches_magic("image/jpeg", b"\x89PNG\r\n\x1a\n"));
+        assert!(!matches_magic("image/gif", b"GIF89a"));
+    }
+
+    #[test]
+    fn webp_validator_rejects_metadata_chunks_and_oversized_outputs() {
+        let mut bytes = b"RIFF\x12\x00\x00\x00WEBPVP8 \x04\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let length = u32::try_from(bytes.len() - 8).unwrap();
+        bytes[4..8].copy_from_slice(&length.to_le_bytes());
+        assert_eq!(validate_metadata_free_webp(&bytes, 100), Err(()));
+        assert_eq!(validate_metadata_free_webp(&bytes, 16), Err(()));
+
+        let mut valid =
+            b"RIFF\x16\x00\x00\x00WEBPVP8 \x0a\x00\x00\x00\x00\x00\x00\x9d\x01\x2a\x20\x00\x10\x00"
+                .to_vec();
+        let length = u32::try_from(valid.len() - 8).unwrap();
+        valid[4..8].copy_from_slice(&length.to_le_bytes());
+        assert_eq!(validate_metadata_free_webp(&valid, 100), Ok((32, 16)));
+
+        let mut with_metadata = valid.clone();
+        with_metadata.splice(12..12, b"EXIF\x00\x00\x00\x00".iter().copied());
+        let length = u32::try_from(with_metadata.len() - 8).unwrap();
+        with_metadata[4..8].copy_from_slice(&length.to_le_bytes());
+        assert_eq!(validate_metadata_free_webp(&with_metadata, 100), Err(()));
+    }
+
+    #[test]
+    fn webp_validator_accepts_metadata_free_alpha_with_bounded_canvas() {
+        let mut bytes = b"RIFF\x00\x00\x00\x00WEBP\
+            VP8X\x0a\x00\x00\x00\x10\x00\x00\x00\x1f\x00\x00\x0f\x00\x00\
+            ALPH\x01\x00\x00\x00\x00\x00\
+            VP8 \x0a\x00\x00\x00\x00\x00\x00\x9d\x01\x2a\x20\x00\x10\x00"
+            .to_vec();
+        let length = u32::try_from(bytes.len() - 8).unwrap();
+        bytes[4..8].copy_from_slice(&length.to_le_bytes());
+        assert_eq!(validate_metadata_free_webp(&bytes, 100), Ok((32, 16)));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+    async fn backfill_queues_existing_current_images_once_and_skips_ineligible_versions() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let owner_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role) \
+             VALUES ($1, $2, 'test-only-hash', 'owner')",
+        )
+        .bind(owner_id)
+        .bind(format!("media-backfill-{owner_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert isolated owner");
+
+        let mut candidates = Vec::with_capacity(102);
+        for index in 0..102 {
+            candidates.push(
+                insert_backfill_file(
+                    &pool,
+                    owner_id,
+                    &format!("candidate-{index}"),
+                    "image/png",
+                    "ready",
+                    true,
+                    false,
+                )
+                .await,
+            );
+        }
+        let preexisting_failed = sqlx::query(
+            "INSERT INTO media_index_jobs \
+                 (file_version_id, task, recipe_version, state, attempts, error_code) \
+             VALUES ($1, 'image_preview', 1, 'failed', 3, 'decode_failed')",
+        )
+        .bind(candidates[0].1)
+        .execute(&pool)
+        .await
+        .expect("insert existing job that backfill must preserve");
+        assert_eq!(preexisting_failed.rows_affected(), 1);
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version, state) \
+             VALUES ($1, 'image_preview', 2, 'completed')",
+        )
+        .bind(candidates[1].1)
+        .execute(&pool)
+        .await
+        .expect("insert another recipe for the same file version");
+
+        let historical_version =
+            insert_backfill_version(&pool, candidates[0].0, "image/jpeg", "ready").await;
+        let deleted_image = insert_backfill_file(
+            &pool,
+            owner_id,
+            "deleted",
+            "image/webp",
+            "ready",
+            true,
+            true,
+        )
+        .await;
+        let pending_image = insert_backfill_file(
+            &pool,
+            owner_id,
+            "pending",
+            "image/jpeg",
+            "pending",
+            true,
+            false,
+        )
+        .await;
+        let non_image =
+            insert_backfill_file(&pool, owner_id, "video", "video/mp4", "ready", true, false).await;
+
+        backfill_batch(&pool)
+            .await
+            .expect("first bounded backfill batch");
+        let (after_first, queued_after_first): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE state = 'queued') \
+               FROM media_index_jobs \
+              WHERE file_version_id = ANY($1) AND task = 'image_preview' AND recipe_version = 1",
+        )
+        .bind(
+            candidates
+                .iter()
+                .map(|candidate| candidate.1)
+                .collect::<Vec<_>>(),
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect first bounded backfill batch");
+        assert_eq!(after_first, 101);
+        assert_eq!(queued_after_first, 100);
+
+        let preserved: (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT state, attempts, error_code FROM media_index_jobs \
+              WHERE file_version_id = $1 AND task = 'image_preview' AND recipe_version = 1",
+        )
+        .bind(candidates[0].1)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch existing job after backfill");
+        assert_eq!(
+            preserved,
+            ("failed".to_owned(), 3, Some("decode_failed".to_owned()))
+        );
+
+        backfill_batch(&pool)
+            .await
+            .expect("second bounded backfill batch");
+        backfill_batch(&pool)
+            .await
+            .expect("idempotent backfill after completion");
+        let after_all: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM media_index_jobs \
+              WHERE file_version_id = ANY($1) AND task = 'image_preview' AND recipe_version = 1",
+        )
+        .bind(
+            candidates
+                .iter()
+                .map(|candidate| candidate.1)
+                .collect::<Vec<_>>(),
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count all backfilled candidate versions");
+        assert_eq!(after_all, 102);
+        let recipes_for_one_version: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT recipe_version) FROM media_index_jobs \
+              WHERE file_version_id = $1 AND task = 'image_preview'",
+        )
+        .bind(candidates[1].1)
+        .fetch_one(&pool)
+        .await
+        .expect("count distinct recipes for one file version");
+        assert_eq!(recipes_for_one_version, 2);
+
+        let decoy_jobs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM media_index_jobs \
+              WHERE file_version_id = ANY($1) AND task = 'image_preview' AND recipe_version = 1",
+        )
+        .bind(vec![
+            historical_version,
+            deleted_image.1,
+            pending_image.1,
+            non_image.1,
+        ])
+        .fetch_one(&pool)
+        .await
+        .expect("count ineligible backfill jobs");
+        assert_eq!(decoy_jobs, 0);
+
+        pool.close().await;
+    }
+
+    async fn insert_backfill_file(
+        pool: &PgPool,
+        owner_id: Uuid,
+        name: &str,
+        mime: &str,
+        object_state: &str,
+        current: bool,
+        deleted: bool,
+    ) -> (Uuid, Uuid) {
+        let file_id = Uuid::new_v4();
+        let object_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let storage_key = crate::storage::LocalStorage::storage_key(object_id);
+        sqlx::query(
+            "INSERT INTO drive_entries (id, owner_id, kind, name, deleted_at) \
+             VALUES ($1, $2, 'file', $3, CASE WHEN $4 THEN now() ELSE NULL END)",
+        )
+        .bind(file_id)
+        .bind(owner_id)
+        .bind(format!("{name}-{file_id}"))
+        .bind(deleted)
+        .execute(pool)
+        .await
+        .expect("insert backfill file entry");
+        sqlx::query("INSERT INTO files (id) VALUES ($1)")
+            .bind(file_id)
+            .execute(pool)
+            .await
+            .expect("insert backfill file projection");
+        sqlx::query(
+            "INSERT INTO storage_objects (id, storage_key, size_bytes, mime_detected, state) \
+             VALUES ($1, $2, 8, $3, $4)",
+        )
+        .bind(object_id)
+        .bind(storage_key)
+        .bind(mime)
+        .bind(object_state)
+        .execute(pool)
+        .await
+        .expect("insert backfill storage object");
+        sqlx::query(
+            "INSERT INTO file_versions (id, file_id, storage_object_id, size_bytes) \
+             VALUES ($1, $2, $3, 8)",
+        )
+        .bind(version_id)
+        .bind(file_id)
+        .bind(object_id)
+        .execute(pool)
+        .await
+        .expect("insert backfill file version");
+        if current {
+            sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+                .bind(version_id)
+                .bind(file_id)
+                .execute(pool)
+                .await
+                .expect("set current backfill file version");
+        }
+        (file_id, version_id)
+    }
+
+    async fn insert_backfill_version(
+        pool: &PgPool,
+        file_id: Uuid,
+        mime: &str,
+        object_state: &str,
+    ) -> Uuid {
+        let object_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let storage_key = crate::storage::LocalStorage::storage_key(object_id);
+        sqlx::query(
+            "INSERT INTO storage_objects (id, storage_key, size_bytes, mime_detected, state) \
+             VALUES ($1, $2, 8, $3, $4)",
+        )
+        .bind(object_id)
+        .bind(storage_key)
+        .bind(mime)
+        .bind(object_state)
+        .execute(pool)
+        .await
+        .expect("insert historical backfill storage object");
+        sqlx::query(
+            "INSERT INTO file_versions (id, file_id, storage_object_id, size_bytes) \
+             VALUES ($1, $2, $3, 8)",
+        )
+        .bind(version_id)
+        .bind(file_id)
+        .bind(object_id)
+        .execute(pool)
+        .await
+        .expect("insert historical backfill version");
+        version_id
+    }
+}

@@ -6,6 +6,7 @@ mod drive;
 mod health;
 mod maintenance;
 mod media_admin;
+mod media_indexer;
 mod shares;
 mod storage;
 mod transfers;
@@ -100,6 +101,26 @@ pub async fn run() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve HTTP requests")?;
+    Ok(())
+}
+
+pub async fn run_media_indexer() -> anyhow::Result<()> {
+    let config = Config::from_env().context("load media indexer configuration")?;
+    let storage = storage::LocalStorage::open_readonly(&config)
+        .context("verify read-only HDD storage mount")?;
+    let preview_config = config
+        .media_preview
+        .as_ref()
+        .context("MEDIA_PREVIEW_ROOT must be configured for the indexer")?;
+    let previews = storage::PreviewStorage::new(preview_config);
+    previews
+        .prepare()
+        .context("verify writable SSD preview mount")?;
+    let pool = db::connect_media_indexer(&config.database_url)
+        .await
+        .context("connect media indexer to PostgreSQL")?;
+    drop(config);
+    media_indexer::run_worker(pool, storage, previews).await;
     Ok(())
 }
 

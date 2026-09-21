@@ -129,47 +129,62 @@ expiry, trashing a shared folder, or reaching `max_downloads` disables access.
 
 ## Running a prebuilt Docker image
 
-GitHub Actions builds the Docker image for every pull request. Pushes to
-`master` publish `ghcr.io/vantanminh/my-drive:latest` and a commit-specific
-tag; version tags such as `v1.2.3` publish matching image tags. The workflow
-builds `linux/amd64` from the repository's `Dockerfile` and publishes images to
-GitHub Container Registry (GHCR).
-The published GHCR image is public and can be pulled without logging in.
+GitHub Actions builds both the web app image and the isolated media indexer
+image for every pull request. Pushes to `master` publish
+`ghcr.io/vantanminh/my-drive:latest` and
+`ghcr.io/vantanminh/my-drive-indexer:latest`, plus commit-specific tags;
+version tags such as `v1.2.3` publish matching image tags. The workflow builds
+`linux/amd64` from this repository's `Dockerfile` and publishes to GitHub
+Container Registry (GHCR). The published GHCR images are public and can be
+pulled without logging in.
 
-On the Linux host, keep `compose.yaml` and a protected `.env` file. The app
-does not need the source checkout at runtime. Prepare the SSD and mounted HDD
-paths as described below, then set `MY_DRIVE_IMAGE` in `.env` to the published
-tag you want to run. For the latest image from `master`, use:
+On the Linux host, keep `compose.yaml`, `docker/setup-indexer-role.sh`, and a
+protected `.env` file. The app does not need the source checkout at runtime.
+Prepare the SSD and mounted HDD paths as described below, then set `MY_DRIVE_IMAGE` and
+`MY_DRIVE_INDEXER_IMAGE` in `.env` to the published tags you want to run. For
+the latest images from `master`, use:
 
 ```dotenv
 MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:latest
+MY_DRIVE_INDEXER_IMAGE=ghcr.io/vantanminh/my-drive-indexer:latest
 ```
 
 Pull and start it:
 
 ```sh
-docker compose pull app
+docker compose pull app media-indexer
 docker compose up -d
 docker compose ps
 docker compose logs -f app
+docker compose logs -f media-indexer
 ```
 
-To build and run the image locally instead, run this from the repository root
-on the target machine, then set the image name in `.env`:
+To build and run the images locally instead, run both commands from the
+repository root on the target machine, then set the image names in `.env`:
 
 ```sh
-docker build -t my-drive:local .
+docker build --target runtime -t my-drive:local .
+docker build --target media-indexer-runtime -t my-drive-indexer:local .
 ```
 
 ```dotenv
 MY_DRIVE_IMAGE=my-drive:local
+MY_DRIVE_INDEXER_IMAGE=my-drive-indexer:local
 ```
 
 Start it with `docker compose up -d`. Compose uses the local image when it is
 present; it does not need to build from source. You still need the Compose
 file, `.env`, PostgreSQL data directory, HDD payload directory, and SSD preview
-cache directory. The image includes the Rust service and built web client, but
-no secrets or persistent data.
+cache directory, and the database-role setup script mounted by Compose. The app
+image includes the Rust service and built web client.
+The separate indexer image includes the constrained image decoder and worker.
+Neither image contains secrets or persistent data.
+
+The indexer currently creates card and viewer WebP previews for JPEG, PNG,
+and WebP uploads. GIF, AVIF, BMP, and ICO files remain available as originals
+and their preview jobs are reported as unsupported. Configure
+`MEDIA_INDEXER_PASSWORD` as a separate random hex secret; Compose creates a
+limited PostgreSQL role for the worker after the app has applied migrations.
 
 ## Single-server Compose deployment
 
@@ -180,7 +195,8 @@ no secrets or persistent data.
    different filesystem from the HDD storage.
 2. Set the restricted deployment environment values shown in `.env.example`.
    Generate `POSTGRES_PASSWORD` with a password manager or
-   `openssl rand -hex 32`. Set `STORAGE_DATA_HDD` to the mounted HDD path and
+   `openssl rand -hex 32`; generate a different `MEDIA_INDEXER_PASSWORD` the
+   same way. Set `STORAGE_DATA_HDD` to the mounted HDD path and
    `POSTGRES_DATA_SSD` and `MEDIA_PREVIEW_DATA_SSD` to their SSD paths.
 3. Set `STORAGE_EXPECTED_DEVICE` to the output of
    `findmnt -n -o MAJ:MIN --target /srv/my-drive/data`. Compose compares it with
@@ -191,9 +207,10 @@ no secrets or persistent data.
    required when preview storage is configured.
 4. Set `BOOTSTRAP_OWNER_EMAIL` and a unique `BOOTSTRAP_OWNER_PASSWORD` for the
    first run only. The password is Argon2id-hashed before it reaches PostgreSQL.
-5. Set `MY_DRIVE_IMAGE` in `.env` to the GHCR tag to deploy (or to
-   `my-drive:local` after building locally), then run `docker compose pull app`
-   and `docker compose up -d`. The app binds to loopback; configure a reverse
+5. Set both `MY_DRIVE_IMAGE` and `MY_DRIVE_INDEXER_IMAGE` in `.env` to matching
+   GHCR tags (or to `my-drive:local` and `my-drive-indexer:local` after building
+   locally). Pull both images with `docker compose pull app media-indexer`, then
+   run `docker compose up -d`. The app binds to loopback; configure a reverse
    proxy to terminate TLS. Do not expose the app port directly to the public
    internet.
 
@@ -224,8 +241,8 @@ Use `age-keygen -y` to derive the public recipient for backup. Backups encrypt
 the PostgreSQL dump, the `objects`, `uploads`, `trash`, and `previews` tree, the
 Compose file, and the protected environment file. The published bundle contains
 only age-encrypted payloads, a manifest, and SHA-256 checksums. The backup
-script stops the app while capturing the database and storage tree, then starts
-it again only if it was running before the backup.
+script stops the app and media indexer while capturing the database and storage
+tree, then restarts each service only if it was running before the backup.
 
 Create the destination directory after the other filesystem is mounted. The
 script refuses to create a missing destination and checks that its filesystem
@@ -288,11 +305,12 @@ as `my-drive/mydrive as mydrive`. The target confirmation remains required.
 This extra confirmation prevents an accidental cross-project restore while
 allowing an intentional staging restore.
 
-Restore stops the app only if it was running before the operation, and starts
-it again after a successful restore or a confirmed rollback. If database or
-storage rollback cannot be confirmed, it leaves the app stopped and reports
-the recovery paths. A successful restore keeps the previous database under a
-generated `restoreold_*` name and the previous storage directories under
+Restore stops the app and media indexer during the operation. After a successful
+restore or confirmed rollback, it restarts only the services that were running
+when restore began. If database or storage rollback cannot be confirmed, it
+leaves both services stopped and reports the recovery paths. A successful
+restore keeps the previous database under a generated `restoreold_*` name and
+the previous storage directories under
 `.pre-restore-*` on the HDD. Keep both until the restored service and files have
 been checked; remove them only after the recovery window has passed.
 

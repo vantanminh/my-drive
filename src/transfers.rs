@@ -10,7 +10,7 @@ use axum::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
             ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
+            CONTENT_TYPE, ETAG, IF_NONE_MATCH, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
         },
     },
     response::{IntoResponse, Response},
@@ -221,12 +221,21 @@ struct FinalizeObject {
 #[derive(FromRow)]
 struct DownloadRecord {
     name: String,
+    file_version_id: Uuid,
     size_bytes: i64,
     storage_key: String,
     mime_detected: Option<String>,
     checksum_sha256: Option<String>,
     state: String,
     version_created_at: DateTime<Utc>,
+}
+
+#[derive(FromRow)]
+struct ViewerDerivative {
+    recipe_version: i16,
+    mime_type: String,
+    size_bytes: i64,
+    checksum_sha256: String,
 }
 
 pub(crate) fn router() -> Router<AppState> {
@@ -886,7 +895,7 @@ async fn download_response_inner(
                JOIN parent_chain AS child ON parent.id = child.parent_id \
               WHERE parent.owner_id = $2 \
          ) \
-         SELECT entry.name, version.size_bytes, object.storage_key, object.mime_detected, \
+         SELECT entry.name, version.id AS file_version_id, version.size_bytes, object.storage_key, object.mime_detected, \
                 object.checksum_sha256, object.state, version.created_at AS version_created_at \
            FROM drive_entries AS entry \
            JOIN files AS file ON file.id = entry.id \
@@ -906,7 +915,7 @@ async fn download_response_inner(
             "object is not ready",
         ))));
     }
-    let size = u64::try_from(entry.size_bytes).map_err(|_| TransferError::Inconsistent)?;
+    let original_size = u64::try_from(entry.size_bytes).map_err(|_| TransferError::Inconsistent)?;
     let preview_mime = if inline_preview {
         let detected = match entry.mime_detected.as_deref() {
             Some(value) => safe_preview_mime(value),
@@ -916,7 +925,31 @@ async fn download_response_inner(
     } else {
         None
     };
-    let checksum = entry.checksum_sha256.ok_or(TransferError::Inconsistent)?;
+    let mut derivative_bytes = None;
+    let mut representation_mime = preview_mime;
+    let mut checksum = entry
+        .checksum_sha256
+        .clone()
+        .ok_or(TransferError::Inconsistent)?;
+    if inline_preview && supports_viewer_derivative(preview_mime) {
+        match read_viewer_derivative(state, entry.file_version_id).await {
+            Ok(Some((bytes, derivative_checksum))) => {
+                derivative_bytes = Some(bytes);
+                representation_mime = Some("image/webp");
+                checksum = derivative_checksum;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                file_version_id = %entry.file_version_id,
+                error = %error,
+                "could not use indexed viewer derivative; serving original image"
+            ),
+        }
+    }
+    let size = derivative_bytes
+        .as_ref()
+        .map(|bytes: &Vec<u8>| bytes.len() as u64)
+        .unwrap_or(original_size);
     let etag = format!("\"{checksum}\"");
     let last_modified = SystemTime::from(entry.version_created_at);
     let last_modified_header = httpdate::fmt_http_date(last_modified);
@@ -930,30 +963,12 @@ async fn download_response_inner(
                 .is_ok_and(|value| if_range_matches(value, &etag, last_modified_http_date))
         })
         .unwrap_or(true);
-    let range_value = if if_range_matches_current {
-        request_headers
-            .get(RANGE)
-            .and_then(|value| value.to_str().ok())
-    } else {
-        None
-    };
-    let requested_range = range::parse_range(range_value, size)
-        .map_err(|_| TransferError::RangeNotSatisfiable(size))?;
-    let (status, start, length, content_range) = match requested_range {
-        Some(range) => (
-            StatusCode::PARTIAL_CONTENT,
-            range.start,
-            range.len(),
-            Some(format!("bytes {}-{}/{}", range.start, range.end, size)),
-        ),
-        None => (StatusCode::OK, 0, size, None),
-    };
     let mut response_headers = HeaderMap::new();
     response_headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
     response_headers.insert(
         CONTENT_TYPE,
-        HeaderValue::from_static(preview_mime.unwrap_or("application/octet-stream")),
+        HeaderValue::from_static(representation_mime.unwrap_or("application/octet-stream")),
     );
     response_headers.insert(
         CONTENT_DISPOSITION,
@@ -986,6 +1001,38 @@ async fn download_response_inner(
         LAST_MODIFIED,
         HeaderValue::from_str(&last_modified_header).map_err(|_| TransferError::Inconsistent)?,
     );
+    if request_headers
+        .get_all(IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_none_match_matches(value, &etag))
+    {
+        let mut response = Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .body(Body::empty())
+            .map_err(|_| TransferError::Inconsistent)?;
+        *response.headers_mut() = response_headers;
+        return Ok(response);
+    }
+
+    let range_value = if if_range_matches_current {
+        request_headers
+            .get(RANGE)
+            .and_then(|value| value.to_str().ok())
+    } else {
+        None
+    };
+    let requested_range = range::parse_range(range_value, size)
+        .map_err(|_| TransferError::RangeNotSatisfiable(size))?;
+    let (status, start, length, content_range) = match requested_range {
+        Some(range) => (
+            StatusCode::PARTIAL_CONTENT,
+            range.start,
+            range.len(),
+            Some(format!("bytes {}-{}/{}", range.start, range.end, size)),
+        ),
+        None => (StatusCode::OK, 0, size, None),
+    };
     response_headers.insert(
         CONTENT_LENGTH,
         HeaderValue::from_str(&length.to_string()).map_err(|_| TransferError::Inconsistent)?,
@@ -999,6 +1046,11 @@ async fn download_response_inner(
 
     let body = if head_only {
         Body::empty()
+    } else if let Some(bytes) = derivative_bytes {
+        let start = usize::try_from(start).map_err(|_| TransferError::Inconsistent)?;
+        let end =
+            usize::try_from(start as u64 + length).map_err(|_| TransferError::Inconsistent)?;
+        Body::from(bytes[start..end].to_vec())
     } else {
         let mut file = state
             .storage
@@ -1016,6 +1068,54 @@ async fn download_response_inner(
         .map_err(|_| TransferError::Inconsistent)?;
     *response.headers_mut() = response_headers;
     Ok(response)
+}
+
+async fn read_viewer_derivative(
+    state: &AppState,
+    file_version_id: Uuid,
+) -> Result<Option<(Vec<u8>, String)>, String> {
+    let Some(previews) = state.media_preview.as_ref() else {
+        return Ok(None);
+    };
+    let derivative = sqlx::query_as::<_, ViewerDerivative>(
+        "SELECT recipe_version, mime_type, size_bytes, checksum_sha256 \
+           FROM media_derivatives \
+          WHERE file_version_id = $1 AND variant = 'viewer' \
+          ORDER BY recipe_version DESC LIMIT 1",
+    )
+    .bind(file_version_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| format!("query viewer derivative: {error}"))?;
+    let Some(derivative) = derivative else {
+        return Ok(None);
+    };
+    if derivative.mime_type != "image/webp" {
+        return Err("viewer derivative has an unsupported MIME type".to_owned());
+    }
+    let bytes = previews
+        .read_derivative(
+            file_version_id,
+            "viewer",
+            derivative.recipe_version,
+            derivative.size_bytes,
+            &derivative.checksum_sha256,
+            4 * 1024 * 1024,
+        )
+        .await
+        .map_err(|error| format!("verify viewer derivative: {error}"))?;
+    Ok(Some((bytes, derivative.checksum_sha256)))
+}
+
+fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
+    header_value.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*" || candidate == etag || candidate.strip_prefix("W/") == Some(etag)
+    })
+}
+
+fn supports_viewer_derivative(mime_type: Option<&str>) -> bool {
+    matches!(mime_type, Some("image/jpeg" | "image/png" | "image/webp"))
 }
 
 async fn fetch_upload(
@@ -1258,7 +1358,10 @@ fn map_database_error(error: sqlx::Error) -> TransferError {
 mod media_type_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{if_range_matches, is_indexable_image_mime, safe_preview_mime, sniff_media_type};
+    use super::{
+        if_none_match_matches, if_range_matches, is_indexable_image_mime, safe_preview_mime,
+        sniff_media_type, supports_viewer_derivative,
+    };
 
     #[test]
     fn detects_supported_media_from_file_signatures() {
@@ -1334,5 +1437,28 @@ mod media_type_tests {
             last_modified
         ));
         assert!(!if_range_matches("not a validator", etag, last_modified));
+    }
+
+    #[test]
+    fn matches_if_none_match_with_weak_comparison_and_wildcards() {
+        let etag = "\"current-checksum\"";
+        assert!(if_none_match_matches(etag, etag));
+        assert!(if_none_match_matches("W/\"current-checksum\"", etag));
+        assert!(if_none_match_matches(
+            "\"other\", W/\"current-checksum\"",
+            etag
+        ));
+        assert!(if_none_match_matches("*", etag));
+        assert!(!if_none_match_matches("W/\"other\"", etag));
+    }
+
+    #[test]
+    fn limits_viewer_derivatives_to_indexer_supported_formats() {
+        for mime_type in ["image/jpeg", "image/png", "image/webp"] {
+            assert!(supports_viewer_derivative(Some(mime_type)), "{mime_type}");
+        }
+        for mime_type in [Some("image/gif"), Some("image/avif"), None] {
+            assert!(!supports_viewer_derivative(mime_type));
+        }
     }
 }

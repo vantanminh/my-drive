@@ -1,5 +1,12 @@
 use std::{fs, path::PathBuf};
 
+use sha2::{Digest, Sha256};
+use tokio::{
+    fs as tokio_fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
+use uuid::Uuid;
+
 use crate::MediaPreviewConfig;
 
 use super::{StorageError, mount};
@@ -44,6 +51,103 @@ impl PreviewStorage {
         self.validate_mount()
     }
 
+    pub async fn publish_derivative(
+        &self,
+        version_id: Uuid,
+        variant: &str,
+        recipe_version: i16,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        if !matches!(variant, "card" | "viewer") || recipe_version <= 0 || bytes.is_empty() {
+            return Err(StorageError::UnsafeKey);
+        }
+        self.validate_mount()?;
+        let (free_bytes, _) = capacity(&self.root)?;
+        let reserve = u64::try_from(bytes.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(64 * 1024 * 1024);
+        if free_bytes < reserve {
+            return Err(StorageError::LowSpace);
+        }
+
+        let version_dir = self.root.join(version_id.to_string());
+        ensure_directory(&version_dir)?;
+        let destination = version_dir.join(format!("{variant}-v{recipe_version}.webp"));
+        let staging = version_dir.join(format!(".stage-{}.tmp", Uuid::new_v4()));
+
+        let result = async {
+            let mut file = tokio_fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)
+                .await?;
+            file.write_all(bytes).await?;
+            file.sync_all().await?;
+            drop(file);
+
+            self.validate_mount()?;
+            #[cfg(not(unix))]
+            if tokio_fs::try_exists(&destination).await? {
+                tokio_fs::remove_file(&destination).await?;
+            }
+            tokio_fs::rename(&staging, &destination).await?;
+            super::sync_directory(&version_dir)?;
+            Ok::<(), StorageError>(())
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = tokio_fs::remove_file(&staging).await;
+        }
+        result?;
+
+        Ok(())
+    }
+
+    pub async fn read_derivative(
+        &self,
+        version_id: Uuid,
+        variant: &str,
+        recipe_version: i16,
+        expected_size: i64,
+        expected_checksum: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        if !matches!(variant, "card" | "viewer")
+            || recipe_version <= 0
+            || expected_size <= 0
+            || u64::try_from(expected_size).unwrap_or(u64::MAX) > max_bytes
+            || expected_checksum.len() != 64
+            || !expected_checksum
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(StorageError::CorruptDerivative);
+        }
+        self.validate_mount()?;
+        let version_dir = self.root.join(version_id.to_string());
+        reject_symlink_or_non_directory(&version_dir)?;
+        let path = version_dir.join(format!("{variant}-v{recipe_version}.webp"));
+        let metadata = tokio_fs::symlink_metadata(&path).await?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(StorageError::UnsafeKey);
+        }
+        if metadata.len() != expected_size as u64 || metadata.len() > max_bytes {
+            return Err(StorageError::CorruptDerivative);
+        }
+        let file = tokio_fs::File::open(path).await?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() as u64 != metadata.len()
+            || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected_checksum)
+        {
+            return Err(StorageError::CorruptDerivative);
+        }
+        Ok(bytes)
+    }
+
     fn validate_mount(&self) -> Result<(), StorageError> {
         reject_symlink_or_non_directory(&self.root)?;
         reject_symlink_or_non_directory(&self.expected_mount)?;
@@ -63,6 +167,35 @@ impl PreviewStorage {
         }
         Ok(())
     }
+}
+
+fn ensure_directory(path: &std::path::Path) -> Result<(), StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => Ok(()),
+        Ok(_) => Err(StorageError::UnsafeKey),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(path)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    Err(StorageError::UnsafeKey)
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => Err(StorageError::Io(error)),
+        },
+        Err(error) => Err(StorageError::Io(error)),
+    }
+}
+
+fn capacity(path: &std::path::Path) -> Result<(u64, u64), StorageError> {
+    let free_bytes = fs2::available_space(path)?;
+    let total_bytes = fs2::total_space(path)?;
+    if total_bytes == 0 {
+        return Err(StorageError::UnknownCapacity);
+    }
+    Ok((free_bytes, total_bytes))
 }
 
 fn reject_symlink_or_non_directory(path: &std::path::Path) -> Result<(), StorageError> {
@@ -111,6 +244,43 @@ mod tests {
         storage.prepare().unwrap();
         assert!(root.is_dir());
         assert_eq!(storage.root, root);
+    }
+
+    #[tokio::test]
+    async fn derivative_files_use_version_scoped_names_and_atomic_staging() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("ssd-previews");
+        let storage = PreviewStorage::new(&MediaPreviewConfig {
+            root: root.clone(),
+            expected_mount: root.clone(),
+            require_mount: false,
+            require_device_match: false,
+            expected_device: None,
+        });
+        storage.prepare().unwrap();
+        let version_id = Uuid::new_v4();
+
+        storage
+            .publish_derivative(version_id, "card", 1, b"checked-webp-bytes")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fs::read(root.join(format!("{version_id}/card-v1.webp"))).unwrap(),
+            b"checked-webp-bytes"
+        );
+        assert_eq!(
+            fs::read_dir(root.join(version_id.to_string()))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert!(
+            storage
+                .publish_derivative(version_id, "../objects", 1, b"no")
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

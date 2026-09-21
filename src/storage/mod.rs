@@ -48,6 +48,8 @@ pub enum StorageError {
     UnsafeKey,
     #[error("staging and finalized object both exist unexpectedly")]
     ObjectCollision,
+    #[error("generated derivative failed its integrity check")]
+    CorruptDerivative,
     #[error("storage filesystem operation failed: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -76,6 +78,28 @@ impl LocalStorage {
         }
         sync_directory(&storage.root)?;
         storage.health()?;
+        Ok(storage)
+    }
+
+    pub fn open_readonly(config: &Config) -> Result<Self, StorageError> {
+        let mut storage = Self {
+            root: config.storage_root.clone(),
+            expected_mount: config.expected_mount.clone(),
+            require_mount: config.require_mount,
+            require_device_match: config.require_device_match,
+            expected_device: config.expected_device.clone(),
+            min_free_bytes: config.min_free_bytes,
+            min_free_percent: config.min_free_percent,
+        };
+        if storage.require_mount {
+            storage.validate_mount()?;
+        } else {
+            let metadata = fs::symlink_metadata(&storage.root)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(StorageError::MissingRoot);
+            }
+        }
+        storage.root = fs::canonicalize(&storage.root)?;
         Ok(storage)
     }
 
