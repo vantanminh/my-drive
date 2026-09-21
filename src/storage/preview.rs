@@ -58,7 +58,10 @@ impl PreviewStorage {
         recipe_version: i16,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        if !matches!(variant, "card" | "viewer") || recipe_version <= 0 || bytes.is_empty() {
+        if !matches!(variant, "card" | "viewer" | "video_poster")
+            || recipe_version <= 0
+            || bytes.is_empty()
+        {
             return Err(StorageError::UnsafeKey);
         }
         self.validate_mount()?;
@@ -113,7 +116,7 @@ impl PreviewStorage {
         expected_checksum: &str,
         max_bytes: u64,
     ) -> Result<Vec<u8>, StorageError> {
-        if !matches!(variant, "card" | "viewer")
+        if !matches!(variant, "card" | "viewer" | "video_poster")
             || recipe_version <= 0
             || expected_size <= 0
             || u64::try_from(expected_size).unwrap_or(u64::MAX) > max_bytes
@@ -264,16 +267,39 @@ mod tests {
             .publish_derivative(version_id, "card", 1, b"checked-webp-bytes")
             .await
             .unwrap();
+        storage
+            .publish_derivative(version_id, "video_poster", 1, b"checked-video-poster")
+            .await
+            .unwrap();
 
         assert_eq!(
             fs::read(root.join(format!("{version_id}/card-v1.webp"))).unwrap(),
             b"checked-webp-bytes"
         );
         assert_eq!(
+            fs::read(root.join(format!("{version_id}/video_poster-v1.webp"))).unwrap(),
+            b"checked-video-poster"
+        );
+        assert_eq!(
             fs::read_dir(root.join(version_id.to_string()))
                 .unwrap()
                 .count(),
-            1
+            2
+        );
+        let poster_checksum = format!("{:x}", Sha256::digest(b"checked-video-poster"));
+        assert_eq!(
+            storage
+                .read_derivative(
+                    version_id,
+                    "video_poster",
+                    1,
+                    i64::try_from(b"checked-video-poster".len()).unwrap(),
+                    &poster_checksum,
+                    1024,
+                )
+                .await
+                .unwrap(),
+            b"checked-video-poster"
         );
         assert!(
             storage

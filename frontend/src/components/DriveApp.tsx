@@ -80,11 +80,14 @@ function extensionIcon(entry: Pick<Entry, 'kind' | 'name'>) {
   return <File size={20} strokeWidth={1.8} className="file-icon" />;
 }
 
-const CARD_PREVIEW_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const INDEXED_THUMBNAIL_MIMES = new Set([
+  'image/jpeg', 'image/png', 'image/webp',
+  'video/mp4', 'video/webm'
+]);
 
 function hasIndexedCardPreview(entry: Entry): boolean {
-  if (entry.mime_detected) return CARD_PREVIEW_MIMES.has(entry.mime_detected);
-  return /\.(jpe?g|png|webp)$/i.test(entry.name);
+  if (entry.mime_detected) return INDEXED_THUMBNAIL_MIMES.has(entry.mime_detected);
+  return /\.(jpe?g|png|webp|mp4|m4v|webm)$/i.test(entry.name);
 }
 
 function EntryVisual({ entry, showThumbnail }: { entry: Entry; showThumbnail: boolean }) {
@@ -135,23 +138,26 @@ function displayShareStatus(share: ShareSummary): { label: string; className: st
 
 function mediaStageLabel(stage: string | null): string {
   const labels: Record<string, string> = {
-    opening_source: 'Reading original file',
-    copying_source: 'Reading original file',
-    checking_dimensions: 'Checking image dimensions',
-    thumbnailing_viewer: 'Building viewer preview',
-    thumbnailing_card: 'Building card preview',
-    publishing_viewer: 'Saving viewer preview',
-    publishing_card: 'Saving card preview'
+    opening_source: 'Reading original media',
+    copying_source: 'Reading original media',
+    checking_dimensions: 'Checking media dimensions',
+    thumbnailing_viewer: 'Building image viewer preview',
+    thumbnailing_card: 'Building image card preview',
+    extracting_video_poster: 'Extracting video poster frame',
+    encoding_video_poster: 'Encoding video poster',
+    publishing_viewer: 'Saving image viewer preview',
+    publishing_card: 'Saving image card preview',
+    publishing_video_poster: 'Saving video poster'
   };
-  return stage ? labels[stage] || 'Processing image' : 'Starting';
+  return stage ? labels[stage] || 'Processing media' : 'Starting';
 }
 
 function mediaFailureLabel(code: string | null): string {
   const labels: Record<string, string> = {
-    unsupported_format: 'This image format is not supported for previews.',
-    decode_failed: 'The image could not be decoded.',
+    unsupported_format: 'This media format is not supported for previews.',
+    decode_failed: 'The media could not be decoded.',
     input_missing: 'The original file is unavailable.',
-    resource_limit: 'The image exceeds preview processing limits.',
+    resource_limit: 'The media exceeds preview processing limits.',
     preview_storage_unavailable: 'Preview storage is unavailable.',
     processing_failed: 'Preview processing failed.'
   };
@@ -210,7 +216,7 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
         const result = await api.setMediaIndexPaused(action === 'pause', controller.signal);
         if (!controller.signal.aborted) {
           setStatus((current) => current ? { ...current, paused: result.paused } : current);
-          setNotice(result.paused ? 'Image preview indexing paused.' : 'Image preview indexing resumed.');
+          setNotice(result.paused ? 'Media preview indexing paused.' : 'Media preview indexing resumed.');
         }
       } else {
         const result = await api.retryMediaIndex(jobId, controller.signal);
@@ -261,10 +267,10 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
       <div className="media-index-header">
         <div>
           <span className="eyebrow">OWNER CONTROLS</span>
-          <h2 id="media-index-title">Image preview indexing</h2>
+          <h2 id="media-index-title">Media preview indexing</h2>
           <p>Track preview processing and manage failed jobs.</p>
         </div>
-        <button className="icon-button media-index-close" type="button" onClick={onClose} aria-label="Close image indexing panel"><X size={18} /></button>
+        <button className="icon-button media-index-close" type="button" onClick={onClose} aria-label="Close media indexing panel"><X size={18} /></button>
       </div>
 
       {error ? <div className="media-index-message media-index-error" role="alert">{error}</div> : null}
@@ -299,7 +305,7 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          <div className="media-index-metrics" aria-label="Image preview indexing totals">
+          <div className="media-index-metrics" aria-label="Media preview indexing totals">
             <div><span>Queued</span><strong>{counts?.queued ?? 0}</strong></div>
             <div><span>Running</span><strong>{counts?.running ?? 0}</strong></div>
             <div><span>Completed</span><strong>{counts?.completed ?? 0}</strong></div>
@@ -317,7 +323,7 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
             <Activity size={16} />
             {activeJob ? (
               <span><strong>{activeJob.fileName}</strong> · {mediaStageLabel(activeJob.currentStage)} · {formatSize(activeJob.processedBytes)} / {formatSize(activeJob.totalBytes)}</span>
-            ) : <span>No image preview job is running right now.</span>}
+            ) : <span>No media preview job is running right now.</span>}
           </div>
 
           <div className="media-index-failures">
@@ -342,7 +348,7 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
             ) : counts?.failed ? (
               <p className="media-index-empty">Failed jobs are older than the latest 100 jobs. Load older jobs to review their sanitized errors.</p>
             ) : (
-              <p className="media-index-empty">No failed image preview jobs.</p>
+              <p className="media-index-empty">No failed media preview jobs.</p>
             )}
             {olderCursor != null && failedJobs.length < (counts?.failed ?? 0) ? (
               <button className="load-more media-index-load-more" type="button" disabled={loadingOlder} onClick={() => void loadOlderJobs()}>
@@ -932,7 +938,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     type="button"
                     aria-expanded={mediaIndexOpen}
                     aria-controls={mediaIndexOpen ? 'media-index-panel' : undefined}
-                    aria-label={mediaIndexOpen ? 'Hide image indexing controls' : 'Show image indexing controls'}
+                    aria-label={mediaIndexOpen ? 'Hide media indexing controls' : 'Show media indexing controls'}
                     onClick={() => {
                       setAccountAdminOpen(false);
                       setMediaIndexOpen((open) => !open);

@@ -974,6 +974,81 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
     assert_eq!(video_preview.status(), StatusCode::OK);
     let _ = response_bytes(video_preview).await;
 
+    let video_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_version_id FROM files WHERE id = $1")
+            .bind(video_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load video fixture version id");
+    previews
+        .publish_derivative(video_version_id, "video_poster", 1, card_bytes)
+        .await
+        .expect("publish video poster fixture");
+    sqlx::query(
+        "INSERT INTO media_derivatives \
+            (file_version_id, variant, recipe_version, storage_key, mime_type, size_bytes, \
+             width, height, checksum_sha256) \
+         VALUES ($1, 'video_poster', 1, $2, 'image/webp', $3, 24, 12, $4)",
+    )
+    .bind(video_version_id)
+    .bind(format!("{video_version_id}/video_poster-v1.webp"))
+    .bind(i64::try_from(card_bytes.len()).unwrap())
+    .bind(&card_checksum)
+    .execute(&pool)
+    .await
+    .expect("record video poster fixture");
+
+    let video_thumbnail = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{video_id}/thumbnail"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(video_thumbnail.status(), StatusCode::OK);
+    assert_eq!(video_thumbnail.headers()[CONTENT_TYPE], "image/webp");
+    assert_eq!(
+        video_thumbnail.headers()[ETAG],
+        format!("\"{card_checksum}\"")
+    );
+    assert_eq!(response_bytes(video_thumbnail).await, card_bytes);
+
+    let video_thumbnail_head = request(
+        &app,
+        Method::HEAD,
+        &format!("/api/files/{video_id}/thumbnail"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(video_thumbnail_head.status(), StatusCode::OK);
+    assert_eq!(video_thumbnail_head.headers()[CONTENT_TYPE], "image/webp");
+    assert_eq!(
+        video_thumbnail_head.headers()[CONTENT_LENGTH],
+        card_bytes.len().to_string()
+    );
+    assert!(response_bytes(video_thumbnail_head).await.is_empty());
+
+    let foreign_video_thumbnail = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{video_id}/thumbnail"),
+        Some(&other_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(foreign_video_thumbnail.status(), StatusCode::NOT_FOUND);
+
     let svg_id = seed_file(
         &pool,
         owner_id,

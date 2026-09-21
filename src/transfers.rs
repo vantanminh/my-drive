@@ -38,6 +38,7 @@ use crate::{
 
 const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 const IMAGE_PREVIEW_RECIPE_VERSION: i16 = 1;
+const VIDEO_THUMBNAIL_RECIPE_VERSION: i16 = 1;
 const MAX_CARD_DERIVATIVE_BYTES: u64 = 512 * 1024;
 const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id";
 
@@ -793,7 +794,7 @@ async fn finalize_upload(
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
-    if is_indexable_image_mime(detected_media_type) {
+    if let Some((task, recipe_version)) = media_index_task(detected_media_type) {
         let version_id: Option<Uuid> =
             sqlx::query_scalar("SELECT current_version_id FROM files WHERE id = $1 FOR UPDATE")
                 .bind(file_id)
@@ -803,11 +804,12 @@ async fn finalize_upload(
         let version_id = version_id.ok_or(TransferError::Inconsistent)?;
         sqlx::query(
             "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-             VALUES ($1, 'image_preview', $2) \
+             VALUES ($1, $2, $3) \
              ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
         )
         .bind(version_id)
-        .bind(IMAGE_PREVIEW_RECIPE_VERSION)
+        .bind(task)
+        .bind(recipe_version)
         .execute(&mut *transaction)
         .await
         .map_err(map_database_error)?;
@@ -937,24 +939,20 @@ async fn thumbnail_response(
         Some(value) => safe_preview_mime(value),
         None => sniff_media_type_from_storage(state, &entry.storage_key).await?,
     };
-    if !is_indexable_image_mime(preview_mime) {
+    let Some((variant, max_bytes)) = thumbnail_variant_for_mime(preview_mime) else {
         return Err(TransferError::NotFound);
-    }
-    let Some((bytes, checksum)) = read_image_derivative(
-        state,
-        entry.file_version_id,
-        "card",
-        MAX_CARD_DERIVATIVE_BYTES,
-    )
-    .await
-    .map_err(|error| {
-        tracing::warn!(
-            file_version_id = %entry.file_version_id,
-            error = %error,
-            "could not read indexed card derivative"
-        );
-        TransferError::NotFound
-    })?
+    };
+    let Some((bytes, checksum)) =
+        read_image_derivative(state, entry.file_version_id, variant, max_bytes)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    file_version_id = %entry.file_version_id,
+                    error = %error,
+                    "could not read indexed card derivative"
+                );
+                TransferError::NotFound
+            })?
     else {
         return Err(TransferError::NotFound);
     };
@@ -1289,6 +1287,16 @@ fn supports_viewer_derivative(mime_type: Option<&str>) -> bool {
     matches!(mime_type, Some("image/jpeg" | "image/png" | "image/webp"))
 }
 
+fn thumbnail_variant_for_mime(mime_type: Option<&str>) -> Option<(&'static str, u64)> {
+    if is_indexable_image_mime(mime_type) {
+        Some(("card", MAX_CARD_DERIVATIVE_BYTES))
+    } else if matches!(mime_type, Some("video/mp4" | "video/webm")) {
+        Some(("video_poster", MAX_CARD_DERIVATIVE_BYTES))
+    } else {
+        None
+    }
+}
+
 async fn fetch_upload(
     state: &AppState,
     owner_id: Uuid,
@@ -1459,6 +1467,20 @@ fn is_indexable_image_mime(mime_type: Option<&str>) -> bool {
     )
 }
 
+fn is_indexable_video_mime(mime_type: Option<&str>) -> bool {
+    matches!(mime_type, Some("video/mp4" | "video/webm"))
+}
+
+fn media_index_task(mime_type: Option<&str>) -> Option<(&'static str, i16)> {
+    if is_indexable_image_mime(mime_type) {
+        Some(("image_preview", IMAGE_PREVIEW_RECIPE_VERSION))
+    } else if is_indexable_video_mime(mime_type) {
+        Some(("video_thumbnail", VIDEO_THUMBNAIL_RECIPE_VERSION))
+    } else {
+        None
+    }
+}
+
 async fn hash_file(path: &std::path::Path) -> Result<(u64, String), io::Error> {
     let mut file = tokio_fs::File::open(path).await?;
     let mut buffer = vec![0_u8; 128 * 1024];
@@ -1530,8 +1552,9 @@ mod media_type_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::{
-        if_none_match_matches, if_range_matches, is_indexable_image_mime, safe_preview_mime,
-        sniff_media_type, supports_viewer_derivative,
+        if_none_match_matches, if_range_matches, is_indexable_image_mime, is_indexable_video_mime,
+        media_index_task, safe_preview_mime, sniff_media_type, supports_viewer_derivative,
+        thumbnail_variant_for_mime,
     };
 
     #[test]
@@ -1631,5 +1654,42 @@ mod media_type_tests {
         for mime_type in [Some("image/gif"), Some("image/avif"), None] {
             assert!(!supports_viewer_derivative(mime_type));
         }
+    }
+
+    #[test]
+    fn selects_card_and_video_poster_variants_by_safe_media_mime() {
+        assert_eq!(
+            thumbnail_variant_for_mime(Some("image/jpeg")),
+            Some(("card", super::MAX_CARD_DERIVATIVE_BYTES))
+        );
+        assert_eq!(
+            thumbnail_variant_for_mime(Some("video/mp4")),
+            Some(("video_poster", super::MAX_CARD_DERIVATIVE_BYTES))
+        );
+        assert_eq!(
+            thumbnail_variant_for_mime(Some("video/webm")),
+            Some(("video_poster", super::MAX_CARD_DERIVATIVE_BYTES))
+        );
+        assert_eq!(thumbnail_variant_for_mime(Some("image/svg+xml")), None);
+        assert_eq!(thumbnail_variant_for_mime(None), None);
+    }
+
+    #[test]
+    fn queues_the_matching_media_index_task_for_ready_uploads() {
+        assert_eq!(
+            media_index_task(Some("image/png")),
+            Some(("image_preview", 1))
+        );
+        assert_eq!(
+            media_index_task(Some("video/mp4")),
+            Some(("video_thumbnail", 1))
+        );
+        assert_eq!(
+            media_index_task(Some("video/webm")),
+            Some(("video_thumbnail", 1))
+        );
+        assert!(is_indexable_video_mime(Some("video/mp4")));
+        assert!(!is_indexable_video_mime(Some("video/quicktime")));
+        assert_eq!(media_index_task(Some("application/pdf")), None);
     }
 }

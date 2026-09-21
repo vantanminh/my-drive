@@ -261,10 +261,12 @@ physical HDD and SSD mounts and device IDs. Keep `compose.yaml`,
    `docker compose up -d`. The app binds to loopback; configure a reverse proxy
     to terminate TLS. Do not expose the app port directly to the public internet.
 
-The indexer currently creates card and viewer WebP previews for JPEG, PNG,
-and WebP uploads. GIF, AVIF, BMP, and ICO files remain available as originals
-and their preview jobs are reported as unsupported. Compose creates a limited
-PostgreSQL role for the worker after the app has applied migrations.
+The indexer creates card and viewer WebP previews for JPEG, PNG, and WebP
+uploads. It also extracts one bounded first-frame WebP poster for MP4 and WebM
+uploads with a single ffmpeg worker thread. GIF, AVIF, BMP, and ICO files remain
+available as originals and their preview jobs are reported as unsupported.
+Compose creates a limited PostgreSQL role for the worker after the app has
+applied migrations.
 
 The Compose file binds PostgreSQL and preview cache directories to the SSD and
 the original payload root to the HDD. It uses `create_host_path: false` so

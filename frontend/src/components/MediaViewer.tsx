@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Download, Expand, Minus, Plus, RotateCcw, RotateCw, X } from 'lucide-react';
 import { formatSize } from '../format';
-import { previewUrl, downloadUrl } from '../api';
+import { previewUrl, thumbnailUrl, downloadUrl } from '../api';
 import type { Entry } from '../types';
 
 type MediaKind = 'image' | 'video';
@@ -111,6 +111,7 @@ export default function MediaViewer({ entry, onClose }: Props) {
               ref={videoRef}
               className="media-video"
               src={previewUrl(entry.id)}
+              poster={thumbnailUrl(entry.id)}
               controls
               playsInline
               preload="metadata"

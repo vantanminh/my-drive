@@ -36,7 +36,7 @@ ENTRYPOINT ["/usr/local/bin/my-drive"]
 
 FROM debian:bookworm-slim AS media-indexer-runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libvips42=8.14.1-3+deb12u3 webp=1.2.4-0.2+deb12u1 \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg libvips42=8.14.1-3+deb12u3 webp=1.2.4-0.2+deb12u1 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin mydrive
 COPY --from=builder /app/target/release/my-drive-media-indexer /usr/local/bin/my-drive-media-indexer

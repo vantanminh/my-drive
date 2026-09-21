@@ -174,7 +174,7 @@ async fn status(
                 AS processed_bytes \
           FROM media_index_jobs AS job \
           JOIN file_versions AS version ON version.id = job.file_version_id \
-         WHERE job.task = 'image_preview'",
+         WHERE job.task IN ('image_preview', 'video_thumbnail')",
     )
     .fetch_one(&state.pool)
     .await
@@ -186,7 +186,8 @@ async fn status(
            FROM media_index_jobs AS job \
            JOIN file_versions AS version ON version.id = job.file_version_id \
            JOIN drive_entries AS entry ON entry.id = version.file_id \
-          WHERE job.task = 'image_preview' AND ($1::BIGINT IS NULL OR job.id < $1) \
+          WHERE job.task IN ('image_preview', 'video_thumbnail') \
+            AND ($1::BIGINT IS NULL OR job.id < $1) \
           ORDER BY job.id DESC LIMIT $2",
     )
     .bind(query.before_id)
@@ -300,7 +301,7 @@ async fn retry_failed(
             SET state = 'queued', attempts = 0, available_at = now(), lease_expires_at = NULL, \
                 current_stage = NULL, processed_bytes = 0, error_code = NULL, \
                 last_error_at = NULL, completed_at = NULL, updated_at = now() \
-          WHERE task = 'image_preview' AND state = 'failed' \
+          WHERE task IN ('image_preview', 'video_thumbnail') AND state = 'failed' \
             AND ($1::BIGINT IS NULL OR id = $1)",
     )
     .bind(request.job_id)

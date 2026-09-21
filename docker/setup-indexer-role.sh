@@ -69,7 +69,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $function$
 BEGIN
-    IF p_variant NOT IN ('card', 'viewer') THEN
+    IF p_variant NOT IN ('card', 'viewer', 'video_poster') THEN
         RAISE EXCEPTION 'unsupported derivative variant';
     END IF;
 
