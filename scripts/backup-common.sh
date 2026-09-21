@@ -79,6 +79,15 @@ compose_mounts() {
     compose config --format json | "$PYTHON_BIN" "$SCRIPT_DIR/backup_compose.py" mounts
 }
 
+compose_service_defined() {
+    local service="$1" candidate services
+    services="$(compose config --services)" || die "could not inspect Compose services"
+    while IFS= read -r candidate; do
+        [[ "$candidate" == "$service" ]] && return 0
+    done <<<"$services"
+    return 1
+}
+
 compose_running_id() {
     local service="$1" container_ids container_id details state exit_code oom_killed restarting restart_policy first_running="" container_count=0
     container_ids="$(compose ps --all -q "$service")" || return 2

@@ -27,6 +27,8 @@ require_running_database
 backup_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 final_dir="$BACKUP_ROOT/my-drive-$backup_id"
 [[ ! -e "$final_dir" ]] || die "backup destination already exists: $final_dir"
+MEDIA_INDEXER_DEFINED=0
+if compose_service_defined media-indexer; then MEDIA_INDEXER_DEFINED=1; fi
 staging_dir="$(mktemp -d "$BACKUP_ROOT/.my-drive-backup.XXXXXXXX")"
 APP_NEEDS_RESTART=0
 INDEXER_NEEDS_RESTART=0
@@ -55,13 +57,15 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if service_is_running media-indexer && ! service_is_running app; then
+if (( MEDIA_INDEXER_DEFINED )) && service_is_running media-indexer && ! service_is_running app; then
     die "media-indexer is running while app is stopped; recover the Compose services before backup"
 fi
 
 if service_is_running app; then APP_NEEDS_RESTART=1; fi
-if service_is_running media-indexer; then INDEXER_NEEDS_RESTART=1; fi
-stop_service_for_operation media-indexer
+if (( MEDIA_INDEXER_DEFINED )); then
+    if service_is_running media-indexer; then INDEXER_NEEDS_RESTART=1; fi
+    stop_service_for_operation media-indexer
+fi
 stop_service_for_operation app
 
 compose exec -T db sh -ec 'exec pg_dump --format=custom --no-owner --no-acl --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \

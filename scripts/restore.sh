@@ -75,6 +75,7 @@ database_cutover_started=0
 restore_committed=0
 APP_NEEDS_RESTART=0
 INDEXER_NEEDS_RESTART=0
+MEDIA_INDEXER_DEFINED=0
 DATABASE_ROLLBACK_CONFIRMED=0
 STORAGE_ROLLBACK_CONFIRMED=0
 KEEP_SERVICES_STOPPED=0
@@ -234,13 +235,16 @@ for candidate in "$scratch_database" "$previous_database"; do
     fi
 done
 
-if service_is_running media-indexer && ! service_is_running app; then
+if compose_service_defined media-indexer; then MEDIA_INDEXER_DEFINED=1; fi
+if (( MEDIA_INDEXER_DEFINED )) && service_is_running media-indexer && ! service_is_running app; then
     die "media-indexer is running while app is stopped; recover the Compose services before restore"
 fi
 
 if service_is_running app; then APP_NEEDS_RESTART=1; fi
-if service_is_running media-indexer; then INDEXER_NEEDS_RESTART=1; fi
-stop_service_for_operation media-indexer
+if (( MEDIA_INDEXER_DEFINED )); then
+    if service_is_running media-indexer; then INDEXER_NEEDS_RESTART=1; fi
+    stop_service_for_operation media-indexer
+fi
 stop_service_for_operation app
 
 compose exec -T db createdb --username "$DATABASE_USER" --owner "$DATABASE_USER" "$scratch_database"
