@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
-  Check, ChevronDown, ChevronRight, CircleUserRound, CloudUpload, Download, Eye, File, FileImage,
+  Activity, Check, ChevronDown, ChevronRight, CircleUserRound, CloudUpload, Download, Eye, File, FileImage,
   FileSpreadsheet, FileText, Folder, FolderPlus, HardDrive, LockKeyhole, LogOut, MoreHorizontal,
-  RotateCcw, Search, Share2, Trash2, Upload, Users, X
+  Pause, Play, RotateCcw, Search, Share2, Trash2, Upload, Users, X
 } from 'lucide-react';
-import { ApiError, api, downloadUrl } from '../api';
+import { ApiError, api, downloadUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import type { Entry, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
@@ -90,6 +90,232 @@ function displayShareStatus(share: ShareSummary): { label: string; className: st
   return { label: 'Active', className: 'status-active' };
 }
 
+function mediaStageLabel(stage: string | null): string {
+  const labels: Record<string, string> = {
+    opening_source: 'Reading original file',
+    copying_source: 'Reading original file',
+    checking_dimensions: 'Checking image dimensions',
+    thumbnailing_viewer: 'Building viewer preview',
+    thumbnailing_card: 'Building card preview',
+    publishing_viewer: 'Saving viewer preview',
+    publishing_card: 'Saving card preview'
+  };
+  return stage ? labels[stage] || 'Processing image' : 'Starting';
+}
+
+function mediaFailureLabel(code: string | null): string {
+  const labels: Record<string, string> = {
+    unsupported_format: 'This image format is not supported for previews.',
+    decode_failed: 'The image could not be decoded.',
+    input_missing: 'The original file is unavailable.',
+    resource_limit: 'The image exceeds preview processing limits.',
+    preview_storage_unavailable: 'Preview storage is unavailable.',
+    processing_failed: 'Preview processing failed.'
+  };
+  return code ? labels[code] || labels.processing_failed : labels.processing_failed;
+}
+
+function MediaIndexPanel({ onClose }: { onClose: () => void }) {
+  const [status, setStatus] = useState<MediaIndexStatus | null>(null);
+  const [olderJobs, setOlderJobs] = useState<MediaIndexJob[]>([]);
+  const [olderCursor, setOlderCursor] = useState<number | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const activeRequests = useRef<Set<AbortController>>(new Set());
+
+  useEffect(() => {
+    let closed = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const controller = new AbortController();
+      activeRequests.current.add(controller);
+      try {
+        const result = await api.mediaIndexStatus(controller.signal);
+        if (!closed) {
+          setStatus(result);
+          setError('');
+          if (olderJobs.length === 0) setOlderCursor(result.nextBeforeId);
+        }
+      } catch (cause: unknown) {
+        if (!closed && !controller.signal.aborted) setError(friendlyError(cause));
+      } finally {
+        activeRequests.current.delete(controller);
+        if (!closed) timer = window.setTimeout(() => void poll(), 15000);
+      }
+    };
+    void poll();
+    return () => {
+      closed = true;
+      if (timer != null) window.clearTimeout(timer);
+      activeRequests.current.forEach((controller) => controller.abort());
+      activeRequests.current.clear();
+    };
+  }, [reloadKey, olderJobs.length]);
+
+  async function runAction(action: 'pause' | 'resume' | 'retry' | 'retry-all', jobId?: number) {
+    const key = jobId == null ? action : 'retry-' + jobId;
+    const controller = new AbortController();
+    activeRequests.current.add(controller);
+    setBusyAction(key);
+    setError('');
+    setNotice('');
+    try {
+      if (action === 'pause' || action === 'resume') {
+        const result = await api.setMediaIndexPaused(action === 'pause', controller.signal);
+        if (!controller.signal.aborted) {
+          setStatus((current) => current ? { ...current, paused: result.paused } : current);
+          setNotice(result.paused ? 'Image preview indexing paused.' : 'Image preview indexing resumed.');
+        }
+      } else {
+        const result = await api.retryMediaIndex(jobId, controller.signal);
+        if (!controller.signal.aborted) {
+          setOlderJobs((jobs) => jobs.filter((job) => jobId == null || job.id !== jobId));
+          setNotice(result.retried === 1 ? 'One failed job queued for retry.' : result.retried + ' failed jobs queued for retry.');
+        }
+      }
+      if (!controller.signal.aborted) setReloadKey((value) => value + 1);
+    } catch (cause: unknown) {
+      if (!controller.signal.aborted) setError(friendlyError(cause));
+    } finally {
+      activeRequests.current.delete(controller);
+      if (!controller.signal.aborted) setBusyAction(null);
+    }
+  }
+
+  async function loadOlderJobs() {
+    if (olderCursor == null || loadingOlder) return;
+    const controller = new AbortController();
+    activeRequests.current.add(controller);
+    setLoadingOlder(true);
+    try {
+      const page = await api.mediaIndexStatus(controller.signal, olderCursor);
+      if (!controller.signal.aborted) {
+        setOlderJobs((jobs) => {
+          const existing = new Set(jobs.map((job) => job.id));
+          return [...jobs, ...page.jobs.filter((job) => !existing.has(job.id))];
+        });
+        setOlderCursor(page.nextBeforeId);
+      }
+    } catch (cause: unknown) {
+      if (!controller.signal.aborted) setError(friendlyError(cause));
+    } finally {
+      activeRequests.current.delete(controller);
+      if (!controller.signal.aborted) setLoadingOlder(false);
+    }
+  }
+
+  const allJobs = status ? [...status.jobs, ...olderJobs] : olderJobs;
+  const failedJobs = allJobs.filter((job) => job.state === 'failed');
+  const visibleFailures = failedJobs.slice(0, 4);
+  const counts = status?.counts;
+  const activeJob = status?.jobs.find((job) => job.state === 'running');
+
+  return (
+    <section className="media-index-panel" id="media-index-panel" aria-labelledby="media-index-title">
+      <div className="media-index-header">
+        <div>
+          <span className="eyebrow">OWNER CONTROLS</span>
+          <h2 id="media-index-title">Image preview indexing</h2>
+          <p>Track preview processing and manage failed jobs.</p>
+        </div>
+        <button className="icon-button media-index-close" type="button" onClick={onClose} aria-label="Close image indexing panel"><X size={18} /></button>
+      </div>
+
+      {error ? <div className="media-index-message media-index-error" role="alert">{error}</div> : null}
+      {notice ? <div className="media-index-message media-index-notice" role="status">{notice}</div> : null}
+
+      {status ? (
+        <>
+          <div className="media-index-toolbar">
+            <span className={'media-index-health ' + (status.previewStorageAvailable ? 'is-healthy' : 'is-unhealthy')} role="status">
+              <i /> Preview SSD {status.previewStorageAvailable ? 'available' : 'unavailable'}
+            </span>
+            <div className="media-index-actions">
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={busyAction != null}
+                onClick={() => void runAction(status.paused ? 'resume' : 'pause')}
+              >
+                {status.paused ? <Play size={15} /> : <Pause size={15} />}
+                {status.paused ? 'Resume indexing' : 'Pause indexing'}
+              </button>
+              {status.counts.failed > 0 ? (
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  disabled={busyAction != null}
+                  onClick={() => void runAction('retry-all')}
+                >
+                  <RotateCcw size={15} /> Retry all failed
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="media-index-metrics" aria-label="Image preview indexing totals">
+            <div><span>Queued</span><strong>{counts?.queued ?? 0}</strong></div>
+            <div><span>Running</span><strong>{counts?.running ?? 0}</strong></div>
+            <div><span>Completed</span><strong>{counts?.completed ?? 0}</strong></div>
+            <div><span>Unsupported</span><strong>{counts?.unsupported ?? 0}</strong></div>
+            <div><span>Retry waiting</span><strong>{counts?.retryWait ?? 0}</strong></div>
+            <div><span>Failed</span><strong>{counts?.failed ?? 0}</strong></div>
+          </div>
+
+          <div className="media-index-byte-stats">
+            <div><span>Bytes pending</span><strong>{formatSize(status.pendingBytes)}</strong></div>
+            <div><span>Bytes processed in active jobs</span><strong>{formatSize(status.processedBytes)}</strong></div>
+          </div>
+
+          <div className="media-index-active" aria-live="polite">
+            <Activity size={16} />
+            {activeJob ? (
+              <span><strong>{activeJob.fileName}</strong> · {mediaStageLabel(activeJob.currentStage)} · {formatSize(activeJob.processedBytes)} / {formatSize(activeJob.totalBytes)}</span>
+            ) : <span>No image preview job is running right now.</span>}
+          </div>
+
+          <div className="media-index-failures">
+            <div className="media-index-subhead"><strong>Recent failures</strong><span>{counts?.failed ?? 0} total</span></div>
+            {visibleFailures.length ? (
+              <ul>
+                {visibleFailures.map((job) => (
+                  <li key={job.id}>
+                    <div><strong title={job.fileName}>{job.fileName}</strong><span>{mediaFailureLabel(job.errorCode)}</span></div>
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      disabled={busyAction != null}
+                      onClick={() => void runAction('retry', job.id)}
+                      aria-label={'Retry preview for ' + job.fileName}
+                    >
+                      <RotateCcw size={14} /> Retry
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : counts?.failed ? (
+              <p className="media-index-empty">Failed jobs are older than the latest 100 jobs. Load older jobs to review their sanitized errors.</p>
+            ) : (
+              <p className="media-index-empty">No failed image preview jobs.</p>
+            )}
+            {olderCursor != null && failedJobs.length < (counts?.failed ?? 0) ? (
+              <button className="load-more media-index-load-more" type="button" disabled={loadingOlder} onClick={() => void loadOlderJobs()}>
+                {loadingOlder ? 'Loading older jobs…' : 'Load older jobs'}
+              </button>
+            ) : null}
+            {failedJobs.length > visibleFailures.length ? <p className="media-index-empty">Showing the 4 most recent of {failedJobs.length} loaded failures.</p> : null}
+          </div>
+        </>
+      ) : (
+        <div className="media-index-loading" role="status">Loading indexing status…</div>
+      )}
+    </section>
+  );
+}
+
 function EntryMenu({
   entry,
   section,
@@ -170,6 +396,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [modal, setModal] = useState<Modal>(null);
   const [shareTarget, setShareTarget] = useState<Entry | null>(null);
   const [viewer, setViewer] = useState<Entry | null>(null);
+  const [mediaIndexOpen, setMediaIndexOpen] = useState(false);
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
     readSavedUploads().map((saved) => ({
@@ -642,6 +869,18 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             </div>
             {section === 'drive' && (
               <div className="heading-actions">
+                {user.role === 'owner' ? (
+                  <button
+                    className="button button-secondary media-index-trigger"
+                    type="button"
+                    aria-expanded={mediaIndexOpen}
+                    aria-controls={mediaIndexOpen ? 'media-index-panel' : undefined}
+                    aria-label={mediaIndexOpen ? 'Hide image indexing controls' : 'Show image indexing controls'}
+                    onClick={() => setMediaIndexOpen((open) => !open)}
+                  >
+                    <Activity size={16} /> <span>{mediaIndexOpen ? 'Hide indexing' : 'Image indexing'}</span>
+                  </button>
+                ) : null}
                 <button className="button button-secondary" onClick={() => setModal({ kind: 'new-folder' })}>
                   <FolderPlus size={17} /> <span>New folder</span>
                 </button>
@@ -664,6 +903,12 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               ))}
             </nav>
           )}
+
+          {section === 'drive' ? (
+            user.role === 'owner' ? (
+              mediaIndexOpen ? <MediaIndexPanel onClose={() => setMediaIndexOpen(false)} /> : null
+            ) : null
+          ) : null}
 
           {error && <div className="notice notice-error" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
           {notice && !error && <div className="notice notice-success" role="status"><Check size={16} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss"><X size={16} /></button></div>}

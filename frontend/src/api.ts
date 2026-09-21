@@ -21,6 +21,37 @@ export class ApiError extends Error {
   }
 }
 
+export type MediaIndexJob = {
+  id: number;
+  fileId: string;
+  fileName: string;
+  state: string;
+  attempts: number;
+  currentStage: string | null;
+  processedBytes: number;
+  totalBytes: number;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MediaIndexStatus = {
+  previewStorageAvailable: boolean;
+  paused: boolean;
+  counts: {
+    queued: number;
+    running: number;
+    completed: number;
+    unsupported: number;
+    retryWait: number;
+    failed: number;
+  };
+  pendingBytes: number;
+  processedBytes: number;
+  jobs: MediaIndexJob[];
+  nextBeforeId: number | null;
+};
+
 let csrfToken: string | null = null;
 
 export function rememberCsrf(token: string | null) {
@@ -81,6 +112,25 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
 
 export const api = {
   me: (signal?: AbortSignal) => request<User>('/api/auth/me', { signal }),
+  mediaIndexStatus: (signal?: AbortSignal, beforeId?: number | null) => {
+    const query = new URLSearchParams({ limit: '100' });
+    if (beforeId != null) query.set('beforeId', String(beforeId));
+    return request<MediaIndexStatus>('/api/admin/media-index?' + query.toString(), { signal });
+  },
+  setMediaIndexPaused: (paused: boolean, signal?: AbortSignal) =>
+    request<{ paused: boolean }>('/api/admin/media-index/pause', {
+      method: 'POST',
+      json: { paused },
+      csrf: true,
+      signal
+    }),
+  retryMediaIndex: (jobId?: number, signal?: AbortSignal) =>
+    request<{ retried: number }>('/api/admin/media-index/retry', {
+      method: 'POST',
+      json: jobId == null ? {} : { jobId },
+      csrf: true,
+      signal
+    }),
   login: async (email: string, password: string) => {
     const result = await request<{ user: User; csrf_token: string }>('/api/auth/login', {
       method: 'POST',
