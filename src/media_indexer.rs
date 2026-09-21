@@ -242,8 +242,11 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
           WHERE entry.deleted_at IS NULL \
             AND object.state = 'ready' \
              AND object.mime_detected IN \
-                ('image/jpeg', 'image/png', 'image/webp', 'image/gif', \
-                 'image/avif', 'image/bmp', 'image/x-icon', 'video/mp4', 'video/webm') \
+                 ('image/jpeg', 'image/png', 'image/webp', 'image/gif', \
+                  'image/avif', 'image/bmp', 'image/x-icon', \
+                  'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', \
+                  'video/x-msvideo', 'video/ogg', 'video/mpeg', 'video/mp2t', \
+                  'video/x-flv', 'video/x-ms-wmv', 'video/3gpp') \
             AND NOT EXISTS ( \
                 SELECT 1 FROM media_index_jobs AS existing \
                    WHERE existing.file_version_id = version.id \
@@ -272,7 +275,9 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
             AND object.mime_detected IN ( \
                 'image/jpeg', 'image/png', 'image/gif', 'image/webp', \
                 'image/avif', 'image/bmp', 'image/x-icon', \
-                'video/mp4', 'video/webm' \
+                 'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', \
+                 'video/x-msvideo', 'video/ogg', 'video/mpeg', 'video/mp2t', \
+                 'video/x-flv', 'video/x-ms-wmv', 'video/3gpp' \
             ) \
             AND NOT EXISTS ( \
                 SELECT 1 FROM media_index_jobs AS existing \
@@ -756,7 +761,7 @@ async fn copy_source(
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
     let mut last_reported = 0_u64;
-    let mut prefix = Vec::with_capacity(64);
+    let mut prefix = Vec::with_capacity(512);
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = source.read(&mut buffer).await?;
@@ -768,8 +773,8 @@ async fn copy_source(
             return Err(WorkerError::SourceTooLarge);
         }
         hasher.update(&buffer[..read]);
-        if prefix.len() < 64 {
-            let needed = 64 - prefix.len();
+        if prefix.len() < 512 {
+            let needed = 512 - prefix.len();
             prefix.extend_from_slice(&buffer[..read.min(needed)]);
         }
         output.write_all(&buffer[..read]).await?;
@@ -1126,6 +1131,45 @@ fn matches_magic(mime: &str, prefix: &[u8]) -> bool {
             prefix.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
                 && prefix.windows(4).any(|value| value == b"webm")
         }
+        "video/quicktime" => {
+            prefix.get(4..8) == Some(b"ftyp") && prefix.windows(4).any(|value| value == b"qt  ")
+        }
+        "video/x-matroska" => {
+            prefix.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
+                && prefix.windows(8).any(|value| value == b"matroska")
+        }
+        "video/x-msvideo" => {
+            prefix.len() >= 12 && &prefix[..4] == b"RIFF" && &prefix[8..12] == b"AVI "
+        }
+        "video/ogg" => {
+            prefix.starts_with(b"OggS") && prefix.windows(6).any(|value| value == b"theora")
+        }
+        "video/mpeg" => {
+            prefix.starts_with(&[0x00, 0x00, 0x01, 0xba])
+                || prefix.starts_with(&[0x00, 0x00, 0x01, 0xb3])
+        }
+        "video/mp2t" => {
+            prefix.len() >= 377
+                && [0_usize, 188, 376]
+                    .into_iter()
+                    .all(|offset| prefix.get(offset) == Some(&0x47))
+        }
+        "video/x-flv" => {
+            prefix.starts_with(b"FLV") && prefix.get(3).is_some_and(|version| *version == 1)
+        }
+        "video/x-ms-wmv" => prefix.starts_with(&[
+            0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62,
+            0xce, 0x6c,
+        ]),
+        "video/3gpp" => {
+            prefix.get(4..8) == Some(b"ftyp")
+                && prefix.windows(4).any(|value| {
+                    matches!(
+                        value,
+                        b"3gp4" | b"3gp5" | b"3gp6" | b"3gp7" | b"3gg6" | b"3gs6"
+                    )
+                })
+        }
         _ => false,
     }
 }
@@ -1151,7 +1195,20 @@ fn supports_ffmpeg_image_mime(mime: &str) -> bool {
 }
 
 fn supports_video_mime(mime: &str) -> bool {
-    matches!(mime, "video/mp4" | "video/webm")
+    matches!(
+        mime,
+        "video/mp4"
+            | "video/webm"
+            | "video/quicktime"
+            | "video/x-matroska"
+            | "video/x-msvideo"
+            | "video/ogg"
+            | "video/mpeg"
+            | "video/mp2t"
+            | "video/x-flv"
+            | "video/x-ms-wmv"
+            | "video/3gpp"
+    )
 }
 
 fn media_extension(mime: &str) -> Option<&'static str> {
@@ -1165,6 +1222,15 @@ fn media_extension(mime: &str) -> Option<&'static str> {
         "image/x-icon" => Some("ico"),
         "video/mp4" => Some("mp4"),
         "video/webm" => Some("webm"),
+        "video/quicktime" => Some("mov"),
+        "video/x-matroska" => Some("mkv"),
+        "video/x-msvideo" => Some("avi"),
+        "video/ogg" => Some("ogv"),
+        "video/mpeg" => Some("mpg"),
+        "video/mp2t" => Some("ts"),
+        "video/x-flv" => Some("flv"),
+        "video/x-ms-wmv" => Some("wmv"),
+        "video/3gpp" => Some("3gp"),
         _ => None,
     }
 }
@@ -1331,11 +1397,25 @@ mod tests {
     }
 
     #[test]
-    fn worker_video_registry_only_accepts_mp4_and_webm() {
-        assert!(supports_video_mime("video/mp4"));
-        assert!(supports_video_mime("video/webm"));
-        assert!(!supports_video_mime("video/quicktime"));
-        assert!(!supports_video_mime("video/x-matroska"));
+    fn worker_video_registry_accepts_common_ffmpeg_containers() {
+        for mime in [
+            "video/mp4",
+            "video/webm",
+            "video/quicktime",
+            "video/x-matroska",
+            "video/x-msvideo",
+            "video/ogg",
+            "video/mpeg",
+            "video/mp2t",
+            "video/x-flv",
+            "video/x-ms-wmv",
+            "video/3gpp",
+        ] {
+            assert!(supports_video_mime(mime), "{mime}");
+        }
+        for mime in ["video/x-ms-asf", "video/x-m4v", "video/avi"] {
+            assert!(!supports_video_mime(mime), "{mime}");
+        }
     }
 
     #[test]
@@ -1352,11 +1432,37 @@ mod tests {
             "video/webm",
             b"\x1a\x45\xdf\xa3\xa3\x42\x82\x84webm"
         ));
+        assert!(matches_magic(
+            "video/quicktime",
+            b"\x00\x00\x00\x18ftypqt  "
+        ));
+        assert!(matches_magic(
+            "video/x-matroska",
+            b"\x1a\x45\xdf\xa3\xa3\x42\x82\x84matroska"
+        ));
+        assert!(matches_magic(
+            "video/x-msvideo",
+            b"RIFF\x00\x00\x00\x00AVI "
+        ));
+        assert!(matches_magic("video/ogg", b"OggS\x00\x02\x00theora"));
+        assert!(matches_magic("video/mpeg", b"\x00\x00\x01\xba"));
+        assert!(matches_magic("video/x-flv", b"FLV\x01"));
+        assert!(matches_magic(
+            "video/x-ms-wmv",
+            b"0&\xb2u\x8ef\xcf\x11\xa6\xd9\x00\xaa\x00b\xcel"
+        ));
+        assert!(matches_magic("video/3gpp", b"\x00\x00\x00\x18ftyp3gp6"));
+        let transport_stream = [0x47_u8; 512];
+        assert!(matches_magic("video/mp2t", &transport_stream));
         assert!(!matches_magic("image/jpeg", b"\x89PNG\r\n\x1a\n"));
         assert!(!matches_magic("image/gif", b"GIF89"));
         assert!(!matches_magic("image/avif", b"\x00\x00\x00\x18ftypisom"));
         assert!(!matches_magic("image/x-icon", b"\x00\x00\x02\x00rest"));
         assert!(!matches_magic("video/webm", b"\x1a\x45\xdf\xa3matroska"));
+        assert!(!matches_magic(
+            "video/x-matroska",
+            b"\x1a\x45\xdf\xa3unknown"
+        ));
     }
 
     #[test]

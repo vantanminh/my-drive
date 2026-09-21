@@ -23,14 +23,17 @@ type MediaKind = 'image' | 'video';
 const IMAGE_MIMES = new Set([
   'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon'
 ]);
-const VIDEO_MIMES = new Set(['video/mp4', 'video/webm']);
+const VIDEO_MIMES = new Set([
+  'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo',
+  'video/ogg', 'video/mpeg', 'video/mp2t', 'video/x-flv', 'video/x-ms-wmv', 'video/3gpp'
+]);
 
 export function mediaKindFor(entry: Pick<Entry, 'name' | 'mime_detected'>): MediaKind | null {
   if (entry.mime_detected && IMAGE_MIMES.has(entry.mime_detected)) return 'image';
   if (entry.mime_detected && VIDEO_MIMES.has(entry.mime_detected)) return 'video';
   const name = entry.name.toLowerCase();
   if (/\.(jpe?g|png|gif|webp|avif|bmp|ico)$/.test(name)) return 'image';
-  if (/\.(mp4|m4v|webm)$/.test(name)) return 'video';
+  if (/\.(mp4|m4v|webm|mov|qt|mkv|mk3d|avi|ogv|ogg|mpg|mpeg|mpe|ts|mts|m2ts|flv|wmv|asf|3gp|3g2)$/.test(name)) return 'video';
   return null;
 }
 

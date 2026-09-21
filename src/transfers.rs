@@ -1305,7 +1305,7 @@ fn supports_viewer_derivative(mime_type: Option<&str>) -> bool {
 fn thumbnail_variant_for_mime(mime_type: Option<&str>) -> Option<(&'static str, u64)> {
     if is_indexable_image_mime(mime_type) {
         Some(("card", MAX_CARD_DERIVATIVE_BYTES))
-    } else if matches!(mime_type, Some("video/mp4" | "video/webm")) {
+    } else if is_indexable_video_mime(mime_type) {
         Some(("video_poster", MAX_CARD_DERIVATIVE_BYTES))
     } else {
         None
@@ -1368,7 +1368,7 @@ async fn sniff_media_type_from_path(
     path: &std::path::Path,
 ) -> Result<Option<&'static str>, io::Error> {
     let mut file = tokio_fs::File::open(path).await?;
-    let mut header = [0_u8; 64];
+    let mut header = [0_u8; 512];
     let length = file.read(&mut header).await?;
     Ok(sniff_media_type(&header[..length]))
 }
@@ -1382,7 +1382,7 @@ async fn sniff_media_type_from_storage(
         .open_object(storage_key)
         .await
         .map_err(TransferError::Storage)?;
-    let mut header = [0_u8; 64];
+    let mut header = [0_u8; 512];
     let length = file
         .read(&mut header)
         .await
@@ -1401,6 +1401,15 @@ fn safe_preview_mime(mime: &str) -> Option<&'static str> {
         "image/x-icon" => Some("image/x-icon"),
         "video/mp4" => Some("video/mp4"),
         "video/webm" => Some("video/webm"),
+        "video/quicktime" => Some("video/quicktime"),
+        "video/x-matroska" => Some("video/x-matroska"),
+        "video/x-msvideo" => Some("video/x-msvideo"),
+        "video/ogg" => Some("video/ogg"),
+        "video/mpeg" => Some("video/mpeg"),
+        "video/mp2t" => Some("video/mp2t"),
+        "video/x-flv" => Some("video/x-flv"),
+        "video/x-ms-wmv" => Some("video/x-ms-wmv"),
+        "video/3gpp" => Some("video/3gpp"),
         _ => None,
     }
 }
@@ -1441,6 +1450,17 @@ fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
         {
             return Some("image/avif");
         }
+        if header.windows(4).any(|brand| brand == b"qt  ") {
+            return Some("video/quicktime");
+        }
+        if header.windows(4).any(|brand| {
+            matches!(
+                brand,
+                b"3gp4" | b"3gp5" | b"3gp6" | b"3gp7" | b"3gg6" | b"3gs6"
+            )
+        }) {
+            return Some("video/3gpp");
+        }
         if header.windows(4).any(|brand| {
             matches!(
                 brand,
@@ -1464,6 +1484,40 @@ fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
     {
         return Some("video/webm");
     }
+    if header.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
+        && header.windows(8).any(|doc_type| doc_type == b"matroska")
+    {
+        return Some("video/x-matroska");
+    }
+    if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"AVI " {
+        return Some("video/x-msvideo");
+    }
+    if header.starts_with(b"OggS") && header.windows(6).any(|codec| codec == b"theora") {
+        return Some("video/ogg");
+    }
+    if header.starts_with(b"FLV") && header.get(3).is_some_and(|version| *version == 1) {
+        return Some("video/x-flv");
+    }
+    if header.starts_with(&[0x00, 0x00, 0x01, 0xba])
+        || header.starts_with(&[0x00, 0x00, 0x01, 0xb3])
+    {
+        return Some("video/mpeg");
+    }
+    if header.len() >= 16
+        && header.starts_with(&[
+            0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62,
+            0xce, 0x6c,
+        ])
+    {
+        return Some("video/x-ms-wmv");
+    }
+    if header.len() >= 377
+        && [0_usize, 188, 376]
+            .into_iter()
+            .all(|offset| header.get(offset) == Some(&0x47))
+    {
+        return Some("video/mp2t");
+    }
     None
 }
 
@@ -1483,7 +1537,22 @@ fn is_indexable_image_mime(mime_type: Option<&str>) -> bool {
 }
 
 fn is_indexable_video_mime(mime_type: Option<&str>) -> bool {
-    matches!(mime_type, Some("video/mp4" | "video/webm"))
+    matches!(
+        mime_type,
+        Some(
+            "video/mp4"
+                | "video/webm"
+                | "video/quicktime"
+                | "video/x-matroska"
+                | "video/x-msvideo"
+                | "video/ogg"
+                | "video/mpeg"
+                | "video/mp2t"
+                | "video/x-flv"
+                | "video/x-ms-wmv"
+                | "video/3gpp"
+        )
+    )
 }
 
 fn media_index_task(mime_type: Option<&str>) -> Option<(&'static str, i16)> {
@@ -1578,6 +1647,7 @@ mod media_type_tests {
 
     #[test]
     fn detects_supported_media_from_file_signatures() {
+        let transport_stream = [0x47_u8; 512];
         let samples: &[(&[u8], &str)] = &[
             (b"\x89PNG\r\n\x1a\nrest", "image/png"),
             (b"\xff\xd8\xffrest", "image/jpeg"),
@@ -1588,6 +1658,21 @@ mod media_type_tests {
             (b"\x00\x00\x00\x18ftypavifrest", "image/avif"),
             (b"\x00\x00\x00\x18ftypisomrest", "video/mp4"),
             (b"\x1a\x45\xdf\xa3\xa3\x42\x82\x84webmrest", "video/webm"),
+            (b"\x00\x00\x00\x18ftypqt  rest", "video/quicktime"),
+            (b"\x00\x00\x00\x18ftyp3gp6rest", "video/3gpp"),
+            (
+                b"\x1a\x45\xdf\xa3\xa3\x42\x82\x84matroska",
+                "video/x-matroska",
+            ),
+            (b"RIFF\x00\x00\x00\x00AVI rest", "video/x-msvideo"),
+            (b"OggS\x00\x02\x00theora rest", "video/ogg"),
+            (b"FLV\x01\x05rest", "video/x-flv"),
+            (b"\x00\x00\x01\xbarest", "video/mpeg"),
+            (&transport_stream, "video/mp2t"),
+            (
+                b"0&\xb2u\x8ef\xcf\x11\xa6\xd9\x00\xaa\x00b\xcelrest",
+                "video/x-ms-wmv",
+            ),
         ];
 
         for (signature, expected) in samples {
@@ -1619,14 +1704,14 @@ mod media_type_tests {
     }
 
     #[test]
-    fn rejects_active_unknown_and_non_webm_ebml_content() {
+    fn rejects_active_unknown_and_unidentified_ebml_content() {
         assert_eq!(
             sniff_media_type(b"<svg><script>alert(1)</script></svg>"),
             None
         );
         assert_eq!(sniff_media_type(b"plain text named photo.jpg"), None);
         assert_eq!(
-            sniff_media_type(b"\x1a\x45\xdf\xa3\xa3\x42\x82\x88matroska"),
+            sniff_media_type(b"\x1a\x45\xdf\xa3\xa3\x42\x82\x88unknown"),
             None
         );
         assert_eq!(safe_preview_mime("image/svg+xml"), None);
@@ -1678,7 +1763,12 @@ mod media_type_tests {
         ] {
             assert!(supports_viewer_derivative(Some(mime_type)), "{mime_type}");
         }
-        for mime_type in [Some("image/svg+xml"), Some("video/mp4"), None] {
+        for mime_type in [
+            Some("image/svg+xml"),
+            Some("video/mp4"),
+            Some("video/x-matroska"),
+            None,
+        ] {
             assert!(!supports_viewer_derivative(mime_type));
         }
     }
@@ -1700,14 +1790,25 @@ mod media_type_tests {
                 "{mime_type}"
             );
         }
-        assert_eq!(
-            thumbnail_variant_for_mime(Some("video/mp4")),
-            Some(("video_poster", super::MAX_CARD_DERIVATIVE_BYTES))
-        );
-        assert_eq!(
-            thumbnail_variant_for_mime(Some("video/webm")),
-            Some(("video_poster", super::MAX_CARD_DERIVATIVE_BYTES))
-        );
+        for mime_type in [
+            "video/mp4",
+            "video/webm",
+            "video/quicktime",
+            "video/x-matroska",
+            "video/x-msvideo",
+            "video/ogg",
+            "video/mpeg",
+            "video/mp2t",
+            "video/x-flv",
+            "video/x-ms-wmv",
+            "video/3gpp",
+        ] {
+            assert_eq!(
+                thumbnail_variant_for_mime(Some(mime_type)),
+                Some(("video_poster", super::MAX_CARD_DERIVATIVE_BYTES)),
+                "{mime_type}"
+            );
+        }
         assert_eq!(thumbnail_variant_for_mime(Some("image/svg+xml")), None);
         assert_eq!(thumbnail_variant_for_mime(None), None);
     }
@@ -1727,7 +1828,26 @@ mod media_type_tests {
             Some(("video_thumbnail", 1))
         );
         assert!(is_indexable_video_mime(Some("video/mp4")));
-        assert!(!is_indexable_video_mime(Some("video/quicktime")));
+        for mime_type in [
+            "video/mp4",
+            "video/webm",
+            "video/quicktime",
+            "video/x-matroska",
+            "video/x-msvideo",
+            "video/ogg",
+            "video/mpeg",
+            "video/mp2t",
+            "video/x-flv",
+            "video/x-ms-wmv",
+            "video/3gpp",
+        ] {
+            assert!(is_indexable_video_mime(Some(mime_type)), "{mime_type}");
+            assert_eq!(
+                media_index_task(Some(mime_type)),
+                Some(("video_thumbnail", 1))
+            );
+            assert!(is_face_indexable_media(Some(mime_type)), "{mime_type}");
+        }
         assert!(is_face_indexable_media(Some("image/avif")));
         assert!(is_face_indexable_media(Some("video/webm")));
         assert!(!is_face_indexable_media(Some("application/pdf")));

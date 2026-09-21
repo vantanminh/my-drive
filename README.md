@@ -266,8 +266,9 @@ AVIF, BMP, and ICO uploads. GIF, AVIF, BMP, and ICO decoding uses the approved
 libvips loaders first and a single-threaded ffmpeg fallback when the loader is
 unavailable. Source files are capped at 100 MiB, thumbnail output at 24 MiB,
 and processing is bounded by the worker timeout and one decoder thread. It
-also extracts one bounded first-frame WebP poster for MP4 and WebM uploads
-with a single ffmpeg worker thread. Face indexing queues the same bounded first
+also extracts one bounded first-frame WebP poster for MP4, WebM, QuickTime
+(MOV), Matroska (MKV), AVI, OGG/Theora, MPEG, MPEG-TS, FLV, WMV, and 3GP
+uploads with a single ffmpeg worker thread. Face indexing queues the same bounded first
 frame for supported images and videos, runs the bundled CPU SeetaFace detector
 at a maximum 1280-pixel frame side, and stores owner-scoped bounding boxes and
 confidence values. The face screen can merge those detections into a labelled

@@ -62,7 +62,11 @@ pub(crate) fn parse_pgm(bytes: &[u8]) -> Result<GrayFrame, FaceDetectionError> {
     {
         return Err(FaceDetectionError::InvalidFrame);
     }
-    cursor += 1;
+    if bytes[cursor] == b'\r' && bytes.get(cursor + 1) == Some(&b'\n') {
+        cursor += 2;
+    } else {
+        cursor += 1;
+    }
     let end = cursor
         .checked_add(pixel_count)
         .filter(|end| *end <= bytes.len())
@@ -175,6 +179,12 @@ mod tests {
         let frame = parse_pgm(bytes).unwrap();
         assert_eq!((frame.width, frame.height), (2, 1));
         assert_eq!(frame.pixels, [0, 255]);
+    }
+
+    #[test]
+    fn accepts_crlf_pgm_headers_without_dropping_pixels() {
+        let frame = parse_pgm(b"P5\r\n2 1\r\n255\r\n\x20\xff").unwrap();
+        assert_eq!(frame.pixels, [0x20, 0xff]);
     }
 
     #[test]

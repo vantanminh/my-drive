@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
-  Activity, Check, ChevronDown, ChevronRight, CircleUserRound, CloudUpload, Download, Eye, File, FileImage,
+  Activity, Check, ChevronDown, ChevronRight, CircleUserRound, CloudUpload, Download, Eye, File, FileImage, Film,
   FileSpreadsheet, FileText, Folder, FolderPlus, HardDrive, LockKeyhole, LogOut, MoreHorizontal,
   Pause, Play, RotateCcw, Search, Share2, Trash2, Upload, Users, X
 } from 'lucide-react';
@@ -75,6 +75,7 @@ function extensionIcon(entry: Pick<Entry, 'kind' | 'name'>) {
   if (entry.kind === 'folder') return <Folder size={20} strokeWidth={1.8} className="file-icon folder-icon" />;
   const name = entry.name.toLowerCase();
   if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/.test(name)) return <FileImage size={20} strokeWidth={1.8} className="file-icon image-icon" />;
+  if (/\.(mp4|m4v|webm|mov|qt|mkv|mk3d|avi|ogv|ogg|mpg|mpeg|mpe|ts|mts|m2ts|flv|wmv|asf|3gp|3g2)$/.test(name)) return <Film size={20} strokeWidth={1.8} className="file-icon video-icon" />;
   if (/\.(pdf|docx?|txt|md|rtf)$/.test(name)) return <FileText size={20} strokeWidth={1.8} className="file-icon document-icon" />;
   if (/\.(xlsx?|csv|numbers)$/.test(name)) return <FileSpreadsheet size={20} strokeWidth={1.8} className="file-icon sheet-icon" />;
   return <File size={20} strokeWidth={1.8} className="file-icon" />;
@@ -82,12 +83,13 @@ function extensionIcon(entry: Pick<Entry, 'kind' | 'name'>) {
 
 const INDEXED_THUMBNAIL_MIMES = new Set([
   'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon',
-  'video/mp4', 'video/webm'
+  'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo',
+  'video/ogg', 'video/mpeg', 'video/mp2t', 'video/x-flv', 'video/x-ms-wmv', 'video/3gpp'
 ]);
 
 function hasIndexedCardPreview(entry: Entry): boolean {
   if (entry.mime_detected) return INDEXED_THUMBNAIL_MIMES.has(entry.mime_detected);
-  return /\.(jpe?g|png|gif|webp|avif|bmp|ico|mp4|m4v|webm)$/i.test(entry.name);
+  return /\.(jpe?g|png|gif|webp|avif|bmp|ico|mp4|m4v|webm|mov|qt|mkv|mk3d|avi|ogv|ogg|mpg|mpeg|mpe|ts|mts|m2ts|flv|wmv|asf|3gp|3g2)$/i.test(entry.name);
 }
 
 function EntryVisual({ entry, showThumbnail }: { entry: Entry; showThumbnail: boolean }) {
