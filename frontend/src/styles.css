@@ -423,6 +423,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .table-row:hover { background: #fbfcfc; }
 .entry-main { display: flex; min-width: 0; align-items: center; gap: 13px; }
 .file-icon { flex: 0 0 auto; color: #7f8c97; }
+.entry-visual { position: relative; display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; overflow: hidden; background: #f1f4f2; border-radius: 7px; }
+.entry-thumbnail { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .12s ease; }
+.entry-thumbnail.is-ready { opacity: 1; }
 .folder-icon { color: #16815f; fill: #e2f0e9; }
 .document-icon { color: #c15c53; }
 .image-icon { color: #5785ae; }
@@ -929,6 +932,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .list-toolbar-title { font-size: 10px; }
   .table-row { min-height: 68px; padding: 0 12px; }
   .entry-main { gap: 10px; }
+  .entry-main .entry-visual { width: 30px; height: 30px; flex-basis: 30px; }
   .entry-main .file-icon { width: 19px; }
   .entry-name { max-width: 100%; font-size: 12px; }
   .entry-name-wrap { overflow: hidden; }

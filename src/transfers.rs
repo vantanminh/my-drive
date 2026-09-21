@@ -38,6 +38,7 @@ use crate::{
 
 const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 const IMAGE_PREVIEW_RECIPE_VERSION: i16 = 1;
+const MAX_CARD_DERIVATIVE_BYTES: u64 = 512 * 1024;
 const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id";
 
 #[derive(Debug, Error)]
@@ -231,7 +232,7 @@ struct DownloadRecord {
 }
 
 #[derive(FromRow)]
-struct ViewerDerivative {
+struct ImageDerivative {
     recipe_version: i16,
     mime_type: String,
     size_bytes: i64,
@@ -253,6 +254,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/files/{id}/preview",
             get(preview_file).head(preview_head),
+        )
+        .route(
+            "/api/files/{id}/thumbnail",
+            get(thumbnail_file).head(thumbnail_head),
         )
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
@@ -856,6 +861,111 @@ async fn preview_head(
     preview_response(&state, user.id, id, &headers, true).await
 }
 
+async fn thumbnail_file(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, TransferError> {
+    thumbnail_response(&state, user.id, id, &headers, false).await
+}
+
+async fn thumbnail_head(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, TransferError> {
+    thumbnail_response(&state, user.id, id, &headers, true).await
+}
+
+async fn thumbnail_response(
+    state: &AppState,
+    owner_id: Uuid,
+    id: Uuid,
+    request_headers: &HeaderMap,
+    head_only: bool,
+) -> Result<Response, TransferError> {
+    let entry = load_download_record(state, owner_id, id).await?;
+    if entry.state != "ready" {
+        return Err(TransferError::NotFound);
+    }
+    let preview_mime = match entry.mime_detected.as_deref() {
+        Some(value) => safe_preview_mime(value),
+        None => sniff_media_type_from_storage(state, &entry.storage_key).await?,
+    };
+    if !is_indexable_image_mime(preview_mime) {
+        return Err(TransferError::NotFound);
+    }
+    let Some((bytes, checksum)) = read_image_derivative(
+        state,
+        entry.file_version_id,
+        "card",
+        MAX_CARD_DERIVATIVE_BYTES,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            file_version_id = %entry.file_version_id,
+            error = %error,
+            "could not read indexed card derivative"
+        );
+        TransferError::NotFound
+    })?
+    else {
+        return Err(TransferError::NotFound);
+    };
+
+    let etag = format!("\"{checksum}\"");
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/webp"));
+    response_headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline; filename=\"thumbnail.webp\""),
+    );
+    response_headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response_headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    response_headers.insert(
+        ETAG,
+        HeaderValue::from_str(&etag).map_err(|_| TransferError::Inconsistent)?,
+    );
+    if request_headers
+        .get_all(IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_none_match_matches(value, &etag))
+    {
+        let mut response = Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .body(Body::empty())
+            .map_err(|_| TransferError::Inconsistent)?;
+        *response.headers_mut() = response_headers;
+        return Ok(response);
+    }
+    response_headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&bytes.len().to_string()).map_err(|_| TransferError::Inconsistent)?,
+    );
+    let body = if head_only {
+        Body::empty()
+    } else {
+        Body::from(bytes)
+    };
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .body(body)
+        .map_err(|_| TransferError::Inconsistent)?;
+    *response.headers_mut() = response_headers;
+    Ok(response)
+}
+
 async fn preview_response(
     state: &AppState,
     owner_id: Uuid,
@@ -884,32 +994,7 @@ async fn download_response_inner(
     head_only: bool,
     inline_preview: bool,
 ) -> Result<Response, TransferError> {
-    drive::ensure_active_entry(state, owner_id, id, false).await?;
-    let entry: DownloadRecord = sqlx::query_as(
-        "WITH RECURSIVE parent_chain(id, parent_id, deleted_at) AS ( \
-             SELECT id, parent_id, deleted_at FROM drive_entries \
-              WHERE id = $1 AND owner_id = $2 AND kind = 'file' \
-             UNION ALL \
-             SELECT parent.id, parent.parent_id, parent.deleted_at \
-               FROM drive_entries AS parent \
-               JOIN parent_chain AS child ON parent.id = child.parent_id \
-              WHERE parent.owner_id = $2 \
-         ) \
-         SELECT entry.name, version.id AS file_version_id, version.size_bytes, object.storage_key, object.mime_detected, \
-                object.checksum_sha256, object.state, version.created_at AS version_created_at \
-           FROM drive_entries AS entry \
-           JOIN files AS file ON file.id = entry.id \
-           JOIN file_versions AS version ON version.id = file.current_version_id \
-           JOIN storage_objects AS object ON object.id = version.storage_object_id \
-          WHERE entry.id = $1 AND entry.owner_id = $2 AND entry.deleted_at IS NULL \
-            AND NOT EXISTS (SELECT 1 FROM parent_chain WHERE deleted_at IS NOT NULL)",
-    )
-    .bind(id)
-    .bind(owner_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(map_database_error)?
-    .ok_or(TransferError::NotFound)?;
+    let entry = load_download_record(state, owner_id, id).await?;
     if entry.state != "ready" {
         return Err(TransferError::Storage(StorageError::Io(io::Error::other(
             "object is not ready",
@@ -1070,20 +1155,63 @@ async fn download_response_inner(
     Ok(response)
 }
 
+async fn load_download_record(
+    state: &AppState,
+    owner_id: Uuid,
+    id: Uuid,
+) -> Result<DownloadRecord, TransferError> {
+    drive::ensure_active_entry(state, owner_id, id, false).await?;
+    sqlx::query_as(
+        "WITH RECURSIVE parent_chain(id, parent_id, deleted_at) AS ( \
+             SELECT id, parent_id, deleted_at FROM drive_entries \
+              WHERE id = $1 AND owner_id = $2 AND kind = 'file' \
+             UNION ALL \
+             SELECT parent.id, parent.parent_id, parent.deleted_at \
+               FROM drive_entries AS parent \
+               JOIN parent_chain AS child ON parent.id = child.parent_id \
+              WHERE parent.owner_id = $2 \
+         ) \
+         SELECT entry.name, version.id AS file_version_id, version.size_bytes, object.storage_key, object.mime_detected, \
+                object.checksum_sha256, object.state, version.created_at AS version_created_at \
+           FROM drive_entries AS entry \
+           JOIN files AS file ON file.id = entry.id \
+           JOIN file_versions AS version ON version.id = file.current_version_id \
+           JOIN storage_objects AS object ON object.id = version.storage_object_id \
+          WHERE entry.id = $1 AND entry.owner_id = $2 AND entry.deleted_at IS NULL \
+            AND NOT EXISTS (SELECT 1 FROM parent_chain WHERE deleted_at IS NOT NULL)",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(TransferError::NotFound)
+}
+
 async fn read_viewer_derivative(
     state: &AppState,
     file_version_id: Uuid,
 ) -> Result<Option<(Vec<u8>, String)>, String> {
+    read_image_derivative(state, file_version_id, "viewer", 4 * 1024 * 1024).await
+}
+
+async fn read_image_derivative(
+    state: &AppState,
+    file_version_id: Uuid,
+    variant: &str,
+    max_bytes: u64,
+) -> Result<Option<(Vec<u8>, String)>, String> {
     let Some(previews) = state.media_preview.as_ref() else {
         return Ok(None);
     };
-    let derivative = sqlx::query_as::<_, ViewerDerivative>(
+    let derivative = sqlx::query_as::<_, ImageDerivative>(
         "SELECT recipe_version, mime_type, size_bytes, checksum_sha256 \
            FROM media_derivatives \
-          WHERE file_version_id = $1 AND variant = 'viewer' \
+          WHERE file_version_id = $1 AND variant = $2 \
           ORDER BY recipe_version DESC LIMIT 1",
     )
     .bind(file_version_id)
+    .bind(variant)
     .fetch_optional(&state.pool)
     .await
     .map_err(|error| format!("query viewer derivative: {error}"))?;
@@ -1096,14 +1224,14 @@ async fn read_viewer_derivative(
     let bytes = previews
         .read_derivative(
             file_version_id,
-            "viewer",
+            variant,
             derivative.recipe_version,
             derivative.size_bytes,
             &derivative.checksum_sha256,
-            4 * 1024 * 1024,
+            max_bytes,
         )
         .await
-        .map_err(|error| format!("verify viewer derivative: {error}"))?;
+        .map_err(|error| format!("verify {variant} derivative: {error}"))?;
     Ok(Some((bytes, derivative.checksum_sha256)))
 }
 

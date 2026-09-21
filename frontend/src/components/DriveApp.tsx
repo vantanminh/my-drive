@@ -4,7 +4,7 @@ import {
   FileSpreadsheet, FileText, Folder, FolderPlus, HardDrive, LockKeyhole, LogOut, MoreHorizontal,
   Pause, Play, RotateCcw, Search, Share2, Trash2, Upload, Users, X
 } from 'lucide-react';
-import { ApiError, api, downloadUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
+import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import type { Entry, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
@@ -77,6 +77,48 @@ function extensionIcon(entry: Pick<Entry, 'kind' | 'name'>) {
   if (/\.(pdf|docx?|txt|md|rtf)$/.test(name)) return <FileText size={20} strokeWidth={1.8} className="file-icon document-icon" />;
   if (/\.(xlsx?|csv|numbers)$/.test(name)) return <FileSpreadsheet size={20} strokeWidth={1.8} className="file-icon sheet-icon" />;
   return <File size={20} strokeWidth={1.8} className="file-icon" />;
+}
+
+const CARD_PREVIEW_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+function hasIndexedCardPreview(entry: Entry): boolean {
+  if (entry.mime_detected) return CARD_PREVIEW_MIMES.has(entry.mime_detected);
+  return /\.(jpe?g|png|webp)$/i.test(entry.name);
+}
+
+function EntryVisual({ entry, showThumbnail }: { entry: Entry; showThumbnail: boolean }) {
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const canPreview = entry.kind === 'file' && showThumbnail && hasIndexedCardPreview(entry);
+
+  useEffect(() => {
+    if (!failed || attempt >= 2) return;
+    const timer = window.setTimeout(() => {
+      setFailed(false);
+      setLoaded(false);
+      setAttempt((current) => current + 1);
+    }, 5000 * (attempt + 1));
+    return () => window.clearTimeout(timer);
+  }, [attempt, failed]);
+
+  return (
+    <span className="entry-visual" aria-hidden="true">
+      {!canPreview || !loaded ? extensionIcon(entry) : null}
+      {canPreview && !failed ? (
+        <img
+          key={attempt}
+          className={'entry-thumbnail' + (loaded ? ' is-ready' : '')}
+          src={thumbnailUrl(entry.id) + '?retry=' + attempt}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+        />
+      ) : null}
+    </span>
+  );
 }
 
 function displayShareStatus(share: ShareSummary): { label: string; className: string } {
@@ -971,7 +1013,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                 ) : visibleRows.length ? visibleRows.map((entry) => (
                   <div className="table-row drive-grid" key={entry.id}>
                     <div className="entry-main">
-                      {extensionIcon(entry)}
+                      <EntryVisual entry={entry} showThumbnail={section !== 'trash'} />
                       <div className="entry-name-wrap">
                         {entry.kind === 'folder' && section !== 'trash' ? (
                           <button className="entry-name" onClick={() => void openFolder(entry)}>{entry.name}</button>

@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     http::{
         Method, Request, StatusCode,
-        header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE},
+        header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, ETAG},
     },
     response::Response,
 };
@@ -622,6 +622,20 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
         b"\x89PNG\r\n\x1a\nabcdef",
     )
     .await;
+    let missing_card = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/thumbnail"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(missing_card.status(), StatusCode::NOT_FOUND);
+    assert_eq!(missing_card.headers()[CACHE_CONTROL], "no-store");
+
     let image_preview = request(
         &app,
         Method::GET,
@@ -742,6 +756,88 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
     .await
     .expect("record viewer derivative");
 
+    let card_bytes =
+        b"RIFF\x16\x00\x00\x00WEBPVP8 \x0a\x00\x00\x00\x00\x00\x00\x9d\x01\x2a\x20\x00\x10\x00";
+    let card_checksum = format!("{:x}", Sha256::digest(card_bytes));
+    previews
+        .publish_derivative(file_version_id, "card", 1, card_bytes)
+        .await
+        .expect("publish WebP fixture card");
+    sqlx::query(
+        "INSERT INTO media_derivatives \
+            (file_version_id, variant, recipe_version, storage_key, mime_type, size_bytes, \
+             width, height, checksum_sha256) \
+         VALUES ($1, 'card', 1, $2, 'image/webp', $3, 24, 12, $4)",
+    )
+    .bind(file_version_id)
+    .bind(format!("{file_version_id}/card-v1.webp"))
+    .bind(i64::try_from(card_bytes.len()).unwrap())
+    .bind(&card_checksum)
+    .execute(&pool)
+    .await
+    .expect("record card derivative");
+
+    let card_thumbnail = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/thumbnail"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(card_thumbnail.status(), StatusCode::OK);
+    assert_eq!(card_thumbnail.headers()[CONTENT_TYPE], "image/webp");
+    assert_eq!(card_thumbnail.headers()[CACHE_CONTROL], "private, no-cache");
+    assert_eq!(
+        card_thumbnail.headers()["x-content-type-options"],
+        "nosniff"
+    );
+    assert_eq!(
+        card_thumbnail.headers()["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+    assert_eq!(
+        card_thumbnail.headers()[ETAG],
+        format!("\"{card_checksum}\"")
+    );
+    assert_eq!(response_bytes(card_thumbnail).await.as_slice(), card_bytes);
+
+    let card_head = request(
+        &app,
+        Method::HEAD,
+        &format!("/api/files/{image_id}/thumbnail"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(card_head.status(), StatusCode::OK);
+    assert_eq!(card_head.headers()[CONTENT_TYPE], "image/webp");
+    assert_eq!(
+        card_head.headers()[CONTENT_LENGTH],
+        card_bytes.len().to_string()
+    );
+    assert!(response_bytes(card_head).await.is_empty());
+
+    let card_not_modified = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/thumbnail"),
+        Some(&owner_session),
+        None,
+        None,
+        &[("If-None-Match", &format!("\"{card_checksum}\""))],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(card_not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert!(response_bytes(card_not_modified).await.is_empty());
+
     let indexed_preview = request(
         &app,
         Method::GET,
@@ -840,6 +936,19 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
     )
     .await;
     assert_eq!(foreign_preview.status(), StatusCode::NOT_FOUND);
+
+    let foreign_thumbnail = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/thumbnail"),
+        Some(&other_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(foreign_thumbnail.status(), StatusCode::NOT_FOUND);
 
     let video_id = seed_file(
         &pool,

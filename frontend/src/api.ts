@@ -261,6 +261,10 @@ export function previewUrl(id: string): string {
   return '/api/files/' + encodeURIComponent(id) + '/preview';
 }
 
+export function thumbnailUrl(id: string): string {
+  return '/api/files/' + encodeURIComponent(id) + '/thumbnail';
+}
+
 export function publicDownloadUrl(token: string, id: string): string {
   return '/api/public/shares/' + encodeURIComponent(token) + '/download/' + encodeURIComponent(id);
 }
