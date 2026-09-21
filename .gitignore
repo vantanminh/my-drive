@@ -17,6 +17,7 @@ harness.db-shm
 
 # Local configuration and generated runtime data
 .env
+.env.local
 .env.*.local
 /data/
 /uploads/

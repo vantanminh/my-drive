@@ -30,6 +30,25 @@ missing payloads while preserving recoverable database state.
   when the HDD did not mount. It also checks the preview SSD against
   `MEDIA_PREVIEW_EXPECTED_DEVICE` and rejects using the HDD device for both.
 
+## Managed accounts
+
+The first account bootstrapped from `BOOTSTRAP_OWNER_EMAIL` and
+`BOOTSTRAP_OWNER_PASSWORD` is the owner. After signing in, the owner can open
+**Manage accounts** to create private member accounts, set each account's
+storage quota, disable or re-enable access, and issue a password reset. There
+is no public sign-up route. New accounts and password resets return a
+temporary password once with `Cache-Control: no-store`; provide it securely.
+The member must choose a new password of at least 12 characters before opening
+the drive. Password changes revoke the member's other sessions, and disabling
+an account revokes all of its sessions.
+
+Member files are scoped to their own account. Quota usage includes stored file
+versions (including trash until it is permanently purged) and the full size of
+active upload sessions, even after some bytes have been uploaded. The owner
+cannot lower a quota below current usage and active upload reservations. Owner
+account actions are CSRF-protected and recorded in the audit log without
+storing temporary passwords.
+
 ## Development
 
 Install Rust stable and PostgreSQL 17 or newer. Copy `.env.example` to `.env`,
@@ -54,9 +73,9 @@ cookies are Secure; local development can use `COOKIE_SECURE=false`.
 
 ## Drive and transfer API
 
-All private routes require the owner session cookie. Every state-changing
-request also sends the x-csrf-token value returned at login. Folder names are
-metadata; storage objects use generated UUID keys under
+All private routes require the signed-in account's session cookie. Every
+state-changing request also sends the x-csrf-token value returned at login.
+Folder names are metadata; storage objects use generated UUID keys under
 objects/<2>/<2>/. Uploads are staged under generated names in uploads/.
 
 The resumable API follows offset-based PATCH semantics:
@@ -129,20 +148,26 @@ expiry, trashing a shared folder, or reaching `max_downloads` disables access.
 
 ## Running a prebuilt Docker image
 
-GitHub Actions builds both the web app image and the isolated media indexer
-image for every pull request. Pushes to `master` publish
-`ghcr.io/vantanminh/my-drive:latest` and
-`ghcr.io/vantanminh/my-drive-indexer:latest`, plus commit-specific tags;
-version tags such as `v1.2.3` publish matching image tags. The workflow builds
-`linux/amd64` from this repository's `Dockerfile` and publishes to GitHub
-Container Registry (GHCR). The published GHCR images are public and can be
-pulled without logging in.
+GitHub Actions builds both Docker targets (`runtime` and
+`media-indexer-runtime`) for pull requests into `master`. A push to `master`
+publishes the `latest`, `master`, and `sha-<commit>` tags. Pushing a version
+tag such as `v1.2.3` publishes `v1.2.3` and `sha-<commit>` tags. Images are
+built for `linux/amd64` and published to GHCR as
+`ghcr.io/<owner>/<repository>` and
+`ghcr.io/<owner>/<repository>-indexer`; the owner and repository come from
+GitHub and are lowercased for valid GHCR names. The workflow uses the
+repository-provided `GITHUB_TOKEN` and does not need a separate registry
+secret. GHCR package visibility is configured separately. After the first
+publish, set each package to Public in its GitHub package settings if the
+images should be pullable without GHCR authentication.
 
-On the Linux host, keep `compose.yaml`, `docker/setup-indexer-role.sh`, and a
-protected `.env` file. The app does not need the source checkout at runtime.
-Prepare the SSD and mounted HDD paths as described below, then set `MY_DRIVE_IMAGE` and
-`MY_DRIVE_INDEXER_IMAGE` in `.env` to the published tags you want to run. For
-the latest images from `master`, use:
+For a Linux deployment, keep `compose.yaml`,
+`docker/setup-indexer-role.sh`, and a protected `.env` file. The app does not
+need the source checkout at runtime.
+Prepare the SSD and mounted HDD paths as described in
+[Single-server Compose deployment](#single-server-compose-deployment), then set
+`MY_DRIVE_IMAGE` and `MY_DRIVE_INDEXER_IMAGE` in `.env` to the published tags
+you want to run. For the latest images from `master`, use:
 
 ```dotenv
 MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:latest
@@ -159,34 +184,57 @@ docker compose logs -f app
 docker compose logs -f media-indexer
 ```
 
-To build and run the images locally instead, run both commands from the
-repository root on the target machine, then set the image names in `.env`:
+## Local Docker development
+
+This setup runs on Windows with Docker Desktop (Linux containers), macOS, or
+Linux. It uses named Docker volumes for PostgreSQL, uploaded files, and previews;
+it does not require physical HDD or SSD mounts. It is for local development,
+while `compose.yaml` below is the Linux single-server deployment configuration.
+
+Build both images from the repository root:
 
 ```sh
 docker build --target runtime -t my-drive:local .
 docker build --target media-indexer-runtime -t my-drive-indexer:local .
+docker build --target media-indexer-db-setup -t my-drive-indexer-db-setup:local .
 ```
 
-```dotenv
-MY_DRIVE_IMAGE=my-drive:local
-MY_DRIVE_INDEXER_IMAGE=my-drive-indexer:local
+Copy the local environment example and set the two database secrets to distinct
+hex strings. Set a unique owner email and a password of at least 16 characters.
+For example, on PowerShell:
+
+```powershell
+Copy-Item .env.local.example .env.local
 ```
 
-Start it with `docker compose up -d`. Compose uses the local image when it is
-present; it does not need to build from source. You still need the Compose
-file, `.env`, PostgreSQL data directory, HDD payload directory, and SSD preview
-cache directory, and the database-role setup script mounted by Compose. The app
-image includes the Rust service and built web client.
-The separate indexer image includes the constrained image decoder and worker.
-Neither image contains secrets or persistent data.
+Edit `.env.local`, then start the local stack:
 
-The indexer currently creates card and viewer WebP previews for JPEG, PNG,
-and WebP uploads. GIF, AVIF, BMP, and ICO files remain available as originals
-and their preview jobs are reported as unsupported. Configure
-`MEDIA_INDEXER_PASSWORD` as a separate random hex secret; Compose creates a
-limited PostgreSQL role for the worker after the app has applied migrations.
+```sh
+docker compose --env-file .env.local -f compose.local.yaml up -d
+docker compose --env-file .env.local -f compose.local.yaml ps
+```
+
+Open `http://localhost:3000` (or the port set by `APP_PORT`) and sign in with
+the bootstrap owner credentials from `.env.local`. The local Compose file uses
+the locally built image tags and will not pull the app images. To watch the
+services or stop them while keeping their data:
+
+```sh
+docker compose --env-file .env.local -f compose.local.yaml logs -f app
+docker compose --env-file .env.local -f compose.local.yaml logs -f media-indexer
+docker compose --env-file .env.local -f compose.local.yaml down
+```
+
+The app image contains the Rust service and built web client. The separate
+indexer image contains the constrained image decoder and worker. Neither image
+contains secrets or persistent data. The named volumes retain PostgreSQL,
+uploaded files, and generated previews across container restarts.
 
 ## Single-server Compose deployment
+
+The deployment configuration below requires a Linux host because it checks the
+physical HDD and SSD mounts and device IDs. Keep `compose.yaml`,
+`docker/setup-indexer-role.sh`, and a protected `.env` file on that host.
 
 1. Mount the HDD by filesystem UUID at `/srv/my-drive/data` and ensure the
    directory is writable by UID 10001. Keep PostgreSQL and generated preview
@@ -207,12 +255,16 @@ limited PostgreSQL role for the worker after the app has applied migrations.
    required when preview storage is configured.
 4. Set `BOOTSTRAP_OWNER_EMAIL` and a unique `BOOTSTRAP_OWNER_PASSWORD` for the
    first run only. The password is Argon2id-hashed before it reaches PostgreSQL.
-5. Set both `MY_DRIVE_IMAGE` and `MY_DRIVE_INDEXER_IMAGE` in `.env` to matching
-   GHCR tags (or to `my-drive:local` and `my-drive-indexer:local` after building
-   locally). Pull both images with `docker compose pull app media-indexer`, then
-   run `docker compose up -d`. The app binds to loopback; configure a reverse
-   proxy to terminate TLS. Do not expose the app port directly to the public
-   internet.
+ 5. Set both `MY_DRIVE_IMAGE` and `MY_DRIVE_INDEXER_IMAGE` in `.env` to matching
+   GHCR tags, then pull them with `docker compose pull app media-indexer`. If
+   using locally built tags, skip the pull. Start the services with
+   `docker compose up -d`. The app binds to loopback; configure a reverse proxy
+    to terminate TLS. Do not expose the app port directly to the public internet.
+
+The indexer currently creates card and viewer WebP previews for JPEG, PNG,
+and WebP uploads. GIF, AVIF, BMP, and ICO files remain available as originals
+and their preview jobs are reported as unsupported. Compose creates a limited
+PostgreSQL role for the worker after the app has applied migrations.
 
 The Compose file binds PostgreSQL and preview cache directories to the SSD and
 the original payload root to the HDD. It uses `create_host_path: false` so

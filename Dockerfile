@@ -44,3 +44,7 @@ COPY --from=media-thumbnailer-builder /usr/local/bin/my-drive-vips-thumbnailer /
 WORKDIR /app
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/my-drive-media-indexer"]
+
+FROM postgres:17-alpine AS media-indexer-db-setup
+COPY docker/setup-indexer-role.sh /scripts/setup-indexer-role.sh
+ENTRYPOINT ["/bin/sh", "/scripts/setup-indexer-role.sh"]

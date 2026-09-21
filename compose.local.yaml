@@ -1,0 +1,121 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mydrive
+      POSTGRES_USER: mydrive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local}
+    volumes:
+      - local-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mydrive -d mydrive"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  storage-init:
+    image: busybox:1.36
+    restart: "no"
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - mkdir -p /srv/my-drive/data /srv/my-drive/previews && chown 10001:10001 /srv/my-drive/data /srv/my-drive/previews
+    volumes:
+      - local-data:/srv/my-drive/data
+      - local-previews:/srv/my-drive/previews
+
+  app:
+    image: ${MY_DRIVE_IMAGE:-my-drive:local}
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://mydrive:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local}@db:5432/mydrive
+      BIND_ADDR: 0.0.0.0:3000
+      STORAGE_ROOT: /srv/my-drive/data
+      STORAGE_EXPECTED_MOUNT: /srv/my-drive/data
+      STORAGE_REQUIRE_MOUNT: "false"
+      STORAGE_REQUIRE_DEVICE_MATCH: "false"
+      MEDIA_PREVIEW_ROOT: /srv/my-drive/previews
+      MEDIA_PREVIEW_EXPECTED_MOUNT: /srv/my-drive/previews
+      MEDIA_PREVIEW_REQUIRE_MOUNT: "false"
+      MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH: "false"
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-5368709120}
+      OWNER_QUOTA_BYTES: ${OWNER_QUOTA_BYTES:-107374182400}
+      BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL:?Set BOOTSTRAP_OWNER_EMAIL in .env.local}
+      BOOTSTRAP_OWNER_PASSWORD: ${BOOTSTRAP_OWNER_PASSWORD:?Set BOOTSTRAP_OWNER_PASSWORD in .env.local}
+      COOKIE_SECURE: "false"
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - local-data:/srv/my-drive/data
+      - local-previews:/srv/my-drive/previews:ro
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  media-indexer-db-setup:
+    image: my-drive-indexer-db-setup:local
+    pull_policy: never
+    restart: "no"
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: mydrive
+      POSTGRES_USER: mydrive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local}
+      MEDIA_INDEXER_PASSWORD: ${MEDIA_INDEXER_PASSWORD:?Set MEDIA_INDEXER_PASSWORD in .env.local}
+      PGHOST: db
+
+  media-indexer:
+    image: ${MY_DRIVE_INDEXER_IMAGE:-my-drive-indexer:local}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    depends_on:
+      app:
+        condition: service_healthy
+      media-indexer-db-setup:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://media_indexer:${MEDIA_INDEXER_PASSWORD:?Set MEDIA_INDEXER_PASSWORD in .env.local}@db:5432/mydrive
+      STORAGE_ROOT: /srv/my-drive/data
+      STORAGE_EXPECTED_MOUNT: /srv/my-drive/data
+      STORAGE_REQUIRE_MOUNT: "false"
+      STORAGE_REQUIRE_DEVICE_MATCH: "false"
+      MEDIA_PREVIEW_ROOT: /srv/my-drive/previews
+      MEDIA_PREVIEW_EXPECTED_MOUNT: /srv/my-drive/previews
+      MEDIA_PREVIEW_REQUIRE_MOUNT: "false"
+      MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH: "false"
+      VIPS_CONCURRENCY: "1"
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - local-data:/srv/my-drive/data:ro
+      - local-previews:/srv/my-drive/previews
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1.0
+    mem_limit: 768m
+    pids_limit: 32
+    stop_grace_period: 30s
+
+volumes:
+  local-postgres:
+  local-data:
+  local-previews:
