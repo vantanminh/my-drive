@@ -827,9 +827,19 @@ fn retryable(code: &'static str) -> JobFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::{backfill_batch, matches_magic, supports_image_mime, validate_metadata_free_webp};
+    use super::{
+        backfill_batch, claim_one, matches_magic, record_failure, retryable, run_once,
+        supports_image_mime, validate_metadata_free_webp,
+    };
     use sqlx::{PgPool, postgres::PgPoolOptions};
+    use std::net::SocketAddr;
+    use tempfile::tempdir;
     use uuid::Uuid;
+
+    use crate::{
+        Config, MediaPreviewConfig,
+        storage::{LocalStorage, PreviewStorage},
+    };
 
     #[test]
     fn worker_preview_registry_only_accepts_static_jpeg_png_and_webp() {
@@ -1046,6 +1056,237 @@ mod tests {
         .await
         .expect("count ineligible backfill jobs");
         assert_eq!(decoy_jobs, 0);
+
+        let mut cleanup_versions = candidates
+            .iter()
+            .map(|candidate| candidate.1)
+            .collect::<Vec<_>>();
+        cleanup_versions.extend([
+            historical_version,
+            deleted_image.1,
+            pending_image.1,
+            non_image.1,
+        ]);
+        let mut cleanup_files = candidates
+            .iter()
+            .map(|candidate| candidate.0)
+            .collect::<Vec<_>>();
+        cleanup_files.extend([deleted_image.0, pending_image.0, non_image.0]);
+        sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = ANY($1)")
+            .bind(cleanup_files)
+            .execute(&pool)
+            .await
+            .expect("deactivate files created by backfill test");
+        sqlx::query("DELETE FROM media_index_jobs WHERE file_version_id = ANY($1)")
+            .bind(cleanup_versions)
+            .execute(&pool)
+            .await
+            .expect("remove jobs created by backfill test");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+    async fn expired_worker_lease_recovers_and_retry_wait_claims_once() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&database_url)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let owner_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role) \
+             VALUES ($1, $2, 'test-only-hash', 'owner')",
+        )
+        .bind(owner_id)
+        .bind(format!("media-lease-{owner_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert isolated owner");
+        let (file_id, version_id) = insert_backfill_file(
+            &pool,
+            owner_id,
+            "lease-recovery",
+            "image/png",
+            "ready",
+            true,
+            false,
+        )
+        .await;
+        let job_id: i64 = sqlx::query_scalar(
+            "INSERT INTO media_index_jobs \
+                 (file_version_id, task, recipe_version, state, attempts, lease_expires_at) \
+             VALUES ($1, 'image_preview', 1, 'running', 1, now() - interval '1 second') \
+             RETURNING id",
+        )
+        .bind(version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert job with expired lease");
+
+        let (first, second) = tokio::join!(claim_one(&pool), claim_one(&pool));
+        let job = match (first.expect("first claim"), second.expect("second claim")) {
+            (Some(job), None) | (None, Some(job)) => job,
+            _ => panic!("exactly one concurrent claimant must recover the expired lease"),
+        };
+        assert_eq!(job.id, job_id);
+        assert_eq!(job.attempts, 2);
+
+        record_failure(&pool, &job, retryable("preview_storage_unavailable"))
+            .await
+            .expect("record retryable failure");
+        let retry_state: (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT state, attempts, error_code FROM media_index_jobs WHERE id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("inspect retry wait");
+        assert_eq!(
+            retry_state,
+            (
+                "retry_wait".to_owned(),
+                2,
+                Some("preview_storage_unavailable".to_owned())
+            )
+        );
+
+        sqlx::query(
+            "UPDATE media_index_jobs SET available_at = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("simulate elapsed retry delay");
+        let retry = claim_one(&pool)
+            .await
+            .expect("claim retry after backoff")
+            .expect("retry becomes claimable");
+        assert_eq!(retry.id, job_id);
+        assert_eq!(retry.attempts, 3);
+        sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = $1")
+            .bind(file_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate file created by lease recovery test");
+        sqlx::query("DELETE FROM media_index_jobs WHERE id = $1")
+            .bind(job_id)
+            .execute(&pool)
+            .await
+            .expect("remove job created by lease recovery test");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+    async fn preview_storage_disappearance_fails_closed_without_hdd_fallback() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let owner_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role) \
+             VALUES ($1, $2, 'test-only-hash', 'owner')",
+        )
+        .bind(owner_id)
+        .bind(format!("media-mount-{owner_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert isolated owner");
+        let (file_id, version_id) = insert_backfill_file(
+            &pool,
+            owner_id,
+            "ssd-disappearance",
+            "image/png",
+            "ready",
+            true,
+            false,
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+             VALUES ($1, 'image_preview', 1)",
+        )
+        .bind(version_id)
+        .execute(&pool)
+        .await
+        .expect("insert queued preview job");
+
+        let temporary = tempdir().expect("create temporary HDD and SSD roots");
+        let hdd_root = temporary.path().join("hdd");
+        let ssd_root = temporary.path().join("ssd");
+        std::fs::create_dir_all(&hdd_root).expect("create HDD root");
+        std::fs::create_dir_all(&ssd_root).expect("create SSD root");
+        let storage = LocalStorage::open_readonly(&Config {
+            database_url: "postgres://not-used-in-test".to_owned(),
+            bind_addr: "127.0.0.1:3000".parse::<SocketAddr>().unwrap(),
+            storage_root: hdd_root.clone(),
+            expected_mount: hdd_root.clone(),
+            require_mount: false,
+            require_device_match: false,
+            expected_device: None,
+            media_preview: None,
+            max_file_size: 1024,
+            owner_quota_bytes: 4096,
+            min_free_bytes: 0,
+            min_free_percent: 0.0,
+            upload_session_ttl_seconds: 3600,
+            trash_retention_days: 30,
+            session_ttl_seconds: 3600,
+            bootstrap_owner: None,
+            cookie_secure: false,
+        })
+        .expect("open HDD read-only");
+        let previews = PreviewStorage::new(&MediaPreviewConfig {
+            root: ssd_root.clone(),
+            expected_mount: ssd_root.clone(),
+            require_mount: false,
+            require_device_match: false,
+            expected_device: None,
+        });
+        previews
+            .prepare()
+            .expect("prepare SSD root before disappearance");
+        std::fs::remove_dir(&ssd_root).expect("simulate SSD mount disappearance");
+
+        assert!(run_once(&pool, &storage, &previews).await.is_err());
+        assert!(!hdd_root.join("previews").exists());
+        let job: (String, i32) = sqlx::query_as(
+            "SELECT state, attempts FROM media_index_jobs WHERE file_version_id = $1",
+        )
+        .bind(version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("inspect queued job after SSD loss");
+        assert_eq!(job, ("queued".to_owned(), 0));
+        sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = $1")
+            .bind(file_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate file created by SSD disappearance test");
+        sqlx::query("DELETE FROM media_index_jobs WHERE file_version_id = $1")
+            .bind(version_id)
+            .execute(&pool)
+            .await
+            .expect("remove job created by SSD disappearance test");
 
         pool.close().await;
     }

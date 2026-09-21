@@ -558,6 +558,21 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
     .expect("inspect upload audit event");
     assert_eq!(completed_upload_events, 1);
 
+    sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = $1")
+        .bind(file_id)
+        .execute(&pool)
+        .await
+        .expect("deactivate file created by upload test");
+    sqlx::query(
+        "DELETE FROM media_index_jobs AS job \
+           USING file_versions AS version \
+          WHERE job.file_version_id = version.id AND version.file_id = $1",
+    )
+    .bind(file_id)
+    .execute(&pool)
+    .await
+    .expect("remove job created by upload test");
+
     pool.close().await;
 }
 

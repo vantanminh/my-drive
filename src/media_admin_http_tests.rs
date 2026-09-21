@@ -169,6 +169,23 @@ async fn owner_can_inspect_and_control_media_index_jobs() {
     assert_eq!(state, "queued");
     assert_eq!(attempts, 0);
     assert_eq!(error_code, None);
+
+    sqlx::query(
+        "UPDATE drive_entries SET deleted_at = now() \
+          WHERE id = (SELECT version.file_id \
+                       FROM media_index_jobs AS job \
+                       JOIN file_versions AS version ON version.id = job.file_version_id \
+                      WHERE job.id = $1)",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await
+    .expect("deactivate file created by media-admin test");
+    sqlx::query("DELETE FROM media_index_jobs WHERE id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("remove job created by media-admin test");
 }
 
 fn make_app(pool: PgPool, storage_root: &Path) -> Router {
