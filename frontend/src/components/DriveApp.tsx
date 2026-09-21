@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
-  Check, ChevronDown, ChevronRight, CircleUserRound, CloudUpload, Download, File, FileImage,
+  Check, ChevronDown, ChevronRight, CircleUserRound, CloudUpload, Download, Eye, File, FileImage,
   FileSpreadsheet, FileText, Folder, FolderPlus, HardDrive, LockKeyhole, LogOut, MoreHorizontal,
   RotateCcw, Search, Share2, Trash2, Upload, Users, X
 } from 'lucide-react';
@@ -8,6 +8,7 @@ import { ApiError, api, downloadUrl } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import type { Entry, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
+import MediaViewer, { mediaKindFor } from './MediaViewer';
 
 type Props = {
   user: User;
@@ -94,6 +95,7 @@ function EntryMenu({
   section,
   currentFolderId,
   onOpen,
+  onPreview,
   onDownload,
   onShare,
   onRename,
@@ -106,6 +108,7 @@ function EntryMenu({
   section: Section;
   currentFolderId: string | null;
   onOpen: () => void;
+  onPreview: () => void;
   onDownload: () => void;
   onShare: () => void;
   onRename: () => void;
@@ -131,7 +134,10 @@ function EntryMenu({
         {entry.kind === 'folder' ? (
           <button onClick={(event) => { closeMenu(event); onOpen(); }}><Folder size={15} /> Open folder</button>
         ) : (
-          <button onClick={(event) => { closeMenu(event); onDownload(); }}><Download size={15} /> Download</button>
+          <>
+            {mediaKindFor(entry) && <button onClick={(event) => { closeMenu(event); onPreview(); }}><Eye size={15} /> Preview</button>}
+            <button onClick={(event) => { closeMenu(event); onDownload(); }}><Download size={15} /> Download</button>
+          </>
         )}
         <button onClick={(event) => { closeMenu(event); onShare(); }}><Share2 size={15} /> Create share link</button>
         <div className="menu-divider" />
@@ -163,6 +169,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [refresh, setRefresh] = useState(0);
   const [modal, setModal] = useState<Modal>(null);
   const [shareTarget, setShareTarget] = useState<Entry | null>(null);
+  const [viewer, setViewer] = useState<Entry | null>(null);
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
     readSavedUploads().map((saved) => ({
@@ -193,6 +200,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       if (event.key === 'Escape') {
         setModal(null);
         setShareTarget(null);
+        setViewer(null);
         document.querySelectorAll('details[open]').forEach((element) => element.removeAttribute('open'));
       }
     }
@@ -723,7 +731,9 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                         {entry.kind === 'folder' && section !== 'trash' ? (
                           <button className="entry-name" onClick={() => void openFolder(entry)}>{entry.name}</button>
                         ) : entry.kind === 'file' && section !== 'trash' ? (
-                          <a className="entry-name" href={downloadUrl(entry.id)}>{entry.name}</a>
+                          mediaKindFor(entry) ? (
+                            <button className="entry-name" onClick={() => setViewer(entry)}>{entry.name}</button>
+                          ) : <a className="entry-name" href={downloadUrl(entry.id)}>{entry.name}</a>
                         ) : (
                           <span className="entry-name">{entry.name}</span>
                         )}
@@ -746,6 +756,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                           section={section}
                           currentFolderId={currentFolderId}
                           onOpen={() => void openFolder(entry)}
+                          onPreview={() => setViewer(entry)}
                           onDownload={() => window.location.assign(downloadUrl(entry.id))}
                           onShare={() => setShareTarget(entry)}
                           onRename={() => setModal({ kind: 'rename', entry })}
@@ -878,6 +889,8 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           }}
         />
       )}
+
+      {viewer && <MediaViewer entry={viewer} onClose={() => setViewer(null)} />}
     </div>
   );
 }

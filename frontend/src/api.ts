@@ -207,6 +207,10 @@ export function downloadUrl(id: string): string {
   return '/api/files/' + encodeURIComponent(id) + '/download';
 }
 
+export function previewUrl(id: string): string {
+  return '/api/files/' + encodeURIComponent(id) + '/preview';
+}
+
 export function publicDownloadUrl(token: string, id: string): string {
   return '/api/public/shares/' + encodeURIComponent(token) + '/download/' + encodeURIComponent(id);
 }

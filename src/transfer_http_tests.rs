@@ -218,7 +218,7 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
         Some(&session.csrf_token),
         Some("application/offset+octet-stream"),
         &[("Upload-Offset", "0")],
-        Body::from("0123"),
+        Body::from(b"\x89PNG".to_vec()),
     )
     .await;
     assert_eq!(first_chunk.status(), StatusCode::NO_CONTENT);
@@ -250,7 +250,7 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
         Some(&session.csrf_token),
         Some("application/offset+octet-stream"),
         &[("Upload-Offset", "4")],
-        Body::from("456789"),
+        Body::from(b"\r\n\x1a\nxy".to_vec()),
     )
     .await;
     assert_eq!(final_chunk.status(), StatusCode::NO_CONTENT);
@@ -388,7 +388,17 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
     assert_eq!(checksum.len(), 64);
     assert!(!storage_key.contains("résumé"));
     let disk_path = storage_path(temporary_storage.path(), &storage_key);
-    assert_eq!(tokio::fs::read(&disk_path).await.unwrap(), b"0123456789");
+    assert_eq!(
+        tokio::fs::read(&disk_path).await.unwrap(),
+        b"\x89PNG\r\n\x1a\nxy"
+    );
+    let stored_mime: Option<String> =
+        sqlx::query_scalar("SELECT mime_detected FROM storage_objects WHERE storage_key = $1")
+            .bind(&storage_key)
+            .fetch_one(&pool)
+            .await
+            .expect("inspect media type detected during upload finalization");
+    assert_eq!(stored_mime.as_deref(), Some("image/png"));
 
     let download = request(
         &app,
@@ -411,7 +421,34 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
             .unwrap()
             .contains("filename*=UTF-8''r%C3%A9sum%C3%A9.bin")
     );
-    assert_eq!(response_bytes(download).await.as_slice(), b"0123456789");
+    assert_eq!(
+        response_bytes(download).await.as_slice(),
+        b"\x89PNG\r\n\x1a\nxy"
+    );
+
+    let inline_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{file_id}/preview"),
+        Some(&session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(inline_preview.status(), StatusCode::OK);
+    assert_eq!(inline_preview.headers()[CONTENT_TYPE], "image/png");
+    assert!(
+        inline_preview.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("inline;")
+    );
+    assert_eq!(
+        response_bytes(inline_preview).await.as_slice(),
+        b"\x89PNG\r\n\x1a\nxy"
+    );
 
     let range_download = request(
         &app,
@@ -427,7 +464,7 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
     assert_eq!(range_download.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(range_download.headers()[CONTENT_RANGE], "bytes 2-5/10");
     assert_eq!(range_download.headers()[CONTENT_LENGTH], "4");
-    assert_eq!(response_bytes(range_download).await.as_slice(), b"2345");
+    assert_eq!(response_bytes(range_download).await.as_slice(), b"NG\r\n");
 
     let unsatisfiable = request(
         &app,
@@ -511,6 +548,278 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
     assert_eq!(completed_upload_events, 1);
 
     pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner() {
+    let database_url = std::env::var("TEST_DATABASE_URL")
+        .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+        .expect("connect to disposable PostgreSQL");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("apply migrations");
+
+    let owner_id = insert_owner(&pool).await;
+    let owner_session = insert_session(&pool, owner_id).await;
+    let other_owner_id = insert_owner(&pool).await;
+    let other_session = insert_session(&pool, other_owner_id).await;
+    let temporary_storage = tempfile::tempdir().expect("create temporary HDD storage");
+    let app = make_app(pool.clone(), temporary_storage.path());
+
+    let image_id = seed_file(
+        &pool,
+        owner_id,
+        temporary_storage.path(),
+        "disguised.txt",
+        b"\x89PNG\r\n\x1a\nabcdef",
+    )
+    .await;
+    let image_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(image_preview.status(), StatusCode::OK);
+    assert_eq!(image_preview.headers()[CONTENT_TYPE], "image/png");
+    assert!(
+        image_preview.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("inline;")
+    );
+    assert_eq!(image_preview.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        image_preview.headers()["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+    let image_etag = image_preview.headers()["etag"].to_str().unwrap().to_owned();
+    assert_eq!(
+        response_bytes(image_preview).await.as_slice(),
+        b"\x89PNG\r\n\x1a\nabcdef"
+    );
+
+    let image_range = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[("Range", "bytes=1-3")],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(image_range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(image_range.headers()[CONTENT_TYPE], "image/png");
+    assert_eq!(image_range.headers()[CONTENT_RANGE], "bytes 1-3/14");
+    assert_eq!(response_bytes(image_range).await.as_slice(), b"PNG");
+
+    let matching_if_range = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[("Range", "bytes=1-3"), ("If-Range", &image_etag)],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(matching_if_range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response_bytes(matching_if_range).await.as_slice(), b"PNG");
+
+    let stale_if_range = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[("Range", "bytes=1-3"), ("If-Range", "\"stale\"")],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(stale_if_range.status(), StatusCode::OK);
+    assert_eq!(
+        response_bytes(stale_if_range).await.as_slice(),
+        b"\x89PNG\r\n\x1a\nabcdef"
+    );
+
+    let image_head = request(
+        &app,
+        Method::HEAD,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(image_head.status(), StatusCode::OK);
+    assert_eq!(image_head.headers()[CONTENT_TYPE], "image/png");
+    assert!(response_bytes(image_head).await.is_empty());
+
+    let foreign_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{image_id}/preview"),
+        Some(&other_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(foreign_preview.status(), StatusCode::NOT_FOUND);
+
+    let video_id = seed_file(
+        &pool,
+        owner_id,
+        temporary_storage.path(),
+        "clip.bin",
+        b"\x00\x00\x00\x18ftypisom1234video-data",
+    )
+    .await;
+    let video_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{video_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(video_preview.status(), StatusCode::OK);
+    assert_eq!(video_preview.headers()[CONTENT_TYPE], "video/mp4");
+    assert_eq!(video_preview.status(), StatusCode::OK);
+    let _ = response_bytes(video_preview).await;
+
+    let svg_id = seed_file(
+        &pool,
+        owner_id,
+        temporary_storage.path(),
+        "active.svg",
+        b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>",
+    )
+    .await;
+    let svg_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{svg_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(svg_preview.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let svg_download = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{svg_id}/download"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(svg_download.status(), StatusCode::OK);
+    assert_eq!(
+        svg_download.headers()[CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    assert!(
+        svg_download.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment;")
+    );
+
+    pool.close().await;
+}
+
+async fn seed_file(
+    pool: &PgPool,
+    owner_id: Uuid,
+    storage_root: &Path,
+    name: &str,
+    payload: &[u8],
+) -> Uuid {
+    let file_id = Uuid::new_v4();
+    let object_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
+    let storage_key = LocalStorage::storage_key(object_id);
+    let object_path = storage_path(storage_root, &storage_key);
+    tokio::fs::create_dir_all(object_path.parent().unwrap())
+        .await
+        .expect("create object shard");
+    tokio::fs::write(&object_path, payload)
+        .await
+        .expect("write fixture payload");
+    let checksum = Sha256::digest(payload)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    sqlx::query("INSERT INTO drive_entries (id, owner_id, kind, name) VALUES ($1, $2, 'file', $3)")
+        .bind(file_id)
+        .bind(owner_id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("insert file entry");
+    sqlx::query("INSERT INTO files (id) VALUES ($1)")
+        .bind(file_id)
+        .execute(pool)
+        .await
+        .expect("insert file record");
+    sqlx::query(
+        "INSERT INTO storage_objects (id, storage_key, size_bytes, checksum_sha256, state) \
+         VALUES ($1, $2, $3, $4, 'ready')",
+    )
+    .bind(object_id)
+    .bind(storage_key)
+    .bind(i64::try_from(payload.len()).expect("fixture size fits i64"))
+    .bind(checksum)
+    .execute(pool)
+    .await
+    .expect("insert storage object");
+    sqlx::query(
+        "INSERT INTO file_versions (id, file_id, storage_object_id, size_bytes) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(version_id)
+    .bind(file_id)
+    .bind(object_id)
+    .bind(i64::try_from(payload.len()).expect("fixture size fits i64"))
+    .execute(pool)
+    .await
+    .expect("insert file version");
+    sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+        .bind(version_id)
+        .bind(file_id)
+        .execute(pool)
+        .await
+        .expect("set current file version");
+    file_id
 }
 
 async fn simulate_finalization_crash(

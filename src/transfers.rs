@@ -10,7 +10,7 @@ use axum::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
             ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_TYPE, ETAG, LAST_MODIFIED, LOCATION, RANGE,
+            CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
         },
     },
     response::{IntoResponse, Response},
@@ -43,6 +43,8 @@ const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, receive
 pub(crate) enum TransferError {
     #[error("invalid request")]
     BadRequest,
+    #[error("this file format is not supported for inline preview")]
+    UnsupportedPreview,
     #[error("resource not found")]
     NotFound,
     #[error("request conflicts with current state")]
@@ -75,6 +77,12 @@ impl IntoResponse for TransferError {
 
         let (status, code, offset, range_size) = match self {
             Self::BadRequest => (StatusCode::BAD_REQUEST, "invalid_request", None, None),
+            Self::UnsupportedPreview => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "preview_unsupported",
+                None,
+                None,
+            ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", None, None),
             Self::Conflict => (StatusCode::CONFLICT, "conflict", None, None),
             Self::OffsetConflict(offset) => {
@@ -214,6 +222,7 @@ struct DownloadRecord {
     name: String,
     size_bytes: i64,
     storage_key: String,
+    mime_detected: Option<String>,
     checksum_sha256: Option<String>,
     state: String,
     version_created_at: DateTime<Utc>,
@@ -230,6 +239,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/files/{id}/download",
             get(download_file).head(download_head),
+        )
+        .route(
+            "/api/files/{id}/preview",
+            get(preview_file).head(preview_head),
         )
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
@@ -674,6 +687,9 @@ async fn finalize_upload(
         .promote_staging_file(session.staging_key, &object.storage_key)
         .await
         .map_err(TransferError::Storage)?;
+    let detected_media_type = sniff_media_type_from_path(&object_path)
+        .await
+        .map_err(|error| TransferError::Storage(StorageError::Io(error)))?;
     let (actual_size, checksum) = hash_file(&object_path)
         .await
         .map_err(|error| TransferError::Storage(StorageError::Io(error)))?;
@@ -701,10 +717,11 @@ async fn finalize_upload(
     }
     sqlx::query(
         "UPDATE storage_objects \
-            SET checksum_sha256 = $1, state = 'ready' \
-          WHERE id = $2 AND state IN ('pending', 'ready')",
+            SET checksum_sha256 = $1, mime_detected = $2, state = 'ready' \
+          WHERE id = $3 AND state IN ('pending', 'ready')",
     )
     .bind(checksum)
+    .bind(detected_media_type)
     .bind(storage_object_id)
     .execute(&mut *transaction)
     .await
@@ -792,12 +809,51 @@ async fn download_head(
     download_response(&state, user.id, id, &headers, true).await
 }
 
+async fn preview_file(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, TransferError> {
+    preview_response(&state, user.id, id, &headers, false).await
+}
+
+async fn preview_head(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, TransferError> {
+    preview_response(&state, user.id, id, &headers, true).await
+}
+
+async fn preview_response(
+    state: &AppState,
+    owner_id: Uuid,
+    id: Uuid,
+    request_headers: &HeaderMap,
+    head_only: bool,
+) -> Result<Response, TransferError> {
+    download_response_inner(state, owner_id, id, request_headers, head_only, true).await
+}
+
 pub(crate) async fn download_response(
     state: &AppState,
     owner_id: Uuid,
     id: Uuid,
     request_headers: &HeaderMap,
     head_only: bool,
+) -> Result<Response, TransferError> {
+    download_response_inner(state, owner_id, id, request_headers, head_only, false).await
+}
+
+async fn download_response_inner(
+    state: &AppState,
+    owner_id: Uuid,
+    id: Uuid,
+    request_headers: &HeaderMap,
+    head_only: bool,
+    inline_preview: bool,
 ) -> Result<Response, TransferError> {
     drive::ensure_active_entry(state, owner_id, id, false).await?;
     let entry: DownloadRecord = sqlx::query_as(
@@ -810,8 +866,8 @@ pub(crate) async fn download_response(
                JOIN parent_chain AS child ON parent.id = child.parent_id \
               WHERE parent.owner_id = $2 \
          ) \
-         SELECT entry.name, version.size_bytes, object.storage_key, object.checksum_sha256, \
-                object.state, version.created_at AS version_created_at \
+         SELECT entry.name, version.size_bytes, object.storage_key, object.mime_detected, \
+                object.checksum_sha256, object.state, version.created_at AS version_created_at \
            FROM drive_entries AS entry \
            JOIN files AS file ON file.id = entry.id \
            JOIN file_versions AS version ON version.id = file.current_version_id \
@@ -831,9 +887,36 @@ pub(crate) async fn download_response(
         ))));
     }
     let size = u64::try_from(entry.size_bytes).map_err(|_| TransferError::Inconsistent)?;
-    let range_value = request_headers
-        .get(RANGE)
-        .and_then(|value| value.to_str().ok());
+    let preview_mime = if inline_preview {
+        let detected = match entry.mime_detected.as_deref() {
+            Some(value) => safe_preview_mime(value),
+            None => sniff_media_type_from_storage(state, &entry.storage_key).await?,
+        };
+        Some(detected.ok_or(TransferError::UnsupportedPreview)?)
+    } else {
+        None
+    };
+    let checksum = entry.checksum_sha256.ok_or(TransferError::Inconsistent)?;
+    let etag = format!("\"{checksum}\"");
+    let last_modified = SystemTime::from(entry.version_created_at);
+    let last_modified_header = httpdate::fmt_http_date(last_modified);
+    let last_modified_http_date = httpdate::parse_http_date(&last_modified_header)
+        .map_err(|_| TransferError::Inconsistent)?;
+    let if_range_matches_current = request_headers
+        .get(IF_RANGE)
+        .map(|value| {
+            value
+                .to_str()
+                .is_ok_and(|value| if_range_matches(value, &etag, last_modified_http_date))
+        })
+        .unwrap_or(true);
+    let range_value = if if_range_matches_current {
+        request_headers
+            .get(RANGE)
+            .and_then(|value| value.to_str().ok())
+    } else {
+        None
+    };
     let requested_range = range::parse_range(range_value, size)
         .map_err(|_| TransferError::RangeNotSatisfiable(size))?;
     let (status, start, length, content_range) = match requested_range {
@@ -845,18 +928,22 @@ pub(crate) async fn download_response(
         ),
         None => (StatusCode::OK, 0, size, None),
     };
-    let checksum = entry.checksum_sha256.ok_or(TransferError::Inconsistent)?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
     response_headers.insert(
         CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
+        HeaderValue::from_static(preview_mime.unwrap_or("application/octet-stream")),
     );
     response_headers.insert(
         CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!(
-            "attachment; filename=\"download\"; filename*=UTF-8''{}",
+            "{}; filename=\"download\"; filename*=UTF-8''{}",
+            if inline_preview {
+                "inline"
+            } else {
+                "attachment"
+            },
             encode_filename(&entry.name)
         ))
         .map_err(|_| TransferError::BadRequest)?,
@@ -865,17 +952,19 @@ pub(crate) async fn download_response(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    if inline_preview {
+        response_headers.insert(
+            "content-security-policy",
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        );
+    }
     response_headers.insert(
         ETAG,
-        HeaderValue::from_str(&format!("\"{checksum}\""))
-            .map_err(|_| TransferError::Inconsistent)?,
+        HeaderValue::from_str(&etag).map_err(|_| TransferError::Inconsistent)?,
     );
     response_headers.insert(
         LAST_MODIFIED,
-        HeaderValue::from_str(&httpdate::fmt_http_date(SystemTime::from(
-            entry.version_created_at,
-        )))
-        .map_err(|_| TransferError::Inconsistent)?,
+        HeaderValue::from_str(&last_modified_header).map_err(|_| TransferError::Inconsistent)?,
     );
     response_headers.insert(
         CONTENT_LENGTH,
@@ -961,6 +1050,109 @@ fn require_not_expired(session: &UploadSession) -> Result<(), TransferError> {
     }
 }
 
+async fn sniff_media_type_from_path(
+    path: &std::path::Path,
+) -> Result<Option<&'static str>, io::Error> {
+    let mut file = tokio_fs::File::open(path).await?;
+    let mut header = [0_u8; 64];
+    let length = file.read(&mut header).await?;
+    Ok(sniff_media_type(&header[..length]))
+}
+
+async fn sniff_media_type_from_storage(
+    state: &AppState,
+    storage_key: &str,
+) -> Result<Option<&'static str>, TransferError> {
+    let mut file = state
+        .storage
+        .open_object(storage_key)
+        .await
+        .map_err(TransferError::Storage)?;
+    let mut header = [0_u8; 64];
+    let length = file
+        .read(&mut header)
+        .await
+        .map_err(|error| TransferError::Storage(StorageError::Io(error)))?;
+    Ok(sniff_media_type(&header[..length]))
+}
+
+fn safe_preview_mime(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/jpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/avif" => Some("image/avif"),
+        "image/bmp" => Some("image/bmp"),
+        "image/x-icon" => Some("image/x-icon"),
+        "video/mp4" => Some("video/mp4"),
+        "video/webm" => Some("video/webm"),
+        _ => None,
+    }
+}
+
+fn if_range_matches(value: &str, etag: &str, last_modified: SystemTime) -> bool {
+    if value.starts_with("W/") {
+        return false;
+    }
+    if value.starts_with('"') {
+        return value == etag;
+    }
+    httpdate::parse_http_date(value).is_ok_and(|date| last_modified <= date)
+}
+
+fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if header.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if header.len() >= 12 && &header[..4] == b"RIFF" && &header[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if header.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if header.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        return Some("image/x-icon");
+    }
+    if header.get(4..8).is_some_and(|brand| brand == b"ftyp") {
+        if header
+            .windows(4)
+            .any(|brand| brand == b"avif" || brand == b"avis")
+        {
+            return Some("image/avif");
+        }
+        if header.windows(4).any(|brand| {
+            matches!(
+                brand,
+                b"isom"
+                    | b"iso2"
+                    | b"iso5"
+                    | b"iso6"
+                    | b"mp41"
+                    | b"mp42"
+                    | b"avc1"
+                    | b"M4V "
+                    | b"dash"
+                    | b"MSNV"
+            )
+        }) {
+            return Some("video/mp4");
+        }
+    }
+    if header.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
+        && header.windows(4).any(|doc_type| doc_type == b"webm")
+    {
+        return Some("video/webm");
+    }
+    None
+}
+
 async fn hash_file(path: &std::path::Path) -> Result<(u64, String), io::Error> {
     let mut file = tokio_fs::File::open(path).await?;
     let mut buffer = vec![0_u8; 128 * 1024];
@@ -1024,5 +1216,65 @@ fn map_database_error(error: sqlx::Error) -> TransferError {
             _ => TransferError::Database(error),
         },
         _ => TransferError::Database(error),
+    }
+}
+
+#[cfg(test)]
+mod media_type_tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::{if_range_matches, safe_preview_mime, sniff_media_type};
+
+    #[test]
+    fn detects_supported_media_from_file_signatures() {
+        let samples: &[(&[u8], &str)] = &[
+            (b"\x89PNG\r\n\x1a\nrest", "image/png"),
+            (b"\xff\xd8\xffrest", "image/jpeg"),
+            (b"GIF89arest", "image/gif"),
+            (b"RIFF\x00\x00\x00\x00WEBPrest", "image/webp"),
+            (b"BMrest", "image/bmp"),
+            (b"\x00\x00\x01\x00rest", "image/x-icon"),
+            (b"\x00\x00\x00\x18ftypavifrest", "image/avif"),
+            (b"\x00\x00\x00\x18ftypisomrest", "video/mp4"),
+            (b"\x1a\x45\xdf\xa3\xa3\x42\x82\x84webmrest", "video/webm"),
+        ];
+
+        for (signature, expected) in samples {
+            assert_eq!(sniff_media_type(signature), Some(*expected));
+        }
+    }
+
+    #[test]
+    fn rejects_active_unknown_and_non_webm_ebml_content() {
+        assert_eq!(
+            sniff_media_type(b"<svg><script>alert(1)</script></svg>"),
+            None
+        );
+        assert_eq!(sniff_media_type(b"plain text named photo.jpg"), None);
+        assert_eq!(
+            sniff_media_type(b"\x1a\x45\xdf\xa3\xa3\x42\x82\x88matroska"),
+            None
+        );
+        assert_eq!(safe_preview_mime("image/svg+xml"), None);
+        assert_eq!(safe_preview_mime("text/html"), None);
+    }
+
+    #[test]
+    fn honors_only_matching_if_range_validators() {
+        let last_modified = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let etag = "\"current-checksum\"";
+        assert!(if_range_matches(etag, etag, last_modified));
+        assert!(!if_range_matches("\"stale-checksum\"", etag, last_modified));
+        assert!(!if_range_matches(
+            "W/\"current-checksum\"",
+            etag,
+            last_modified
+        ));
+        assert!(if_range_matches(
+            "Tue, 14 Nov 2028 00:00:00 GMT",
+            etag,
+            last_modified
+        ));
+        assert!(!if_range_matches("not a validator", etag, last_modified));
     }
 }
