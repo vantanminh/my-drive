@@ -5,6 +5,7 @@ mod db;
 mod drive;
 mod health;
 mod maintenance;
+mod media_admin;
 mod shares;
 mod storage;
 mod transfers;
@@ -15,6 +16,8 @@ mod auth_http_tests;
 mod drive_http_tests;
 #[cfg(test)]
 mod maintenance_http_tests;
+#[cfg(test)]
+mod media_admin_http_tests;
 #[cfg(test)]
 mod share_http_tests;
 #[cfg(test)]

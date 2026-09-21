@@ -33,6 +33,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(crate::drive::router())
         .merge(crate::transfers::router())
         .merge(crate::shares::router())
+        .merge(crate::media_admin::router())
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found))
         .route("/s/{token}", get(serve_frontend_index))
