@@ -74,9 +74,10 @@ storage_cutover_started=0
 database_cutover_started=0
 restore_committed=0
 APP_NEEDS_RESTART=0
+INDEXER_NEEDS_RESTART=0
 DATABASE_ROLLBACK_CONFIRMED=0
 STORAGE_ROLLBACK_CONFIRMED=0
-KEEP_APP_STOPPED=0
+KEEP_SERVICES_STOPPED=0
 
 database_exists() {
     local result
@@ -165,19 +166,19 @@ cleanup() {
         else
             printf 'error: database rollback failed; inspect database %s and %s\n' "$DATABASE_NAME" "$previous_database" >&2
             status=1
-            KEEP_APP_STOPPED=1
+            KEEP_SERVICES_STOPPED=1
         fi
     fi
     if (( status != 0 && storage_cutover_started && !restore_committed )); then
         if (( database_cutover_started && !DATABASE_ROLLBACK_CONFIRMED )); then
             printf 'error: storage rollback was not attempted because database state is uncertain; inspect %s and %s\n' "$STORAGE_DATA_ROOT" "$rollback_dir" >&2
-            KEEP_APP_STOPPED=1
+            KEEP_SERVICES_STOPPED=1
         elif rollback_storage; then
             STORAGE_ROLLBACK_CONFIRMED=1
         else
             printf 'error: storage rollback failed; inspect %s and %s\n' "$STORAGE_DATA_ROOT" "$rollback_dir" >&2
             status=1
-            KEEP_APP_STOPPED=1
+            KEEP_SERVICES_STOPPED=1
         fi
     fi
 
@@ -194,12 +195,17 @@ cleanup() {
     fi
 
     if (( APP_NEEDS_RESTART )); then
-        if (( KEEP_APP_STOPPED )); then
-            printf 'error: the previously running app was left stopped because rollback is incomplete\n' >&2
+        if (( KEEP_SERVICES_STOPPED )); then
+            printf 'error: the previously running app and media indexer were left stopped because rollback is incomplete\n' >&2
             status=1
         elif ! compose start app >/dev/null || ! wait_for_app_healthy; then
             printf 'error: restore finished, but the previously running app did not return healthy\n' >&2
             status=1
+        elif (( INDEXER_NEEDS_RESTART )); then
+            if ! compose start media-indexer >/dev/null || ! wait_for_media_indexer_running; then
+                printf 'error: restore finished, but the previously running media indexer did not return to running\n' >&2
+                status=1
+            fi
         fi
     fi
 
@@ -228,10 +234,14 @@ for candidate in "$scratch_database" "$previous_database"; do
     fi
 done
 
-if service_is_running app; then
-    APP_NEEDS_RESTART=1
-    compose stop app >/dev/null
+if service_is_running media-indexer && ! service_is_running app; then
+    die "media-indexer is running while app is stopped; recover the Compose services before restore"
 fi
+
+if service_is_running app; then APP_NEEDS_RESTART=1; fi
+if service_is_running media-indexer; then INDEXER_NEEDS_RESTART=1; fi
+stop_service_for_operation media-indexer
+stop_service_for_operation app
 
 compose exec -T db createdb --username "$DATABASE_USER" --owner "$DATABASE_USER" "$scratch_database"
 scratch_created=1

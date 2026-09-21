@@ -28,8 +28,8 @@ backup_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 final_dir="$BACKUP_ROOT/my-drive-$backup_id"
 [[ ! -e "$final_dir" ]] || die "backup destination already exists: $final_dir"
 staging_dir="$(mktemp -d "$BACKUP_ROOT/.my-drive-backup.XXXXXXXX")"
-APP_WAS_RUNNING=0
 APP_NEEDS_RESTART=0
+INDEXER_NEEDS_RESTART=0
 
 cleanup() {
     local status=$?
@@ -42,6 +42,11 @@ cleanup() {
         if ! compose start app >/dev/null || ! wait_for_app_healthy; then
             printf 'error: backup finished, but the previously running app did not return healthy\n' >&2
             status=1
+        elif (( INDEXER_NEEDS_RESTART )); then
+            if ! compose start media-indexer >/dev/null || ! wait_for_media_indexer_running; then
+                printf 'error: backup finished, but the previously running media indexer did not return to running\n' >&2
+                status=1
+            fi
         fi
     fi
     exit "$status"
@@ -50,11 +55,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if service_is_running app; then
-    APP_WAS_RUNNING=1
-    APP_NEEDS_RESTART=1
-    compose stop app >/dev/null
+if service_is_running media-indexer && ! service_is_running app; then
+    die "media-indexer is running while app is stopped; recover the Compose services before backup"
 fi
+
+if service_is_running app; then APP_NEEDS_RESTART=1; fi
+if service_is_running media-indexer; then INDEXER_NEEDS_RESTART=1; fi
+stop_service_for_operation media-indexer
+stop_service_for_operation app
 
 compose exec -T db sh -ec 'exec pg_dump --format=custom --no-owner --no-acl --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \
     | "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/database.dump.age"

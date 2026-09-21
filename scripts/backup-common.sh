@@ -80,18 +80,102 @@ compose_mounts() {
 }
 
 compose_running_id() {
-    local service="$1"
-    compose ps --status running -q "$service" | head -n 1
+    local service="$1" container_ids container_id details state exit_code oom_killed restarting restart_policy first_running="" container_count=0
+    container_ids="$(compose ps --all -q "$service")" || return 2
+    [[ -n "$container_ids" ]] || return 1
+
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        ((container_count += 1))
+        (( container_count == 1 )) || return 2
+        details="$("$DOCKER_BIN" inspect -f '{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Restarting}}|{{.HostConfig.RestartPolicy.Name}}' "$container_id")" || return 2
+        IFS='|' read -r state exit_code oom_killed restarting restart_policy <<<"$details"
+        case "$state" in
+            running)
+                first_running="$container_id"
+                ;;
+            exited)
+                [[ "$oom_killed" == false && "$restarting" == false ]] || return 2
+                case "$restart_policy" in
+                    no) ;;
+                    on-failure)
+                        [[ "$exit_code" == 0 ]] || return 2
+                        ;;
+                    *) return 2 ;;
+                esac
+                ;;
+            created) ;;
+            *) return 2 ;;
+        esac
+    done <<<"$container_ids"
+
+    if [[ -n "$first_running" ]]; then
+        printf '%s' "$first_running"
+        return 0
+    fi
+    return 1
+}
+
+service_has_containers() {
+    local container_ids
+    if container_ids="$(compose ps --all -q "$1")"; then
+        [[ -n "$container_ids" ]]
+        return
+    fi
+    die "could not inspect Compose containers for service: $1"
 }
 
 service_is_running() {
-    [[ -n "$(compose_running_id "$1")" ]]
+    local id status
+    if id="$(compose_running_id "$1")"; then
+        [[ -n "$id" ]]
+        return
+    else
+        status=$?
+    fi
+    if (( status == 1 )); then
+        return 1
+    fi
+    die "could not determine a safe Compose state for service: $1"
+}
+
+service_is_active() {
+    local service="$1" container_ids container_id details state restarting container_count=0
+    container_ids="$(compose ps --all -q "$service")" || die "could not inspect Compose containers for service: $service"
+    [[ -n "$container_ids" ]] || return 1
+
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        ((container_count += 1))
+        (( container_count == 1 )) || die "multiple containers are unsupported for Compose service: $service"
+        details="$("$DOCKER_BIN" inspect -f '{{.State.Status}}|{{.State.Restarting}}' "$container_id")" || die "could not inspect Compose container for service: $service"
+        IFS='|' read -r state restarting <<<"$details"
+        case "$state" in
+            running) return 0 ;;
+            exited|created)
+                [[ "$restarting" == false ]] || die "Compose service is still restarting after stop: $service"
+                ;;
+            *) die "Compose service is not in a stable stopped state: $service ($state)" ;;
+        esac
+    done <<<"$container_ids"
+    return 1
+}
+
+stop_service_for_operation() {
+    local service="$1"
+    if service_has_containers "$service"; then
+        compose stop "$service" >/dev/null || die "could not stop Compose service before storage operation: $service"
+        if service_is_active "$service"; then
+            die "Compose service remained active after stop: $service"
+        fi
+    fi
 }
 
 wait_for_app_healthy() {
     local id state health attempt
     for attempt in {1..120}; do
-        id="$(compose ps -q app | head -n 1)"
+        id="$(compose ps --all -q app)" || return 1
+        id="${id%%$'\n'*}"
         if [[ -z "$id" ]]; then
             sleep 1
             continue
@@ -102,6 +186,29 @@ wait_for_app_healthy() {
             return 0
         fi
         if [[ "$state" == exited || "$state" == dead || "$health" == unhealthy ]]; then
+            "$DOCKER_BIN" logs --tail 60 "$id" >&2 || true
+            return 1
+        fi
+        sleep 1
+    done
+    [[ -n "${id:-}" ]] && "$DOCKER_BIN" logs --tail 60 "$id" >&2 || true
+    return 1
+}
+
+wait_for_media_indexer_running() {
+    local id state attempt
+    for attempt in {1..30}; do
+        id="$(compose ps --all -q media-indexer)" || return 1
+        id="${id%%$'\n'*}"
+        if [[ -z "$id" ]]; then
+            sleep 1
+            continue
+        fi
+        state="$("$DOCKER_BIN" inspect -f '{{.State.Status}}' "$id" 2>/dev/null || true)"
+        if [[ "$state" == running ]]; then
+            return 0
+        fi
+        if [[ "$state" == exited || "$state" == dead ]]; then
             "$DOCKER_BIN" logs --tail 60 "$id" >&2 || true
             return 1
         fi
@@ -165,9 +272,7 @@ resolve_compose_mounts() {
 }
 
 require_running_database() {
-    local id
-    id="$(compose_running_id db)"
-    [[ -n "$id" ]] || die "the Compose db service must already be running"
+    service_is_running db || die "the Compose db service must already be running"
 }
 
 verify_identity_file() {
