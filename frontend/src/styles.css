@@ -827,6 +827,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .media-tool { display: inline-grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; color: #60716c; background: transparent; border: 0; border-radius: 8px; cursor: pointer; text-decoration: none; }
 .media-tool:hover { color: #155c45; background: #eef4f0; }
 .media-zoom-label { width: 39px; color: #687871; font-size: 10px; font-variant-numeric: tabular-nums; text-align: center; }
+.media-video-controls { display: flex; align-items: center; gap: 2px; }
+.media-time-label { min-width: 76px; margin: 0 3px; color: #687871; font-size: 10px; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
 .media-speed-label { display: flex; align-items: center; gap: 7px; padding: 0 7px; color: #79867f; font-size: 10px; }
 .media-speed { min-height: 30px; padding: 0 7px; color: #35463f; background: #f5f7f6; border: 1px solid #e7ece9; border-radius: 6px; font-size: 10px; }
 .media-viewer-stage { position: relative; min-height: 0; overflow: hidden; }
@@ -1111,6 +1113,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .media-viewer-actions { gap: 1px; }
   .media-tool { width: 30px; height: 32px; }
   .media-zoom-label { width: 31px; font-size: 9px; }
+  .media-video-controls { gap: 0; }
+  .media-time-label, .media-skip-control, .media-mute-control { display: none; }
   .media-speed-label { gap: 4px; padding: 0 3px; font-size: 9px; }
   .media-speed { min-height: 29px; padding: 0 4px; font-size: 9px; }
   .media-fullscreen { right: 10px; bottom: 51px; }

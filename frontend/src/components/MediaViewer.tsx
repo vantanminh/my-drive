@@ -1,5 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, Expand, Minus, Plus, RotateCcw, RotateCw, X } from 'lucide-react';
+import {
+  Download,
+  Expand,
+  FastForward,
+  Minus,
+  Pause,
+  Play,
+  Plus,
+  Rewind,
+  RotateCcw,
+  RotateCw,
+  Volume2,
+  VolumeX,
+  X
+} from 'lucide-react';
 import { formatSize } from '../format';
 import { previewUrl, thumbnailUrl, downloadUrl } from '../api';
 import type { Entry } from '../types';
@@ -20,6 +34,16 @@ export function mediaKindFor(entry: Pick<Entry, 'name' | 'mime_detected'>): Medi
   return null;
 }
 
+function formatPlaybackTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+}
+
 type Props = {
   entry: Entry;
   onClose: () => void;
@@ -30,6 +54,10 @@ export default function MediaViewer({ entry, onClose }: Props) {
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [loadError, setLoadError] = useState(false);
+  const [playbackRate, setPlaybackRateValue] = useState(1);
+  const [videoProgress, setVideoProgress] = useState({ current: 0, duration: 0 });
+  const [videoPaused, setVideoPaused] = useState(true);
+  const [videoMuted, setVideoMuted] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLElement>(null);
 
@@ -39,8 +67,54 @@ export default function MediaViewer({ entry, onClose }: Props) {
     return () => { document.body.style.overflow = previousOverflow; };
   }, []);
 
+  useEffect(() => {
+    setLoadError(false);
+    setZoom(1);
+    setRotation(0);
+    setPlaybackRateValue(1);
+    setVideoProgress({ current: 0, duration: 0 });
+    setVideoPaused(true);
+    setVideoMuted(false);
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = 0;
+      videoRef.current.playbackRate = 1;
+      videoRef.current.muted = false;
+    }
+  }, [entry.id, kind]);
+
   function setPlaybackRate(rate: number) {
+    setPlaybackRateValue(rate);
     if (videoRef.current) videoRef.current.playbackRate = rate;
+  }
+
+  function togglePlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void video.play().catch(() => setLoadError(true));
+    } else {
+      video.pause();
+    }
+  }
+
+  function seekBy(seconds: number) {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration)) return;
+    video.currentTime = Math.min(Math.max(video.currentTime + seconds, 0), video.duration);
+  }
+
+  function seekTo(seconds: number) {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration)) return;
+    video.currentTime = Math.min(Math.max(seconds, 0), video.duration);
+  }
+
+  function toggleMute() {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    setVideoMuted(video.muted);
   }
 
   function toggleFullscreen() {
@@ -50,6 +124,99 @@ export default function MediaViewer({ entry, onClose }: Props) {
       void stageRef.current.requestFullscreen();
     }
   }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('button, a, input, select, textarea, video')) return;
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+
+      if (kind === 'video') {
+        const video = videoRef.current;
+        if (!video) return;
+        switch (event.key) {
+          case ' ':
+          case 'k':
+            event.preventDefault();
+            togglePlayback();
+            break;
+          case 'ArrowLeft':
+            event.preventDefault();
+            seekBy(event.shiftKey ? -30 : -10);
+            break;
+          case 'ArrowRight':
+            event.preventDefault();
+            seekBy(event.shiftKey ? 30 : 10);
+            break;
+          case 'Home':
+            event.preventDefault();
+            seekTo(0);
+            break;
+          case 'End':
+            event.preventDefault();
+            seekTo(video.duration);
+            break;
+          case 'm':
+          case 'M':
+            event.preventDefault();
+            toggleMute();
+            break;
+          case 'f':
+          case 'F':
+            event.preventDefault();
+            toggleFullscreen();
+            break;
+          case '[':
+            event.preventDefault();
+            setPlaybackRate(Math.max(0.5, Number((video.playbackRate - 0.25).toFixed(2))));
+            break;
+          case ']':
+            event.preventDefault();
+            setPlaybackRate(Math.min(2, Number((video.playbackRate + 0.25).toFixed(2))));
+            break;
+          default:
+            break;
+        }
+        return;
+      }
+
+      switch (event.key) {
+        case '+':
+        case '=':
+          event.preventDefault();
+          setZoom((value) => Math.min(4, value + 0.25));
+          break;
+        case '-':
+        case '_':
+          event.preventDefault();
+          setZoom((value) => Math.max(0.25, value - 0.25));
+          break;
+        case '0':
+          event.preventDefault();
+          setZoom(1);
+          setRotation(0);
+          break;
+        case 'r':
+          event.preventDefault();
+          setRotation((value) => value + 90);
+          break;
+        case 'R':
+          event.preventDefault();
+          setRotation((value) => value - 90);
+          break;
+        default:
+          break;
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [kind, onClose]);
 
   return (
     <div
@@ -73,16 +240,31 @@ export default function MediaViewer({ entry, onClose }: Props) {
                 <button className="media-tool" onClick={() => { setZoom(1); setRotation(0); }} aria-label="Reset view" title="Reset view"><Expand size={16} /></button>
               </>
             ) : (
-              <label className="media-speed-label">Speed
-                <select className="media-speed" aria-label="Playback speed" defaultValue="1" onChange={(event) => setPlaybackRate(Number(event.target.value))}>
-                  <option value="0.5">0.5×</option>
-                  <option value="0.75">0.75×</option>
-                  <option value="1">1×</option>
-                  <option value="1.25">1.25×</option>
-                  <option value="1.5">1.5×</option>
-                  <option value="2">2×</option>
-                </select>
-              </label>
+              <>
+                <div className="media-video-controls" aria-label="Video controls">
+                  <button className="media-tool media-skip-control" onClick={() => seekBy(-10)} aria-label="Back 10 seconds" title="Back 10 seconds"><Rewind size={16} /></button>
+                  <button className="media-tool" onClick={togglePlayback} aria-label={videoPaused ? 'Play video' : 'Pause video'} title={videoPaused ? 'Play video' : 'Pause video'}>
+                    {videoPaused ? <Play size={16} /> : <Pause size={16} />}
+                  </button>
+                  <button className="media-tool media-skip-control" onClick={() => seekBy(10)} aria-label="Forward 10 seconds" title="Forward 10 seconds"><FastForward size={16} /></button>
+                  <button className="media-tool media-mute-control" onClick={toggleMute} aria-label={videoMuted ? 'Unmute video' : 'Mute video'} title={videoMuted ? 'Unmute video' : 'Mute video'}>
+                    {videoMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                  </button>
+                  <span className="media-time-label" aria-label="Video time">
+                    {formatPlaybackTime(videoProgress.current)} / {formatPlaybackTime(videoProgress.duration)}
+                  </span>
+                </div>
+                <label className="media-speed-label">Speed
+                  <select className="media-speed" aria-label="Playback speed" value={playbackRate} onChange={(event) => setPlaybackRate(Number(event.target.value))}>
+                    <option value="0.5">0.5×</option>
+                    <option value="0.75">0.75×</option>
+                    <option value="1">1×</option>
+                    <option value="1.25">1.25×</option>
+                    <option value="1.5">1.5×</option>
+                    <option value="2">2×</option>
+                  </select>
+                </label>
+              </>
             )}
             <a className="media-tool media-download" href={downloadUrl(entry.id)} aria-label="Download original" title="Download original"><Download size={17} /></a>
             <button className="media-tool media-close" onClick={onClose} aria-label="Close preview" title="Close preview"><X size={18} /></button>
@@ -115,6 +297,11 @@ export default function MediaViewer({ entry, onClose }: Props) {
               controls
               playsInline
               preload="metadata"
+              onLoadedMetadata={(event) => setVideoProgress({ current: event.currentTarget.currentTime, duration: event.currentTarget.duration })}
+              onTimeUpdate={(event) => setVideoProgress({ current: event.currentTarget.currentTime, duration: event.currentTarget.duration })}
+              onPlay={() => setVideoPaused(false)}
+              onPause={() => setVideoPaused(true)}
+              onVolumeChange={(event) => setVideoMuted(event.currentTarget.muted)}
               onError={() => setLoadError(true)}
             >
               Your browser cannot play this video format.
