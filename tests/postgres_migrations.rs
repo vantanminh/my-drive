@@ -61,6 +61,95 @@ async fn postgres_applies_schema_and_rejects_ambiguous_or_cyclic_entries() {
         "folders cannot cross owner boundaries"
     );
 
+    let face_file_id = Uuid::new_v4();
+    let face_object_id = Uuid::new_v4();
+    let face_version_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) \
+         VALUES ($1, $2, $3, 'file', 'face.jpg')",
+    )
+    .bind(face_file_id)
+    .bind(owner_id)
+    .bind(root_folder)
+    .execute(&pool)
+    .await
+    .expect("insert face test file entry");
+    sqlx::query("INSERT INTO files (id) VALUES ($1)")
+        .bind(face_file_id)
+        .execute(&pool)
+        .await
+        .expect("insert face test file projection");
+    sqlx::query(
+        "INSERT INTO storage_objects (id, storage_key, size_bytes, state) \
+         VALUES ($1, $2, 1, 'ready')",
+    )
+    .bind(face_object_id)
+    .bind(format!(
+        "{}/{}/{}",
+        &face_object_id.to_string()[..2],
+        &face_object_id.to_string()[2..4],
+        face_object_id
+    ))
+    .execute(&pool)
+    .await
+    .expect("insert face test storage object");
+    sqlx::query(
+        "INSERT INTO file_versions (id, file_id, storage_object_id, size_bytes) \
+         VALUES ($1, $2, $3, 1)",
+    )
+    .bind(face_version_id)
+    .bind(face_file_id)
+    .bind(face_object_id)
+    .execute(&pool)
+    .await
+    .expect("insert face test file version");
+    sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+        .bind(face_version_id)
+        .bind(face_file_id)
+        .execute(&pool)
+        .await
+        .expect("set face test current version");
+
+    let cluster_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO face_clusters (id, owner_id, label) VALUES ($1, $2, 'Alice')")
+        .bind(cluster_id)
+        .bind(owner_id)
+        .execute(&pool)
+        .await
+        .expect("insert face cluster");
+    sqlx::query(
+        "INSERT INTO face_observations \
+         (file_version_id, cluster_id, recipe_version, face_index, confidence, \
+          box_left, box_top, box_width, box_height) \
+         VALUES ($1, $2, 1, 0, 0.95, 0.1, 0.1, 0.3, 0.4)",
+    )
+    .bind(face_version_id)
+    .bind(cluster_id)
+    .execute(&pool)
+    .await
+    .expect("insert same-owner face observation");
+    let foreign_cluster = Uuid::new_v4();
+    sqlx::query("INSERT INTO face_clusters (id, owner_id) VALUES ($1, $2)")
+        .bind(foreign_cluster)
+        .bind(other_owner)
+        .execute(&pool)
+        .await
+        .expect("insert foreign face cluster");
+    let cross_owner_face = sqlx::query(
+        "INSERT INTO face_observations \
+         (file_version_id, cluster_id, recipe_version, face_index, confidence, \
+          box_left, box_top, box_width, box_height) \
+         VALUES ($1, $2, 1, 1, 0.95, 0.1, 0.1, 0.3, 0.4)",
+    )
+    .bind(face_version_id)
+    .bind(foreign_cluster)
+    .execute(&pool)
+    .await;
+    assert!(
+        cross_owner_face.is_err(),
+        "face observations must not cross account boundaries"
+    );
+
     pool.close().await;
 }
 
@@ -83,6 +172,8 @@ async fn assert_schema(pool: &PgPool) {
         "shares",
         "sessions",
         "audit_events",
+        "face_clusters",
+        "face_observations",
     ] {
         assert!(
             tables.iter().any(|table| table == expected),

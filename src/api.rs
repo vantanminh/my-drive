@@ -35,6 +35,7 @@ pub(crate) fn router(state: AppState) -> Router {
             post(crate::auth::change_password).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(crate::drive::router())
+        .merge(crate::faces::router())
         .merge(crate::transfers::router())
         .merge(crate::shares::router())
         .merge(crate::media_admin::router())

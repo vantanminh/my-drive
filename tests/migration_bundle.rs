@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 6);
+    assert_eq!(migrator.iter().len(), 7);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -50,4 +50,9 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     assert!(managed_accounts.contains("disabled_at TIMESTAMPTZ"));
     assert!(managed_accounts.contains("must_change_password BOOLEAN"));
     assert!(managed_accounts.contains("validate_member_manager"));
+
+    let face_indexing = include_str!("../migrations/0007_face_indexing.sql");
+    assert!(face_indexing.contains("CREATE TABLE face_clusters"));
+    assert!(face_indexing.contains("CREATE TABLE face_observations"));
+    assert!(face_indexing.contains("face_observation_owner_guard"));
 }

@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod db;
 mod drive;
+mod faces;
 mod health;
 mod maintenance;
 mod media_admin;
