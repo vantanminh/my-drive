@@ -37,6 +37,7 @@ use crate::{
 };
 
 const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
+const IMAGE_PREVIEW_RECIPE_VERSION: i16 = 1;
 const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id";
 
 #[derive(Debug, Error)]
@@ -735,6 +736,25 @@ async fn finalize_upload(
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
+    if is_indexable_image_mime(detected_media_type) {
+        let version_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT current_version_id FROM files WHERE id = $1 FOR UPDATE")
+                .bind(file_id)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(map_database_error)?;
+        let version_id = version_id.ok_or(TransferError::Inconsistent)?;
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+             VALUES ($1, 'image_preview', $2) \
+             ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+        )
+        .bind(version_id)
+        .bind(IMAGE_PREVIEW_RECIPE_VERSION)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+    }
     sqlx::query(
         "INSERT INTO audit_events (event_type, actor_id, resource_id) \
          VALUES ('upload_completed', $1, $2)",
@@ -1153,6 +1173,21 @@ fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
     None
 }
 
+fn is_indexable_image_mime(mime_type: Option<&str>) -> bool {
+    matches!(
+        mime_type,
+        Some(
+            "image/jpeg"
+                | "image/png"
+                | "image/gif"
+                | "image/webp"
+                | "image/avif"
+                | "image/bmp"
+                | "image/x-icon"
+        )
+    )
+}
+
 async fn hash_file(path: &std::path::Path) -> Result<(u64, String), io::Error> {
     let mut file = tokio_fs::File::open(path).await?;
     let mut buffer = vec![0_u8; 128 * 1024];
@@ -1223,7 +1258,7 @@ fn map_database_error(error: sqlx::Error) -> TransferError {
 mod media_type_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{if_range_matches, safe_preview_mime, sniff_media_type};
+    use super::{if_range_matches, is_indexable_image_mime, safe_preview_mime, sniff_media_type};
 
     #[test]
     fn detects_supported_media_from_file_signatures() {
@@ -1241,6 +1276,29 @@ mod media_type_tests {
 
         for (signature, expected) in samples {
             assert_eq!(sniff_media_type(signature), Some(*expected));
+        }
+    }
+
+    #[test]
+    fn only_detected_raster_image_types_are_queued_for_indexing() {
+        for mime_type in [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/bmp",
+            "image/x-icon",
+        ] {
+            assert!(is_indexable_image_mime(Some(mime_type)), "{mime_type}");
+        }
+        for mime_type in [
+            None,
+            Some("image/svg+xml"),
+            Some("text/html"),
+            Some("video/mp4"),
+        ] {
+            assert!(!is_indexable_image_mime(mime_type));
         }
     }
 

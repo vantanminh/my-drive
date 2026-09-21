@@ -399,6 +399,17 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
             .await
             .expect("inspect media type detected during upload finalization");
     assert_eq!(stored_mime.as_deref(), Some("image/png"));
+    let (queued_images, queued_state): (i64, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(state) FROM media_index_jobs AS job \
+           JOIN file_versions AS version ON version.id = job.file_version_id \
+          WHERE version.file_id = $1 AND job.task = 'image_preview' AND job.recipe_version = 1",
+    )
+    .bind(file_id)
+    .fetch_one(&pool)
+    .await
+    .expect("inspect queued image-index job");
+    assert_eq!(queued_images, 1);
+    assert_eq!(queued_state.as_deref(), Some("queued"));
 
     let download = request(
         &app,

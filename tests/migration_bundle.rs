@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 4);
+    assert_eq!(migrator.iter().len(), 5);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -36,4 +36,11 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     let storage_maintenance = include_str!("../migrations/0004_storage_maintenance.sql");
     assert!(storage_maintenance.contains("staging_cleaned_at"));
     assert!(storage_maintenance.contains("last_checked_at"));
+
+    let media_indexing = include_str!("../migrations/0005_media_indexing.sql");
+    assert!(media_indexing.contains("CREATE TABLE media_index_jobs"));
+    assert!(media_indexing.contains("UNIQUE (file_version_id, task, recipe_version)"));
+    assert!(media_indexing.contains("CREATE TABLE media_derivatives"));
+    assert!(media_indexing.contains("CREATE TABLE media_index_control"));
+    assert!(media_indexing.contains("INSERT INTO media_index_control (singleton) VALUES (TRUE)"));
 }
