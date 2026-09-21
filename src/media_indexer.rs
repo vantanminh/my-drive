@@ -17,7 +17,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::storage::{LocalStorage, PreviewStorage, StorageError};
+use crate::{
+    face_indexer::{self, DEFAULT_MODEL_PATH, FaceDetectionError},
+    storage::{LocalStorage, PreviewStorage, StorageError},
+};
 
 const WORKER_LOCK_ID: i64 = 4_831_170_923_501;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -48,6 +51,7 @@ enum WorkerError {
 struct ClaimedJob {
     id: i64,
     file_version_id: Uuid,
+    owner_id: Uuid,
     task: String,
     version_size_bytes: i64,
     object_size_bytes: Option<i64>,
@@ -256,6 +260,32 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+         SELECT version.id, 'face_index', 1 \
+           FROM file_versions AS version \
+           JOIN files AS file ON file.current_version_id = version.id \
+           JOIN drive_entries AS entry ON entry.id = file.id \
+           JOIN storage_objects AS object ON object.id = version.storage_object_id \
+          WHERE entry.deleted_at IS NULL \
+            AND object.state = 'ready' \
+            AND object.mime_detected IN ( \
+                'image/jpeg', 'image/png', 'image/gif', 'image/webp', \
+                'image/avif', 'image/bmp', 'image/x-icon', \
+                'video/mp4', 'video/webm' \
+            ) \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM media_index_jobs AS existing \
+                 WHERE existing.file_version_id = version.id \
+                   AND existing.task = 'face_index' \
+                   AND existing.recipe_version = 1 \
+            ) \
+          ORDER BY version.created_at, version.id \
+          LIMIT 100 \
+         ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -264,7 +294,7 @@ async fn fail_exhausted_leases(pool: &PgPool) -> Result<(), sqlx::Error> {
         "UPDATE media_index_jobs \
             SET state = 'failed', lease_expires_at = NULL, current_stage = NULL, \
                 error_code = 'decode_failed', last_error_at = now(), updated_at = now() \
-          WHERE task IN ('image_preview', 'video_thumbnail') AND state = 'running' \
+          WHERE task IN ('image_preview', 'video_thumbnail', 'face_index') AND state = 'running' \
             AND lease_expires_at <= now() AND attempts >= $1",
     )
     .bind(MAX_ATTEMPTS)
@@ -278,7 +308,7 @@ async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
         "WITH candidate AS ( \
              SELECT job.id \
                FROM media_index_jobs AS job \
-              WHERE job.task IN ('image_preview', 'video_thumbnail') AND job.attempts < $1 \
+              WHERE job.task IN ('image_preview', 'video_thumbnail', 'face_index') AND job.attempts < $1 \
                 AND ( \
                     (job.state IN ('queued', 'retry_wait') AND job.available_at <= now()) \
                     OR (job.state = 'running' AND job.lease_expires_at <= now()) \
@@ -293,9 +323,10 @@ async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
                 current_stage = 'opening_source', processed_bytes = 0, error_code = NULL, \
                 last_error_at = NULL, updated_at = now() \
            FROM candidate, file_versions AS version \
+           JOIN drive_entries AS entry ON entry.id = version.file_id \
            LEFT JOIN storage_objects AS object ON object.id = version.storage_object_id \
           WHERE job.id = candidate.id AND version.id = job.file_version_id \
-         RETURNING job.id, job.file_version_id, job.task, version.size_bytes AS version_size_bytes, \
+         RETURNING job.id, job.file_version_id, entry.owner_id, job.task, version.size_bytes AS version_size_bytes, \
                    object.size_bytes AS object_size_bytes, object.storage_key, \
                    object.mime_detected, object.checksum_sha256 AS object_checksum_sha256, \
                    object.state AS object_state, job.attempts",
@@ -315,6 +346,7 @@ async fn process_job(
     match job.task.as_str() {
         "image_preview" => process_image_job(pool, storage, previews, job).await,
         "video_thumbnail" => process_video_job(pool, storage, previews, job).await,
+        "face_index" => process_face_job(pool, storage, job).await,
         _ => Err(unsupported("unsupported_format")),
     }
 }
@@ -353,7 +385,7 @@ async fn process_image_job(
         let thumbnail_input = viewer_png
             .as_ref()
             .map_or(input_path.path(), TempPath::path);
-        thumbnail_to_png(thumbnail_input, thumbnail.path(), side)
+        thumbnail_to_png(thumbnail_input, thumbnail.path(), side, mime)
             .await
             .map_err(map_decode_tool_error)?;
         let thumbnail_size = tokio_fs::metadata(thumbnail.path())
@@ -458,6 +490,105 @@ async fn process_video_job(
         bytes,
     }];
     publish_and_complete(pool, previews, job, actual_size, &generated).await
+}
+
+async fn process_face_job(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    job: &ClaimedJob,
+) -> Result<(), JobFailure> {
+    let mime = job
+        .mime_detected
+        .as_deref()
+        .ok_or_else(|| unsupported("unsupported_format"))?;
+    if !supports_image_mime(mime) && !supports_video_mime(mime) {
+        return Err(unsupported("unsupported_format"));
+    }
+    let (input_path, actual_size) = prepare_source(pool, storage, job, mime).await?;
+    set_stage(pool, job, "extracting_face_frame", actual_size)
+        .await
+        .map_err(|_| retryable("face_index_unavailable"))?;
+    let frame_path = TempPath::create("pgm").map_err(|_| retryable("face_index_unavailable"))?;
+    extract_gray_frame(input_path.path(), frame_path.path())
+        .await
+        .map_err(|error| {
+            tracing::warn!(job_id = job.id, error = ?error, "face frame extraction failed");
+            map_face_tool_error(error)
+        })?;
+    let frame_bytes = tokio_fs::read(frame_path.path())
+        .await
+        .map_err(|_| retryable("face_index_unavailable"))?;
+    let model_path = std::env::var_os("FACE_DETECTOR_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_PATH));
+    set_stage(pool, job, "detecting_faces", actual_size)
+        .await
+        .map_err(|_| retryable("face_index_unavailable"))?;
+    let detections = tokio::task::spawn_blocking(move || {
+        let frame = face_indexer::parse_pgm(&frame_bytes)?;
+        face_indexer::detect(&model_path, frame)
+    })
+    .await
+    .map_err(|_| retryable("face_index_unavailable"))?
+    .map_err(map_face_detection_error)?;
+
+    if !owns_lease(pool, job).await.unwrap_or(false) {
+        return Err(retryable("face_index_unavailable"));
+    }
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| retryable("face_index_unavailable"))?;
+    let completed = sqlx::query(
+        "UPDATE media_index_jobs \
+            SET state = 'completed', lease_expires_at = NULL, current_stage = NULL, \
+                processed_bytes = $3, error_code = NULL, completed_at = now(), updated_at = now() \
+          WHERE id = $1 AND task = 'face_index' AND state = 'running' AND attempts = $2",
+    )
+    .bind(job.id)
+    .bind(job.attempts)
+    .bind(actual_size as i64)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| retryable("face_index_unavailable"))?;
+    if completed.rows_affected() != 1 {
+        transaction
+            .rollback()
+            .await
+            .map_err(|_| retryable("face_index_unavailable"))?;
+        return Err(retryable("face_index_unavailable"));
+    }
+    for (face_index, face) in detections.iter().enumerate() {
+        let cluster_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO face_clusters (id, owner_id) VALUES ($1, $2)")
+            .bind(cluster_id)
+            .bind(job.owner_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| retryable("face_index_unavailable"))?;
+        sqlx::query(
+            "INSERT INTO face_observations \
+             (file_version_id, cluster_id, recipe_version, face_index, confidence, \
+              box_left, box_top, box_width, box_height) \
+             VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(job.file_version_id)
+        .bind(cluster_id)
+        .bind(i16::try_from(face_index).unwrap_or(i16::MAX))
+        .bind(face.confidence)
+        .bind(face.left)
+        .bind(face.top)
+        .bind(face.width)
+        .bind(face.height)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| retryable("face_index_unavailable"))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| retryable("face_index_unavailable"))?;
+    Ok(())
 }
 
 async fn prepare_source(
@@ -728,7 +859,12 @@ async fn record_failure(
     Ok(())
 }
 
-async fn thumbnail_to_png(input: &Path, output: &Path, side: u32) -> Result<(), ToolError> {
+async fn thumbnail_to_png(
+    input: &Path,
+    output: &Path,
+    side: u32,
+    mime: &str,
+) -> Result<(), ToolError> {
     let mut command = Command::new("my-drive-vips-thumbnailer");
     command
         .arg(input)
@@ -746,6 +882,62 @@ async fn thumbnail_to_png(input: &Path, output: &Path, side: u32) -> Result<(), 
         Ok(())
     } else if result.code() == Some(3) {
         Err(ToolError::ResourceLimit)
+    } else if supports_ffmpeg_image_mime(mime) {
+        thumbnail_to_png_with_ffmpeg(input, output, side).await
+    } else {
+        Err(ToolError::Failed)
+    }
+}
+
+async fn thumbnail_to_png_with_ffmpeg(
+    input: &Path,
+    output: &Path,
+    side: u32,
+) -> Result<(), ToolError> {
+    let input = input.to_str().ok_or(ToolError::InvalidOutput)?;
+    let output = output.to_str().ok_or(ToolError::InvalidOutput)?;
+    let scale = format!("scale={side}:{side}:force_original_aspect_ratio=decrease");
+    let mut command = Command::new("ffmpeg");
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+            "-max_alloc",
+            "134217728",
+            "-probesize",
+            "1M",
+            "-analyzeduration",
+            "2M",
+            "-i",
+            input,
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            &scale,
+            "-f",
+            "image2",
+            "-y",
+            output,
+        ])
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let result = timeout(TOOL_TIMEOUT, command.status())
+        .await
+        .map_err(|_| ToolError::TimedOut)?
+        .map_err(|_| ToolError::Failed)?;
+    if result.success() {
+        Ok(())
     } else {
         Err(ToolError::Failed)
     }
@@ -779,6 +971,59 @@ async fn extract_video_frame(input: &Path, output: &Path) -> Result<(), ToolErro
             "scale=384:384:force_original_aspect_ratio=decrease",
             "-threads:v",
             "1",
+            "-f",
+            "image2",
+            "-y",
+            output,
+        ])
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let result = timeout(TOOL_TIMEOUT, command.status())
+        .await
+        .map_err(|_| ToolError::TimedOut)?
+        .map_err(|_| ToolError::Failed)?;
+    if result.success() {
+        Ok(())
+    } else {
+        Err(ToolError::Failed)
+    }
+}
+
+async fn extract_gray_frame(input: &Path, output: &Path) -> Result<(), ToolError> {
+    let input = input.to_str().ok_or(ToolError::InvalidOutput)?;
+    let output = output.to_str().ok_or(ToolError::InvalidOutput)?;
+    let mut command = Command::new("ffmpeg");
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+            "-max_alloc",
+            "134217728",
+            "-probesize",
+            "1M",
+            "-analyzeduration",
+            "2M",
+            "-ss",
+            "0",
+            "-i",
+            input,
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=1280:1280:force_original_aspect_ratio=decrease,format=gray",
+            "-pix_fmt",
+            "gray",
             "-f",
             "image2",
             "-y",
@@ -846,11 +1091,36 @@ fn map_decode_tool_error(error: ToolError) -> JobFailure {
     }
 }
 
+fn map_face_tool_error(error: ToolError) -> JobFailure {
+    match error {
+        ToolError::TimedOut | ToolError::ResourceLimit => unsupported("resource_limit"),
+        ToolError::Failed | ToolError::InvalidOutput => permanent("decode_failed"),
+    }
+}
+
+fn map_face_detection_error(error: FaceDetectionError) -> JobFailure {
+    match error {
+        FaceDetectionError::ModelUnavailable(_) | FaceDetectionError::ModelInvalid(_) => {
+            unsupported("detector_unavailable")
+        }
+        FaceDetectionError::InvalidFrame => permanent("decode_failed"),
+    }
+}
+
 fn matches_magic(mime: &str, prefix: &[u8]) -> bool {
     match mime {
         "image/jpeg" => prefix.starts_with(&[0xff, 0xd8, 0xff]),
         "image/png" => prefix.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/gif" => prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a"),
         "image/webp" => prefix.len() >= 12 && &prefix[..4] == b"RIFF" && &prefix[8..12] == b"WEBP",
+        "image/avif" => {
+            prefix.get(4..8) == Some(b"ftyp")
+                && prefix
+                    .windows(4)
+                    .any(|value| value == b"avif" || value == b"avis")
+        }
+        "image/bmp" => prefix.starts_with(b"BM"),
+        "image/x-icon" => prefix.starts_with(&[0x00, 0x00, 0x01, 0x00]),
         "video/mp4" => prefix.get(4..8) == Some(b"ftyp") && prefix.len() >= 12,
         "video/webm" => {
             prefix.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
@@ -861,7 +1131,23 @@ fn matches_magic(mime: &str, prefix: &[u8]) -> bool {
 }
 
 fn supports_image_mime(mime: &str) -> bool {
-    matches!(mime, "image/jpeg" | "image/png" | "image/webp")
+    matches!(
+        mime,
+        "image/jpeg"
+            | "image/png"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "image/x-icon"
+    )
+}
+
+fn supports_ffmpeg_image_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/gif" | "image/avif" | "image/bmp" | "image/x-icon"
+    )
 }
 
 fn supports_video_mime(mime: &str) -> bool {
@@ -872,7 +1158,11 @@ fn media_extension(mime: &str) -> Option<&'static str> {
     match mime {
         "image/jpeg" => Some("jpg"),
         "image/png" => Some("png"),
+        "image/gif" => Some("gif"),
         "image/webp" => Some("webp"),
+        "image/avif" => Some("avif"),
+        "image/bmp" => Some("bmp"),
+        "image/x-icon" => Some("ico"),
         "video/mp4" => Some("mp4"),
         "video/webm" => Some("webm"),
         _ => None,
@@ -1005,7 +1295,8 @@ fn retryable(code: &'static str) -> JobFailure {
 mod tests {
     use super::{
         backfill_batch, claim_one, matches_magic, record_failure, retryable, run_once,
-        supports_image_mime, supports_video_mime, validate_metadata_free_webp,
+        supports_ffmpeg_image_mime, supports_image_mime, supports_video_mime,
+        validate_metadata_free_webp,
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
     use std::net::SocketAddr;
@@ -1018,13 +1309,25 @@ mod tests {
     };
 
     #[test]
-    fn worker_preview_registry_only_accepts_static_jpeg_png_and_webp() {
-        for mime in ["image/jpeg", "image/png", "image/webp"] {
+    fn worker_preview_registry_accepts_verified_raster_formats() {
+        for mime in [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/bmp",
+            "image/x-icon",
+        ] {
             assert!(supports_image_mime(mime), "{mime}");
         }
-        for mime in ["image/gif", "image/avif", "image/bmp", "image/x-icon"] {
+        for mime in ["image/svg+xml", "image/tiff", "image/heic"] {
             assert!(!supports_image_mime(mime), "{mime}");
         }
+        for mime in ["image/gif", "image/avif", "image/bmp", "image/x-icon"] {
+            assert!(supports_ffmpeg_image_mime(mime), "{mime}");
+        }
+        assert!(!supports_ffmpeg_image_mime("image/jpeg"));
     }
 
     #[test]
@@ -1039,14 +1342,20 @@ mod tests {
     fn decoder_registry_checks_sniffed_mime_against_content_signature() {
         assert!(matches_magic("image/jpeg", &[0xff, 0xd8, 0xff, 0]));
         assert!(matches_magic("image/png", b"\x89PNG\r\n\x1a\nrest"));
+        assert!(matches_magic("image/gif", b"GIF89arest"));
         assert!(matches_magic("image/webp", b"RIFF\x00\x00\x00\x00WEBP"));
+        assert!(matches_magic("image/avif", b"\x00\x00\x00\x18ftypavif"));
+        assert!(matches_magic("image/bmp", b"BMrest"));
+        assert!(matches_magic("image/x-icon", b"\x00\x00\x01\x00rest"));
         assert!(matches_magic("video/mp4", b"\x00\x00\x00\x18ftypisom"));
         assert!(matches_magic(
             "video/webm",
             b"\x1a\x45\xdf\xa3\xa3\x42\x82\x84webm"
         ));
         assert!(!matches_magic("image/jpeg", b"\x89PNG\r\n\x1a\n"));
-        assert!(!matches_magic("image/gif", b"GIF89a"));
+        assert!(!matches_magic("image/gif", b"GIF89"));
+        assert!(!matches_magic("image/avif", b"\x00\x00\x00\x18ftypisom"));
+        assert!(!matches_magic("image/x-icon", b"\x00\x00\x02\x00rest"));
         assert!(!matches_magic("video/webm", b"\x1a\x45\xdf\xa3matroska"));
     }
 

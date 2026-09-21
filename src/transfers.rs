@@ -794,7 +794,9 @@ async fn finalize_upload(
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
-    if let Some((task, recipe_version)) = media_index_task(detected_media_type) {
+    if media_index_task(detected_media_type).is_some()
+        || is_face_indexable_media(detected_media_type)
+    {
         let version_id: Option<Uuid> =
             sqlx::query_scalar("SELECT current_version_id FROM files WHERE id = $1 FOR UPDATE")
                 .bind(file_id)
@@ -802,17 +804,30 @@ async fn finalize_upload(
                 .await
                 .map_err(map_database_error)?;
         let version_id = version_id.ok_or(TransferError::Inconsistent)?;
-        sqlx::query(
-            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-             VALUES ($1, $2, $3) \
-             ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
-        )
-        .bind(version_id)
-        .bind(task)
-        .bind(recipe_version)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_database_error)?;
+        if let Some((task, recipe_version)) = media_index_task(detected_media_type) {
+            sqlx::query(
+                "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+                 VALUES ($1, $2, $3) \
+                 ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+            )
+            .bind(version_id)
+            .bind(task)
+            .bind(recipe_version)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        }
+        if is_face_indexable_media(detected_media_type) {
+            sqlx::query(
+                "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+                 VALUES ($1, 'face_index', 1) \
+                 ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+            )
+            .bind(version_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        }
     }
     sqlx::query(
         "INSERT INTO audit_events (event_type, actor_id, resource_id) \
@@ -1284,7 +1299,7 @@ fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
 }
 
 fn supports_viewer_derivative(mime_type: Option<&str>) -> bool {
-    matches!(mime_type, Some("image/jpeg" | "image/png" | "image/webp"))
+    is_indexable_image_mime(mime_type)
 }
 
 fn thumbnail_variant_for_mime(mime_type: Option<&str>) -> Option<(&'static str, u64)> {
@@ -1481,6 +1496,10 @@ fn media_index_task(mime_type: Option<&str>) -> Option<(&'static str, i16)> {
     }
 }
 
+fn is_face_indexable_media(mime_type: Option<&str>) -> bool {
+    is_indexable_image_mime(mime_type) || is_indexable_video_mime(mime_type)
+}
+
 async fn hash_file(path: &std::path::Path) -> Result<(u64, String), io::Error> {
     let mut file = tokio_fs::File::open(path).await?;
     let mut buffer = vec![0_u8; 128 * 1024];
@@ -1552,9 +1571,9 @@ mod media_type_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::{
-        if_none_match_matches, if_range_matches, is_indexable_image_mime, is_indexable_video_mime,
-        media_index_task, safe_preview_mime, sniff_media_type, supports_viewer_derivative,
-        thumbnail_variant_for_mime,
+        if_none_match_matches, if_range_matches, is_face_indexable_media, is_indexable_image_mime,
+        is_indexable_video_mime, media_index_task, safe_preview_mime, sniff_media_type,
+        supports_viewer_derivative, thumbnail_variant_for_mime,
     };
 
     #[test]
@@ -1648,20 +1667,39 @@ mod media_type_tests {
 
     #[test]
     fn limits_viewer_derivatives_to_indexer_supported_formats() {
-        for mime_type in ["image/jpeg", "image/png", "image/webp"] {
+        for mime_type in [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/bmp",
+            "image/x-icon",
+        ] {
             assert!(supports_viewer_derivative(Some(mime_type)), "{mime_type}");
         }
-        for mime_type in [Some("image/gif"), Some("image/avif"), None] {
+        for mime_type in [Some("image/svg+xml"), Some("video/mp4"), None] {
             assert!(!supports_viewer_derivative(mime_type));
         }
     }
 
     #[test]
     fn selects_card_and_video_poster_variants_by_safe_media_mime() {
-        assert_eq!(
-            thumbnail_variant_for_mime(Some("image/jpeg")),
-            Some(("card", super::MAX_CARD_DERIVATIVE_BYTES))
-        );
+        for mime_type in [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/bmp",
+            "image/x-icon",
+        ] {
+            assert_eq!(
+                thumbnail_variant_for_mime(Some(mime_type)),
+                Some(("card", super::MAX_CARD_DERIVATIVE_BYTES)),
+                "{mime_type}"
+            );
+        }
         assert_eq!(
             thumbnail_variant_for_mime(Some("video/mp4")),
             Some(("video_poster", super::MAX_CARD_DERIVATIVE_BYTES))
@@ -1690,6 +1728,9 @@ mod media_type_tests {
         );
         assert!(is_indexable_video_mime(Some("video/mp4")));
         assert!(!is_indexable_video_mime(Some("video/quicktime")));
+        assert!(is_face_indexable_media(Some("image/avif")));
+        assert!(is_face_indexable_media(Some("video/webm")));
+        assert!(!is_face_indexable_media(Some("application/pdf")));
         assert_eq!(media_index_task(Some("application/pdf")), None);
     }
 }

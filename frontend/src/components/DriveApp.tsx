@@ -74,20 +74,20 @@ function fileMatches(file: File, saved: SavedUpload, parentId: string | null): b
 function extensionIcon(entry: Pick<Entry, 'kind' | 'name'>) {
   if (entry.kind === 'folder') return <Folder size={20} strokeWidth={1.8} className="file-icon folder-icon" />;
   const name = entry.name.toLowerCase();
-  if (/\.(png|jpe?g|gif|webp|svg)$/.test(name)) return <FileImage size={20} strokeWidth={1.8} className="file-icon image-icon" />;
+  if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/.test(name)) return <FileImage size={20} strokeWidth={1.8} className="file-icon image-icon" />;
   if (/\.(pdf|docx?|txt|md|rtf)$/.test(name)) return <FileText size={20} strokeWidth={1.8} className="file-icon document-icon" />;
   if (/\.(xlsx?|csv|numbers)$/.test(name)) return <FileSpreadsheet size={20} strokeWidth={1.8} className="file-icon sheet-icon" />;
   return <File size={20} strokeWidth={1.8} className="file-icon" />;
 }
 
 const INDEXED_THUMBNAIL_MIMES = new Set([
-  'image/jpeg', 'image/png', 'image/webp',
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon',
   'video/mp4', 'video/webm'
 ]);
 
 function hasIndexedCardPreview(entry: Entry): boolean {
   if (entry.mime_detected) return INDEXED_THUMBNAIL_MIMES.has(entry.mime_detected);
-  return /\.(jpe?g|png|webp|mp4|m4v|webm)$/i.test(entry.name);
+  return /\.(jpe?g|png|gif|webp|avif|bmp|ico|mp4|m4v|webm)$/i.test(entry.name);
 }
 
 function EntryVisual({ entry, showThumbnail }: { entry: Entry; showThumbnail: boolean }) {
@@ -145,6 +145,8 @@ function mediaStageLabel(stage: string | null): string {
     thumbnailing_card: 'Building image card preview',
     extracting_video_poster: 'Extracting video poster frame',
     encoding_video_poster: 'Encoding video poster',
+    extracting_face_frame: 'Extracting face index frame',
+    detecting_faces: 'Detecting faces',
     publishing_viewer: 'Saving image viewer preview',
     publishing_card: 'Saving image card preview',
     publishing_video_poster: 'Saving video poster'
@@ -159,6 +161,7 @@ function mediaFailureLabel(code: string | null): string {
     input_missing: 'The original file is unavailable.',
     resource_limit: 'The media exceeds preview processing limits.',
     preview_storage_unavailable: 'Preview storage is unavailable.',
+    detector_unavailable: 'Face detector is unavailable on the indexer.',
     processing_failed: 'Preview processing failed.'
   };
   return code ? labels[code] || labels.processing_failed : labels.processing_failed;

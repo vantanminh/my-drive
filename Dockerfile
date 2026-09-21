@@ -22,6 +22,18 @@ RUN cc -O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
     /tmp/media-thumbnail.c $(pkg-config --cflags --libs vips) \
     -o /usr/local/bin/my-drive-vips-thumbnailer
 
+FROM debian:bookworm-slim AS face-model
+ARG FACE_MODEL_URL=https://raw.githubusercontent.com/atomashpolskiy/rustface/fa3d5b5d576c91d1c8a099af381e0f0906a0d3a3/model/seeta_fd_frontal_v1.0.bin
+ARG FACE_MODEL_SHA256=c4619d066ed35e84d9a8e842860b0dff567aba0cbb139881075538761db3ff5d
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/local/share/my-drive \
+    && curl --fail --silent --show-error --location --retry 3 "$FACE_MODEL_URL" \
+        --output /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin \
+    && echo "$FACE_MODEL_SHA256  /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin" \
+        | sha256sum --check --status
+
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -41,6 +53,7 @@ RUN apt-get update \
     && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin mydrive
 COPY --from=builder /app/target/release/my-drive-media-indexer /usr/local/bin/my-drive-media-indexer
 COPY --from=media-thumbnailer-builder /usr/local/bin/my-drive-vips-thumbnailer /usr/local/bin/my-drive-vips-thumbnailer
+COPY --from=face-model /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin
 WORKDIR /app
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/my-drive-media-indexer"]

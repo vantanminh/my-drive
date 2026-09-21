@@ -41,13 +41,23 @@ GRANT UPDATE (state, attempts, available_at, lease_expires_at, current_stage,
     ON media_index_jobs TO media_indexer;
 GRANT USAGE, SELECT ON SEQUENCE media_index_jobs_id_seq TO media_indexer;
 
-GRANT SELECT (id, storage_object_id, size_bytes, created_at)
+GRANT SELECT (id, file_id, storage_object_id, size_bytes, created_at)
     ON file_versions TO media_indexer;
 GRANT SELECT (id, current_version_id) ON files TO media_indexer;
-GRANT SELECT (id, deleted_at) ON drive_entries TO media_indexer;
+GRANT SELECT (id, owner_id, deleted_at) ON drive_entries TO media_indexer;
 GRANT SELECT (id, size_bytes, storage_key, mime_detected, checksum_sha256, state)
     ON storage_objects TO media_indexer;
 GRANT SELECT (singleton, paused) ON media_index_control TO media_indexer;
+
+GRANT SELECT (id, owner_id) ON face_clusters TO media_indexer;
+GRANT INSERT (id, owner_id) ON face_clusters TO media_indexer;
+GRANT SELECT (file_version_id, cluster_id, recipe_version, face_index,
+              confidence, box_left, box_top, box_width, box_height)
+    ON face_observations TO media_indexer;
+GRANT INSERT (file_version_id, cluster_id, recipe_version, face_index,
+              confidence, box_left, box_top, box_width, box_height)
+    ON face_observations TO media_indexer;
+GRANT USAGE, SELECT ON SEQUENCE face_observations_id_seq TO media_indexer;
 
 GRANT INSERT, UPDATE ON media_derivatives TO media_indexer_writer;
 GRANT SELECT ON media_derivatives TO media_indexer_writer;
