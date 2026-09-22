@@ -52,8 +52,10 @@ GRANT SELECT (singleton, paused) ON media_index_control TO media_indexer;
 GRANT SELECT (id, owner_id, label, updated_at) ON face_clusters TO media_indexer;
 GRANT INSERT (id, owner_id) ON face_clusters TO media_indexer;
 GRANT DELETE ON face_clusters TO media_indexer;
-GRANT SELECT (file_version_id, cluster_id, recipe_version, face_index,
-              confidence, box_left, box_top, box_width, box_height, descriptor)
+GRANT UPDATE (updated_at) ON face_clusters TO media_indexer;
+GRANT SELECT (id, file_version_id, cluster_id, recipe_version, face_index,
+              confidence, box_left, box_top, box_width, box_height, descriptor,
+              created_at)
     ON face_observations TO media_indexer;
 GRANT INSERT (file_version_id, cluster_id, recipe_version, face_index,
               confidence, box_left, box_top, box_width, box_height, descriptor)
