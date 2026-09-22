@@ -239,15 +239,15 @@ the stack. This keeps the Windows Docker Desktop path independent of physical
 HDD and SSD bind mounts:
 
 ```dotenv
-MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:sha-211b70d
-MY_DRIVE_INDEXER_IMAGE=ghcr.io/vantanminh/my-drive-indexer:sha-211b70d
-MY_DRIVE_INDEXER_DB_SETUP_IMAGE=ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-211b70d
+MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:sha-0beee84
+MY_DRIVE_INDEXER_IMAGE=ghcr.io/vantanminh/my-drive-indexer:sha-0beee84
+MY_DRIVE_INDEXER_DB_SETUP_IMAGE=ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-0beee84
 ```
 
 ```powershell
-docker pull ghcr.io/vantanminh/my-drive:sha-211b70d
-docker pull ghcr.io/vantanminh/my-drive-indexer:sha-211b70d
-docker pull ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-211b70d
+docker pull ghcr.io/vantanminh/my-drive:sha-0beee84
+docker pull ghcr.io/vantanminh/my-drive-indexer:sha-0beee84
+docker pull ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-0beee84
 docker compose --env-file .env.local -f compose.local.yaml up -d
 docker compose --env-file .env.local -f compose.local.yaml ps
 ```
