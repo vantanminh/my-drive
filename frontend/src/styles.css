@@ -377,6 +377,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .media-index-metrics span, .media-index-byte-stats span { overflow: hidden; color: #84908e; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .media-index-metrics strong, .media-index-byte-stats strong { color: #2a3b3a; font-size: 15px; font-variant-numeric: tabular-nums; font-weight: 650; }
 .media-index-byte-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.media-index-task-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.media-index-task-metrics article { min-width: 0; padding: 10px 11px; background: #fbfcfb; border: 1px solid #e8efeb; border-radius: 8px; }
+.media-index-task-heading, .media-index-task-counts, .media-index-task-bytes { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 7px; }
+.media-index-task-heading strong { overflow: hidden; color: #38534a; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.media-index-task-heading span, .media-index-task-counts span, .media-index-task-bytes span { color: #84908e; font-size: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.media-index-task-heading span { color: #4c8a68; }
+.media-index-task-counts, .media-index-task-bytes { margin-top: 6px; }
+.media-index-task-bytes { padding-top: 6px; border-top: 1px solid #edf2ef; }
 .media-index-active { display: flex; min-width: 0; align-items: center; gap: 8px; margin-top: 9px; padding: 10px 11px; color: #4b645a; background: #f0f6f2; border-radius: 8px; font-size: 10px; }
 .media-index-active > svg { flex: 0 0 auto; color: #438466; }
 .media-index-active span { min-width: 0; overflow-wrap: anywhere; }
@@ -1062,6 +1070,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .media-index-metrics > div, .media-index-byte-stats > div { padding: 8px; }
   .media-index-metrics span, .media-index-byte-stats span { font-size: 8px; }
   .media-index-metrics strong, .media-index-byte-stats strong { font-size: 13px; }
+  .media-index-task-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .media-index-task-metrics article { padding: 8px; }
   .media-index-failures li { align-items: flex-start; }
   .breadcrumb-nav { margin-top: -8px; margin-bottom: 17px; font-size: 10px; }
   .list-toolbar, .drive-grid { grid-template-columns: minmax(0, 1fr) 34px; }

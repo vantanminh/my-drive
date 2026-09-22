@@ -337,6 +337,28 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
             <div><span>Bytes processed in active jobs</span><strong>{formatSize(status.processedBytes)}</strong></div>
           </div>
 
+          {status.taskMetrics?.length ? (
+            <div className="media-index-task-metrics" aria-label="Media preview indexing by task">
+              {status.taskMetrics.map((metric) => (
+                <article key={metric.task}>
+                  <div className="media-index-task-heading">
+                    <strong>{mediaTaskLabel(metric.task)}</strong>
+                    <span>{metric.counts.running > 0 ? `${metric.counts.running} running` : 'Idle'}</span>
+                  </div>
+                  <div className="media-index-task-counts">
+                    <span>{metric.counts.queued} queued</span>
+                    <span>{metric.counts.completed} done</span>
+                    <span>{metric.counts.failed} failed</span>
+                  </div>
+                  <div className="media-index-task-bytes">
+                    <span>{formatSize(metric.pendingBytes)} pending</span>
+                    <span>{formatSize(metric.processedBytes)} active</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : null}
+
           <div className="media-index-active" aria-live="polite">
             <Activity size={16} />
             {activeJob ? (

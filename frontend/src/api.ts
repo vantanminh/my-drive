@@ -39,17 +39,25 @@ export type MediaIndexJob = {
   updatedAt: string;
 };
 
+export type MediaIndexCounts = {
+  queued: number;
+  running: number;
+  completed: number;
+  unsupported: number;
+  retryWait: number;
+  failed: number;
+};
+
 export type MediaIndexStatus = {
   previewStorageAvailable: boolean;
   paused: boolean;
-  counts: {
-    queued: number;
-    running: number;
-    completed: number;
-    unsupported: number;
-    retryWait: number;
-    failed: number;
-  };
+  counts: MediaIndexCounts;
+  taskMetrics: Array<{
+    task: string;
+    counts: MediaIndexCounts;
+    pendingBytes: number;
+    processedBytes: number;
+  }>;
   pendingBytes: number;
   processedBytes: number;
   jobs: MediaIndexJob[];
