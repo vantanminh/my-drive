@@ -299,13 +299,25 @@ fn f64_value(
 mod tests {
     use super::*;
 
+    fn test_path(name: &str) -> PathBuf {
+        std::env::current_dir()
+            .expect("the test working directory must be available")
+            .join("target")
+            .join("config-tests")
+            .join(name)
+    }
+
+    fn path_value(path: PathBuf) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
     fn base_vars() -> HashMap<String, String> {
         HashMap::from([
             (
                 "DATABASE_URL".to_owned(),
                 "postgres://localhost/mydrive".to_owned(),
             ),
-            ("STORAGE_ROOT".to_owned(), "C:/my-drive-data".to_owned()),
+            ("STORAGE_ROOT".to_owned(), path_value(test_path("storage"))),
         ])
     }
 
@@ -358,7 +370,7 @@ mod tests {
         let mut vars = base_vars();
         vars.insert(
             "MEDIA_PREVIEW_ROOT".to_owned(),
-            "D:/my-drive-previews".to_owned(),
+            path_value(test_path("previews")),
         );
         assert!(matches!(
             Config::from_vars(&vars),
@@ -376,7 +388,7 @@ mod tests {
         let mut vars = base_vars();
         vars.insert(
             "MEDIA_PREVIEW_ROOT".to_owned(),
-            "D:/my-drive-previews".to_owned(),
+            path_value(test_path("previews")),
         );
         vars.insert("MEDIA_PREVIEW_EXPECTED_DEVICE".to_owned(), "8:2".to_owned());
 
@@ -393,7 +405,7 @@ mod tests {
         vars.insert("STORAGE_EXPECTED_DEVICE".to_owned(), "8:1".to_owned());
         vars.insert(
             "MEDIA_PREVIEW_ROOT".to_owned(),
-            "D:/my-drive-previews".to_owned(),
+            path_value(test_path("previews")),
         );
         vars.insert(
             "MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH".to_owned(),
@@ -417,7 +429,7 @@ mod tests {
         );
         vars.insert(
             "MEDIA_PREVIEW_ROOT".to_owned(),
-            "C:/my-drive-data/previews".to_owned(),
+            path_value(test_path("storage").join("previews")),
         );
 
         assert!(matches!(
@@ -433,7 +445,7 @@ mod tests {
         vars.insert("STORAGE_EXPECTED_DEVICE".to_owned(), "8:1".to_owned());
         vars.insert(
             "MEDIA_PREVIEW_ROOT".to_owned(),
-            "D:/my-drive-previews".to_owned(),
+            path_value(test_path("previews")),
         );
         vars.insert("MEDIA_PREVIEW_EXPECTED_DEVICE".to_owned(), "8:1".to_owned());
 
