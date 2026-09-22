@@ -246,3 +246,21 @@ jobs:
         run: |
           docker compose --env-file .env.local -f compose.local.yaml ps
           docker compose --env-file .env.local -f compose.local.yaml down -v
+
+  backup-restore-smoke:
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install age
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes age
+
+      - name: Run encrypted backup and restore smoke
+        run: bash scripts/ci-backup-restore-smoke.sh
