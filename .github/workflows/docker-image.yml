@@ -139,8 +139,8 @@ jobs:
           sudo mkdir -p "$hdd_mount/data" "$ssd_mount/previews"
           sudo chown -R "$(id -u):$(id -g)" "$hdd_mount" "$ssd_mount"
 
-          hdd_device="$(findmnt --noheadings --output MAJ:MIN --target "$hdd_mount")"
-          ssd_device="$(findmnt --noheadings --output MAJ:MIN --target "$ssd_mount")"
+          hdd_device="$(findmnt --noheadings --output MAJ:MIN --target "$hdd_mount" | xargs)"
+          ssd_device="$(findmnt --noheadings --output MAJ:MIN --target "$ssd_mount" | xargs)"
           test -n "$hdd_device"
           test -n "$ssd_device"
           test "$hdd_device" != "$ssd_device"
