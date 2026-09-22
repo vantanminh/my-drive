@@ -127,6 +127,7 @@ VALUES ('$object_id', '$object_key', $payload_size, '$payload_checksum', 'ready'
 INSERT INTO restore_marker (value) VALUES ('original');
 SQL
 
+set +e
 backup_output="$(sudo -E env \
     APP_ENV_FILE="$APP_ENV_FILE" \
     COMPOSE_FILE_PATH="$COMPOSE_FILE_PATH" \
@@ -134,7 +135,10 @@ backup_output="$(sudo -E env \
     BACKUP_ROOT="$BACKUP_ROOT" \
     AGE_RECIPIENT="$AGE_RECIPIENT" \
     bash "$PROJECT_ROOT/scripts/backup.sh" 2>&1)"
+backup_status=$?
+set -e
 printf '%s\n' "$backup_output"
+(( backup_status == 0 )) || exit "$backup_status"
 backup_dir="$(printf '%s\n' "$backup_output" | sed -n 's/^encrypted backup created: //p')"
 [[ -n "$backup_dir" && -d "$backup_dir" ]] || {
     printf 'backup output did not contain a valid destination\n' >&2
@@ -171,6 +175,7 @@ fi
 printf 'backup-smoke-mutated-payload' >"$STORAGE_ROOT/objects/$object_key"
 rm -f -- "$preview_key"
 
+set +e
 restore_output="$(sudo -E env \
     APP_ENV_FILE="$APP_ENV_FILE" \
     COMPOSE_FILE_PATH="$COMPOSE_FILE_PATH" \
@@ -178,7 +183,10 @@ restore_output="$(sudo -E env \
     AGE_IDENTITY="$AGE_IDENTITY" \
     CONFIRM_RESTORE_DB="$PROJECT_NAME/mydrive" \
     bash "$PROJECT_ROOT/scripts/restore.sh" "$backup_dir" 2>&1)"
+restore_status=$?
+set -e
 printf '%s\n' "$restore_output"
+(( restore_status == 0 )) || exit "$restore_status"
 
 restored_marker="$("${compose[@]}" exec -T db psql -X -A -t -U mydrive -d mydrive -c 'SELECT value FROM restore_marker;')"
 [[ "$restored_marker" == original ]] || {
