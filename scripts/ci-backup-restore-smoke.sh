@@ -103,7 +103,7 @@ for attempt in $(seq 1 60); do
     sleep 2
 done
 
-object_id="00000000-0000-0000-0000-000000000001"
+object_id="aabb0000-0000-0000-0000-000000000001"
 object_key="aa/bb/$object_id"
 payload='backup-smoke-original-payload'
 printf '%s' "$payload" >"$STORAGE_ROOT/objects/$object_key"
