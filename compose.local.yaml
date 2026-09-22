@@ -28,7 +28,7 @@ services:
 
   app:
     image: ${MY_DRIVE_IMAGE:-my-drive:local}
-    pull_policy: never
+    pull_policy: missing
     restart: unless-stopped
     depends_on:
       db:
@@ -66,7 +66,7 @@ services:
 
   media-indexer-db-setup:
     image: ${MY_DRIVE_INDEXER_DB_SETUP_IMAGE:-my-drive-indexer-db-setup:local}
-    pull_policy: never
+    pull_policy: missing
     restart: "no"
     depends_on:
       app:
@@ -80,7 +80,7 @@ services:
 
   media-indexer:
     image: ${MY_DRIVE_INDEXER_IMAGE:-my-drive-indexer:local}
-    pull_policy: never
+    pull_policy: missing
     restart: unless-stopped
     init: true
     depends_on:
