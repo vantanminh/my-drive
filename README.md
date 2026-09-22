@@ -259,6 +259,33 @@ pull a referenced GHCR tag while an already available local image is reused.
 The database setup image only grants the restricted indexer role; it does not
 contain application data.
 
+### Docker troubleshooting
+
+Check the Docker engine before debugging the application:
+
+```powershell
+docker version
+docker compose --env-file .env.local -f compose.local.yaml config --quiet
+```
+
+`docker version` must show both a Client and a Server section. If the Server
+section times out, Docker Desktop's Linux engine is not ready yet; restart
+Docker Desktop and retry before changing the project configuration. A Compose
+configuration error is separate from an engine error. For a running stack,
+inspect `docker compose ... ps` and `docker compose ... logs app media-indexer`.
+
+Repository visibility and GHCR package visibility are separate settings. If an
+anonymous `docker pull ghcr.io/...` returns `401 Unauthorized`, either set the
+three GHCR packages to Public in GitHub package settings or authenticate first:
+
+```powershell
+docker login ghcr.io
+```
+
+Use a GitHub token with `read:packages` for a private package. The published
+images are tagged with the short commit SHA, so retry the pull with the exact
+tag from the commit you intend to run.
+
 ## Single-server Compose deployment
 
 The deployment configuration below requires a Linux host because it checks the
