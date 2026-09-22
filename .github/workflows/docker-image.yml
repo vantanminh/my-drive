@@ -75,6 +75,37 @@ jobs:
           push: false
           cache-from: type=gha,scope=my-drive-indexer-db-setup
 
+  database-fixture:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: mydrive
+          POSTGRES_USER: mydrive
+          POSTGRES_PASSWORD: ci-fixture-password-0123456789
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mydrive -d mydrive"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run disposable PostgreSQL integration fixtures
+        env:
+          TEST_DATABASE_URL: postgres://mydrive:ci-fixture-password-0123456789@127.0.0.1:5432/mydrive
+        run: cargo test --all-targets --locked -- --ignored --test-threads=1
+
   publish:
     needs: validate
     if: github.event_name == 'push'
