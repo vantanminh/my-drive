@@ -460,6 +460,79 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CI-provisioned HDD and SSD mount fixtures"]
+    fn physical_media_mount_fixture_verifies_separate_devices() {
+        let Some(storage_root) = fixture_path("MY_DRIVE_MOUNT_STORAGE_ROOT") else {
+            return;
+        };
+        let Some(storage_mount) = fixture_path("MY_DRIVE_MOUNT_STORAGE_MOUNT") else {
+            return;
+        };
+        let Some(storage_device) = std::env::var_os("MY_DRIVE_MOUNT_STORAGE_DEVICE") else {
+            return;
+        };
+        let Some(preview_root) = fixture_path("MY_DRIVE_MOUNT_PREVIEW_ROOT") else {
+            return;
+        };
+        let Some(preview_mount) = fixture_path("MY_DRIVE_MOUNT_PREVIEW_MOUNT") else {
+            return;
+        };
+        let Some(preview_device) = std::env::var_os("MY_DRIVE_MOUNT_PREVIEW_DEVICE") else {
+            return;
+        };
+        let storage_device = storage_device.to_string_lossy().into_owned();
+        let preview_device = preview_device.to_string_lossy().into_owned();
+        assert_ne!(storage_device, preview_device);
+
+        let mut storage_config = config(storage_root, true);
+        storage_config.expected_mount = storage_mount;
+        storage_config.require_device_match = true;
+        storage_config.expected_device = Some(storage_device);
+        storage_config.media_preview = Some(crate::MediaPreviewConfig {
+            root: preview_root,
+            expected_mount: preview_mount,
+            require_mount: true,
+            require_device_match: true,
+            expected_device: Some(preview_device),
+        });
+
+        let storage = LocalStorage::initialize(&storage_config).unwrap();
+        assert!(storage.health().is_ok());
+        let previews = PreviewStorage::new(storage_config.media_preview.as_ref().unwrap());
+        assert!(previews.prepare().is_ok());
+        assert!(previews.health().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CI-provisioned HDD and an intentionally unmounted SSD fixture"]
+    fn physical_media_mount_fixture_fails_closed_when_preview_mount_is_missing() {
+        if std::env::var_os("MY_DRIVE_MOUNT_EXPECT_MISSING").is_none() {
+            return;
+        }
+        let Some(preview_root) = fixture_path("MY_DRIVE_MOUNT_PREVIEW_ROOT") else {
+            return;
+        };
+        let Some(preview_mount) = fixture_path("MY_DRIVE_MOUNT_PREVIEW_MOUNT") else {
+            return;
+        };
+        let previews = PreviewStorage::new(&crate::MediaPreviewConfig {
+            root: preview_root,
+            expected_mount: preview_mount,
+            require_mount: true,
+            require_device_match: true,
+            expected_device: Some("0:0".to_owned()),
+        });
+        assert!(previews.prepare().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture_path(name: &str) -> Option<PathBuf> {
+        std::env::var_os(name).map(PathBuf::from)
+    }
+
     #[test]
     fn initialization_rejects_a_storage_root_below_the_configured_free_space_floor() {
         let temp = tempfile::tempdir().unwrap();

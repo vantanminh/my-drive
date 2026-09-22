@@ -106,6 +106,58 @@ jobs:
           TEST_DATABASE_URL: postgres://mydrive:ci-fixture-password-0123456789@127.0.0.1:5432/mydrive
         run: cargo test --all-targets --locked -- --ignored --test-threads=1
 
+  physical-mount-fixture:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify separate HDD and SSD mount guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdd_mount=/mnt/my-drive-hdd
+          ssd_mount=/mnt/my-drive-ssd
+          hdd_image="$RUNNER_TEMP/my-drive-hdd.img"
+          cleanup() {
+            sudo umount "$ssd_mount" 2>/dev/null || true
+            sudo umount "$hdd_mount" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          sudo mkdir -p "$hdd_mount" "$ssd_mount"
+          truncate -s 256M "$hdd_image"
+          sudo mkfs.ext4 -F "$hdd_image"
+          sudo mount --options loop "$hdd_image" "$hdd_mount"
+          sudo mount --type tmpfs --options size=256M my-drive-preview "$ssd_mount"
+          sudo mkdir -p "$hdd_mount/data" "$ssd_mount/previews"
+          sudo chown -R "$(id -u):$(id -g)" "$hdd_mount" "$ssd_mount"
+
+          hdd_device="$(findmnt --noheadings --output MAJ:MIN --target "$hdd_mount")"
+          ssd_device="$(findmnt --noheadings --output MAJ:MIN --target "$ssd_mount")"
+          test -n "$hdd_device"
+          test -n "$ssd_device"
+          test "$hdd_device" != "$ssd_device"
+
+          export MY_DRIVE_MOUNT_STORAGE_ROOT="$hdd_mount/data"
+          export MY_DRIVE_MOUNT_STORAGE_MOUNT="$hdd_mount"
+          export MY_DRIVE_MOUNT_STORAGE_DEVICE="$hdd_device"
+          export MY_DRIVE_MOUNT_PREVIEW_ROOT="$ssd_mount/previews"
+          export MY_DRIVE_MOUNT_PREVIEW_MOUNT="$ssd_mount"
+          export MY_DRIVE_MOUNT_PREVIEW_DEVICE="$ssd_device"
+
+          cargo test --lib --locked storage::tests::physical_media_mount_fixture_verifies_separate_devices -- --ignored --exact --nocapture
+
+          sudo umount "$ssd_mount"
+          export MY_DRIVE_MOUNT_EXPECT_MISSING=1
+          cargo test --lib --locked storage::tests::physical_media_mount_fixture_fails_closed_when_preview_mount_is_missing -- --ignored --exact --nocapture
+
   publish:
     needs: validate
     if: github.event_name == 'push'
