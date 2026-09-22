@@ -193,11 +193,11 @@ restored_marker="$("${compose[@]}" exec -T db psql -X -A -t -U mydrive -d mydriv
     printf 'database marker was not restored: %s\n' "$restored_marker" >&2
     exit 1
 }
-[[ "$(cat -- "$STORAGE_ROOT/objects/$object_key")" == "$payload" ]] || {
+[[ "$(sudo cat -- "$STORAGE_ROOT/objects/$object_key")" == "$payload" ]] || {
     printf 'storage payload was not restored\n' >&2
     exit 1
 }
-[[ "$(cat -- "$preview_key")" == backup-smoke-original-preview ]] || {
+[[ "$(sudo cat -- "$preview_key")" == backup-smoke-original-preview ]] || {
     printf 'preview payload was not restored\n' >&2
     exit 1
 }
