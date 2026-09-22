@@ -97,12 +97,14 @@ async fn request_id_and_trace(request: Request<Body>, next: Next) -> Response {
 
 fn apply_security_headers(response: &mut Response) {
     let headers = response.headers_mut();
-    headers.insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self' data:",
-        ),
-    );
+    if !headers.contains_key("content-security-policy") {
+        headers.insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self' data:",
+            ),
+        );
+    }
     headers.insert(
         HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), geolocation=(), microphone=(), payment=()"),

@@ -5,7 +5,7 @@ use std::{fs, io, path::PathBuf};
 
 use fs2::available_space;
 use thiserror::Error;
-use tokio::fs as tokio_fs;
+use tokio::{fs as tokio_fs, time::sleep};
 use uuid::Uuid;
 
 use crate::Config;
@@ -202,31 +202,32 @@ impl LocalStorage {
         let source = self.staging_path(staging_key);
         let destination = self.object_path(storage_key)?;
         let parent = self.ensure_object_parent(storage_key, true).await?;
-        let source_exists = tokio_fs::try_exists(&source).await?;
-        let destination_exists = tokio_fs::try_exists(&destination).await?;
-        match (source_exists, destination_exists) {
-            (true, true) => return Err(StorageError::ObjectCollision),
-            (true, false) => {
-                match tokio_fs::rename(&source, &destination).await {
-                    Ok(()) => {}
-                    Err(error)
-                        if error.kind() == io::ErrorKind::NotFound
-                            && tokio_fs::try_exists(&destination).await?
-                            && !tokio_fs::try_exists(&source).await? =>
-                    {
-                        // Another finalizer completed the same atomic rename.
+        for _ in 0..25 {
+            let source_exists = tokio_fs::try_exists(&source).await?;
+            let destination_exists = tokio_fs::try_exists(&destination).await?;
+            match (source_exists, destination_exists) {
+                (true, true) => return Err(StorageError::ObjectCollision),
+                (true, false) => {
+                    match tokio_fs::rename(&source, &destination).await {
+                        Ok(()) => {}
+                        Err(error)
+                            if error.kind() == io::ErrorKind::NotFound
+                                && tokio_fs::try_exists(&destination).await?
+                                && !tokio_fs::try_exists(&source).await? =>
+                        {
+                            // Another finalizer completed the same atomic rename.
+                        }
+                        Err(error) => return Err(StorageError::Io(error)),
                     }
-                    Err(error) => return Err(StorageError::Io(error)),
+                    sync_directory_chain(&parent, &self.root.join("objects"))?;
+                    sync_directory(&self.root.join("uploads"))?;
+                    return Ok(destination);
                 }
-                sync_directory_chain(&parent, &self.root.join("objects"))?;
-                sync_directory(&self.root.join("uploads"))?;
-            }
-            (false, true) => {}
-            (false, false) => {
-                return Err(StorageError::Io(io::Error::from(io::ErrorKind::NotFound)));
+                (false, true) => return Ok(destination),
+                (false, false) => sleep(std::time::Duration::from_millis(10)).await,
             }
         }
-        Ok(destination)
+        Err(StorageError::Io(io::Error::from(io::ErrorKind::NotFound)))
     }
 
     pub async fn open_object(&self, storage_key: &str) -> Result<tokio_fs::File, StorageError> {
