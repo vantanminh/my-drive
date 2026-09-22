@@ -133,7 +133,7 @@ backup_output="$(sudo -E env \
     COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
     BACKUP_ROOT="$BACKUP_ROOT" \
     AGE_RECIPIENT="$AGE_RECIPIENT" \
-    "$PROJECT_ROOT/scripts/backup.sh" 2>&1)"
+    bash "$PROJECT_ROOT/scripts/backup.sh" 2>&1)"
 printf '%s\n' "$backup_output"
 backup_dir="$(printf '%s\n' "$backup_output" | sed -n 's/^encrypted backup created: //p')"
 [[ -n "$backup_dir" && -d "$backup_dir" ]] || {
@@ -150,7 +150,7 @@ if sudo -E env \
     COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
     AGE_IDENTITY="$AGE_IDENTITY" \
     CONFIRM_RESTORE_DB="$PROJECT_NAME/mydrive" \
-    "$PROJECT_ROOT/scripts/restore.sh" "$bad_backup"; then
+    bash "$PROJECT_ROOT/scripts/restore.sh" "$bad_backup"; then
     printf 'corrupt backup was accepted\n' >&2
     exit 1
 fi
@@ -161,7 +161,7 @@ if sudo -E env \
     COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
     AGE_IDENTITY="$AGE_IDENTITY" \
     CONFIRM_RESTORE_DB="$PROJECT_NAME/wrong-database" \
-    "$PROJECT_ROOT/scripts/restore.sh" "$backup_dir"; then
+    bash "$PROJECT_ROOT/scripts/restore.sh" "$backup_dir"; then
     printf 'wrong restore target was accepted\n' >&2
     exit 1
 fi
@@ -177,7 +177,7 @@ restore_output="$(sudo -E env \
     COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
     AGE_IDENTITY="$AGE_IDENTITY" \
     CONFIRM_RESTORE_DB="$PROJECT_NAME/mydrive" \
-    "$PROJECT_ROOT/scripts/restore.sh" "$backup_dir" 2>&1)"
+    bash "$PROJECT_ROOT/scripts/restore.sh" "$backup_dir" 2>&1)"
 printf '%s\n' "$restore_output"
 
 restored_marker="$("${compose[@]}" exec -T db psql -X -A -t -U mydrive -d mydrive -c 'SELECT value FROM restore_marker;')"
