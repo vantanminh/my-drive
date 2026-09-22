@@ -64,11 +64,19 @@ export default function MediaViewer({ entry, onClose }: Props) {
   const [videoMuted, setVideoMuted] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = previousOverflow; };
+    const frame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
   }, []);
 
   useEffect(() => {
@@ -131,14 +139,38 @@ export default function MediaViewer({ entry, onClose }: Props) {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      const target = event.target;
-      if (target instanceof HTMLElement && target.closest('button, a, input, select, textarea, video')) return;
-
       if (event.key === 'Escape') {
         event.preventDefault();
         onClose();
         return;
       }
+
+      if (event.key === 'Tab') {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), video, [tabindex]:not([tabindex="-1"])'
+        ));
+        if (focusable.length === 0) {
+          event.preventDefault();
+          dialog.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement;
+        if (event.shiftKey && (active === first || !dialog.contains(active))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('button, a, input, select, textarea, video')) return;
 
       if (kind === 'video') {
         const video = videoRef.current;
@@ -227,10 +259,17 @@ export default function MediaViewer({ entry, onClose }: Props) {
       className="media-viewer-backdrop"
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
     >
-      <section className="media-viewer" role="dialog" aria-modal="true" aria-label={'Preview ' + entry.name}>
+      <section
+        className="media-viewer"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="media-viewer-title"
+        tabIndex={-1}
+      >
         <header className="media-viewer-header">
           <div className="media-viewer-file">
-            <strong title={entry.name}>{entry.name}</strong>
+            <strong id="media-viewer-title" title={entry.name}>{entry.name}</strong>
             <span>{kind === 'image' ? 'Image' : 'Video'} <i /> {formatSize(entry.size_bytes)}</span>
           </div>
           <div className="media-viewer-actions">
@@ -271,7 +310,7 @@ export default function MediaViewer({ entry, onClose }: Props) {
               </>
             )}
             <a className="media-tool media-download" href={downloadUrl(entry.id)} aria-label="Download original" title="Download original"><Download size={17} /></a>
-            <button className="media-tool media-close" onClick={onClose} aria-label="Close preview" title="Close preview"><X size={18} /></button>
+            <button ref={closeButtonRef} className="media-tool media-close" onClick={onClose} aria-label="Close preview" title="Close preview"><X size={18} /></button>
           </div>
         </header>
 
