@@ -685,8 +685,11 @@ async fn process_face_job(
     let mut candidates = sqlx::query_as::<_, FaceClusterCandidate>(
         "SELECT representative.cluster_id, representative.descriptor \
            FROM ( \
-               SELECT DISTINCT ON (observation.cluster_id) \
-                      observation.cluster_id, observation.descriptor \
+               SELECT observation.cluster_id, observation.descriptor, \
+                      row_number() OVER ( \
+                          PARTITION BY observation.cluster_id \
+                          ORDER BY observation.created_at DESC, observation.id DESC \
+                      ) AS representative_rank \
                  FROM face_observations AS observation \
                  JOIN face_clusters AS cluster ON cluster.id = observation.cluster_id \
                  JOIN file_versions AS version ON version.id = observation.file_version_id \
@@ -695,10 +698,10 @@ async fn process_face_job(
                   AND entry.deleted_at IS NULL \
                   AND observation.cluster_id IS NOT NULL \
                   AND observation.descriptor IS NOT NULL \
-                ORDER BY observation.cluster_id, observation.created_at DESC, observation.id DESC \
            ) AS representative \
            JOIN face_clusters AS cluster ON cluster.id = representative.cluster_id \
-          ORDER BY cluster.updated_at DESC, representative.cluster_id \
+          WHERE representative.representative_rank <= 3 \
+          ORDER BY cluster.updated_at DESC, representative.cluster_id, representative.representative_rank \
           LIMIT $2",
     )
     .bind(job.owner_id)
@@ -1825,6 +1828,29 @@ mod tests {
         );
         assert_eq!(matching_cluster(&descriptor, &candidates), Some(first_id));
         assert_eq!(matching_cluster(&[0_u8; 8], &candidates), None);
+    }
+
+    #[test]
+    fn face_matching_uses_the_closest_recent_representative() {
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let descriptor = vec![128_u8; crate::face_indexer::DESCRIPTOR_LEN];
+        let candidates = vec![
+            FaceClusterCandidate {
+                cluster_id: first_id,
+                descriptor: vec![220_u8; crate::face_indexer::DESCRIPTOR_LEN],
+            },
+            FaceClusterCandidate {
+                cluster_id: first_id,
+                descriptor: vec![132_u8; crate::face_indexer::DESCRIPTOR_LEN],
+            },
+            FaceClusterCandidate {
+                cluster_id: second_id,
+                descriptor: vec![160_u8; crate::face_indexer::DESCRIPTOR_LEN],
+            },
+        ];
+
+        assert_eq!(matching_cluster(&descriptor, &candidates), Some(first_id));
     }
 
     #[test]
