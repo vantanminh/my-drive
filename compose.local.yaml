@@ -65,7 +65,7 @@ services:
       start_period: 20s
 
   media-indexer-db-setup:
-    image: my-drive-indexer-db-setup:local
+    image: ${MY_DRIVE_INDEXER_DB_SETUP_IMAGE:-my-drive-indexer-db-setup:local}
     pull_policy: never
     restart: "no"
     depends_on:

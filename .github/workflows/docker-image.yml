@@ -12,13 +12,35 @@ permissions:
 
 jobs:
   validate:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Rust tests
+        run: cargo test --all-targets --locked
+
+      - name: Run Rust lints
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund && npm run build
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -43,7 +65,18 @@ jobs:
           push: false
           cache-from: type=gha,scope=my-drive-indexer
 
+      - name: Build indexer database setup image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: media-indexer-db-setup
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=my-drive-indexer-db-setup
+
   publish:
+    needs: validate
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -63,6 +96,7 @@ jobs:
           repository="ghcr.io/${GITHUB_REPOSITORY,,}"
           printf 'app=%s\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'indexer=%s-indexer\n' "$repository" >> "$GITHUB_OUTPUT"
+          printf 'db=%s-indexer-db-setup\n' "$repository" >> "$GITHUB_OUTPUT"
 
       - name: Extract application image metadata
         id: app-meta
@@ -80,6 +114,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.images.outputs.indexer }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+
+      - name: Extract indexer database setup image metadata
+        id: db-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.db }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -118,3 +163,71 @@ jobs:
           labels: ${{ steps.indexer-meta.outputs.labels }}
           cache-from: type=gha,scope=my-drive-indexer
           cache-to: type=gha,scope=my-drive-indexer,mode=max
+
+      - name: Build and publish indexer database setup image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: media-indexer-db-setup
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.db-meta.outputs.tags }}
+          labels: ${{ steps.db-meta.outputs.labels }}
+          cache-from: type=gha,scope=my-drive-indexer-db-setup
+          cache-to: type=gha,scope=my-drive-indexer-db-setup,mode=max
+
+  smoke:
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare published image environment
+        shell: bash
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          short_sha="${GITHUB_SHA:0:7}"
+          cat > .env.local <<EOF
+          POSTGRES_PASSWORD=ci-postgres-password-0123456789
+          MEDIA_INDEXER_PASSWORD=ci-indexer-password-0123456789
+          BOOTSTRAP_OWNER_EMAIL=ci-owner@example.invalid
+          BOOTSTRAP_OWNER_PASSWORD=ci-bootstrap-password-0123456789
+          MY_DRIVE_IMAGE=${repository}:sha-${short_sha}
+          MY_DRIVE_INDEXER_IMAGE=${repository}-indexer:sha-${short_sha}
+          MY_DRIVE_INDEXER_DB_SETUP_IMAGE=${repository}-indexer-db-setup:sha-${short_sha}
+          EOF
+
+      - name: Start published local stack
+        run: docker compose --env-file .env.local -f compose.local.yaml up -d
+
+      - name: Wait for app health
+        shell: bash
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose --env-file .env.local -f compose.local.yaml ps
+          docker compose --env-file .env.local -f compose.local.yaml logs --no-color
+          exit 1
+
+      - name: Verify stack health and clean up
+        if: always()
+        run: |
+          docker compose --env-file .env.local -f compose.local.yaml ps
+          docker compose --env-file .env.local -f compose.local.yaml down -v

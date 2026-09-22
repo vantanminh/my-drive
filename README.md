@@ -238,18 +238,22 @@ HDD and SSD bind mounts:
 ```dotenv
 MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:sha-211b70d
 MY_DRIVE_INDEXER_IMAGE=ghcr.io/vantanminh/my-drive-indexer:sha-211b70d
+MY_DRIVE_INDEXER_DB_SETUP_IMAGE=ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-211b70d
 ```
 
 ```powershell
 docker pull ghcr.io/vantanminh/my-drive:sha-211b70d
 docker pull ghcr.io/vantanminh/my-drive-indexer:sha-211b70d
+docker pull ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-211b70d
 docker compose --env-file .env.local -f compose.local.yaml up -d
 docker compose --env-file .env.local -f compose.local.yaml ps
 ```
 
 Use the exact SHA tags from the commit you want to run. `compose.local.yaml`
 uses `pull_policy: never`, so the explicit `docker pull` commands make the
-selected images available without silently changing the version.
+selected app, indexer, and database setup images available without silently
+changing the version. The database setup image only grants the restricted
+indexer role; it does not contain application data.
 
 ## Single-server Compose deployment
 
