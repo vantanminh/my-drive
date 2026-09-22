@@ -229,9 +229,9 @@ jobs:
       - name: Verify media indexer database grants
         run: |
           docker compose --env-file .env.local -f compose.local.yaml exec -T \
-            -e PGPASSWORD=ci-indexer-password-0123456789 db \
-            psql -h 127.0.0.1 -U media_indexer -d mydrive -v ON_ERROR_STOP=1 \
+            db psql -U mydrive -d mydrive -v ON_ERROR_STOP=1 \
             -c "BEGIN; \
+                SET LOCAL ROLE media_indexer; \
                 SELECT id, owner_id, label, updated_at FROM face_clusters WHERE FALSE; \
                 SELECT id, file_version_id, cluster_id, recipe_version, face_index, confidence, \
                        box_left, box_top, box_width, box_height, descriptor, created_at \
