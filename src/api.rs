@@ -91,5 +91,71 @@ async fn request_id_and_trace(request: Request<Body>, next: Next) -> Response {
             .headers_mut()
             .insert(HeaderName::from_static("x-request-id"), value);
     }
+    apply_security_headers(&mut response);
     response
+}
+
+fn apply_security_headers(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self' data:",
+        ),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), geolocation=(), microphone=(), payment=()"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::Body, http::StatusCode, response::Response};
+
+    use super::apply_security_headers;
+
+    #[test]
+    fn security_headers_protect_browser_responses_without_disabling_media() {
+        let mut response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .expect("response builder should accept an empty body");
+        apply_security_headers(&mut response);
+
+        let headers = response.headers();
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
+        assert_eq!(headers["cross-origin-resource-policy"], "same-origin");
+        assert_eq!(
+            headers["permissions-policy"],
+            "camera=(), geolocation=(), microphone=(), payment=()"
+        );
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("media-src 'self' blob:"));
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
 }
