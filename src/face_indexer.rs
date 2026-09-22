@@ -243,7 +243,7 @@ fn next_token<'a>(bytes: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pgm, sample_descriptor, GrayFrame, DESCRIPTOR_LEN, MAX_FRAME_SIDE};
+    use super::{DESCRIPTOR_LEN, GrayFrame, MAX_FRAME_SIDE, parse_pgm, sample_descriptor};
 
     #[test]
     fn parses_bounded_binary_pgm_with_comments() {
