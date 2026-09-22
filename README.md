@@ -321,9 +321,10 @@ environment file. Keep device matching enabled for both mounts.
 ## Encrypted backup and restore
 
 A single HDD is not a backup. Store encrypted backups on a mounted disk, NAS, or
-offsite destination that is separate from both the PostgreSQL filesystem and
-the HDD storage filesystem. The scripts require Linux or WSL, Docker Compose
-v2, `age`, GNU `tar`, Python 3, `sha256sum`, `realpath`, `stat`, and `flock`.
+offsite destination that is separate from the PostgreSQL, HDD storage, and SSD
+preview filesystems. The scripts require Linux or WSL, Docker Compose
+v2, `age`, GNU `tar`, Python 3, `sha256sum`, `realpath`, `stat`, `flock`,
+`find`, and `sort`.
 Install `age` with the package manager for the backup host. Create an age
 identity and keep its private file offline or in a protected secrets store:
 
@@ -334,11 +335,12 @@ age-keygen -o "$HOME/.config/my-drive/age-identity"
 ```
 
 Use `age-keygen -y` to derive the public recipient for backup. Backups encrypt
-the PostgreSQL dump, the `objects`, `uploads`, `trash`, and `previews` tree, the
-Compose file, and the protected environment file. The published bundle contains
-only age-encrypted payloads, a manifest, and SHA-256 checksums. The backup
-script stops the app and media indexer while capturing the database and storage
-tree, then restarts each service only if it was running before the backup.
+the PostgreSQL dump, the HDD `objects`, `uploads`, and `trash` tree, the
+separate SSD `previews` tree, the Compose file, and the protected environment
+file. The published bundle contains only age-encrypted payloads, a manifest,
+and SHA-256 checksums. The backup script stops the app and media indexer while
+capturing the database and both storage roots, then restarts each service only
+if it was running before the backup.
 
 Create the destination directory after the other filesystem is mounted. The
 script refuses to create a missing destination and checks that its filesystem
@@ -350,6 +352,7 @@ sudo mkdir -p /mnt/backup/my-drive
 findmnt --target /mnt/backup/my-drive
 findmnt --target /var/lib/my-drive/postgres
 findmnt --target /srv/my-drive/data
+findmnt --target /srv/my-drive/previews
 ```
 
 Run backup as root so backup and restore share protected, deployment-scoped
@@ -369,7 +372,7 @@ confirmation value. Preserve the printed path with your recovery notes.
 
 Verify a bundle while its PostgreSQL service is running. Verification checks
 the manifest and every bundle checksum, decrypts every age artifact, validates
-the storage archive, and asks `pg_restore` to inspect the dump. It does not
+both storage archives, and asks `pg_restore` to inspect the dump. It does not
 stop the app or change the database.
 
 ```sh
@@ -380,9 +383,9 @@ COMPOSE_FILE_PATH="$PWD/compose.yaml" APP_ENV_FILE="$PWD/.env" \
 
 Restore only after verifying the bundle and confirming the intended target.
 The Compose database service must be running. Restore imports into a temporary
-database and extracts into a new HDD staging directory before it changes the
-live database or storage. It checks each ready database object for a valid key,
-matching file size, and matching stored SHA-256 checksum. Set
+database and extracts into new HDD and SSD staging directories before it changes
+the live database or storage. It checks each ready database object for a valid
+key, matching file size, and matching stored SHA-256 checksum. Set
 `CONFIRM_RESTORE_DB` to the exact `project/database` value printed by backup or
 reported by Compose:
 
@@ -405,10 +408,11 @@ Restore stops the app and media indexer during the operation. After a successful
 restore or confirmed rollback, it restarts only the services that were running
 when restore began. If database or storage rollback cannot be confirmed, it
 leaves both services stopped and reports the recovery paths. A successful
-restore keeps the previous database under a generated `restoreold_*` name and
-the previous storage directories under
-`.pre-restore-*` on the HDD. Keep both until the restored service and files have
-been checked; remove them only after the recovery window has passed.
+restore keeps the previous database under a generated `restoreold_*` name, the
+previous HDD storage directories under `.pre-restore-*`, and the previous SSD
+preview entries under a sibling `.pre-restore-previews-*` directory. Keep all
+three until the restored service and files have been checked; remove them only
+after the recovery window has passed.
 
 Periodically test a recent backup by verifying and restoring it into isolated
 staging PostgreSQL and storage directories. Check representative file hashes,

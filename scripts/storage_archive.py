@@ -14,7 +14,8 @@ import uuid
 from pathlib import Path
 
 
-ROOTS = {"objects", "uploads", "trash", "previews"}
+ROOTS = frozenset({"objects", "uploads", "trash", "previews"})
+ROOT_CHOICES = tuple(sorted(ROOTS))
 OBJECT_KEY = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f-]{36}$")
 STAGING_KEY = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.part$")
 CHUNK = 1024 * 1024
@@ -28,7 +29,9 @@ def fail(message: str) -> "NoReturn":
     raise ArchiveError(message)
 
 
-def member_path(member: tarfile.TarInfo) -> tuple[str, ...]:
+def member_path(
+    member: tarfile.TarInfo, allowed_roots: frozenset[str] = ROOTS
+) -> tuple[str, ...]:
     name = member.name
     if not name or "\x00" in name or "\\" in name or name.startswith("/"):
         fail(f"unsafe archive member name: {name!r}")
@@ -38,7 +41,7 @@ def member_path(member: tarfile.TarInfo) -> tuple[str, ...]:
     parts = clean_name.split("/")
     if not clean_name or any(part in {"", ".", ".."} for part in parts):
         fail(f"unsafe archive member path: {name!r}")
-    if parts[0] not in ROOTS:
+    if parts[0] not in allowed_roots:
         fail(f"unexpected storage archive root: {parts[0]!r}")
     if member.issym() or member.islnk() or member.isdev() or member.isfifo() or not (member.isdir() or member.isfile()):
         fail(f"unsupported archive member type: {name!r}")
@@ -91,7 +94,9 @@ def set_owner_and_mode(path: Path, mode: int) -> None:
         os.chown(path, 10001, 10001, follow_symlinks=False)
 
 
-def process_archive(destination: Path | None) -> int:
+def process_archive(
+    destination: Path | None, allowed_roots: frozenset[str]
+) -> int:
     seen: dict[tuple[str, ...], str] = {}
     roots_seen: set[str] = set()
     total_bytes = 0
@@ -101,7 +106,7 @@ def process_archive(destination: Path | None) -> int:
         archive = tarfile.open(fileobj=sys.stdin.buffer, mode="r|gz")
         with archive:
             for member in archive:
-                parts = member_path(member)
+                parts = member_path(member, allowed_roots)
                 current_type = "dir" if member.isdir() else "file"
                 if parts in seen:
                     fail(f"duplicate archive path: {'/'.join(parts)}")
@@ -162,12 +167,12 @@ def process_archive(destination: Path | None) -> int:
                     raise
                 set_owner_and_mode(target, 0o640)
 
-        if roots_seen != ROOTS:
-            missing = ", ".join(sorted(ROOTS - roots_seen))
+        if roots_seen != allowed_roots:
+            missing = ", ".join(sorted(allowed_roots - roots_seen))
             fail(f"archive is missing required storage roots: {missing}")
 
         if destination_root is not None:
-            for root_name in sorted(ROOTS):
+            for root_name in sorted(allowed_roots):
                 ensure_directory(destination_root, destination_root / root_name)
             for path in sorted(destination_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
                 if path.is_dir() and not path.is_symlink():
@@ -178,14 +183,26 @@ def process_archive(destination: Path | None) -> int:
         fail(f"invalid or unreadable storage archive: {exc}")
 
 
-def validate_storage_tree(root: Path) -> int:
+def validate_storage_tree(
+    root: Path,
+    allowed_roots: frozenset[str] = ROOTS,
+    archive_root_name: str | None = None,
+) -> int:
     if not root.is_dir() or root.is_symlink():
         fail("storage root is not a real directory")
     root = root.resolve(strict=True)
     checked = 0
     seen_inodes: set[tuple[int, int]] = set()
-    for root_name in sorted(ROOTS):
-        storage_root = root / root_name
+    if archive_root_name is not None:
+        if len(allowed_roots) != 1 or archive_root_name not in allowed_roots:
+            fail("a single archive root name is required for a one-root tree")
+        roots_to_scan = [(archive_root_name, root)]
+    else:
+        roots_to_scan = [
+            (root_name, root / root_name) for root_name in sorted(allowed_roots)
+        ]
+
+    for root_name, storage_root in roots_to_scan:
         if not storage_root.is_dir() or storage_root.is_symlink():
             fail(f"storage root is missing or unsafe: {root_name}")
         for current, directories, files in os.walk(storage_root, topdown=True, followlinks=False):
@@ -196,7 +213,7 @@ def validate_storage_tree(root: Path) -> int:
                     info = path.lstat()
                 except OSError as exc:
                     fail(f"could not inspect storage path {path}: {exc}")
-                relative = path.relative_to(root).as_posix()
+                relative = f"{root_name}/{path.relative_to(storage_root).as_posix()}"
                 member = tarfile.TarInfo(relative)
                 if stat.S_ISDIR(info.st_mode):
                     member.type = tarfile.DIRTYPE
@@ -209,7 +226,7 @@ def validate_storage_tree(root: Path) -> int:
                     seen_inodes.add(inode)
                 else:
                     fail(f"unsupported storage path type: {relative!r}")
-                member_path(member)
+                member_path(member, allowed_roots)
                 checked += 1
                 if stat.S_ISLNK(info.st_mode):
                     fail(f"symbolic links are not allowed in storage: {relative!r}")
@@ -292,13 +309,17 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser("validate")
     validate.add_argument("--summary", action="store_true")
+    validate.add_argument("--roots", nargs="+", choices=ROOT_CHOICES)
     extract = subparsers.add_parser("extract")
     extract.add_argument("destination", type=Path)
+    extract.add_argument("--roots", nargs="+", choices=ROOT_CHOICES)
     check = subparsers.add_parser("validate-ready")
     check.add_argument("root", type=Path)
     check.add_argument("rows", type=Path)
     tree = subparsers.add_parser("validate-tree")
     tree.add_argument("root", type=Path)
+    tree.add_argument("--roots", nargs="+", choices=ROOT_CHOICES)
+    tree.add_argument("--root-name", choices=ROOT_CHOICES)
     args = parser.parse_args()
 
     try:
@@ -307,11 +328,13 @@ def main() -> int:
             print(count)
             return 0
         if args.command == "validate-tree":
-            checked = validate_storage_tree(args.root)
+            allowed_roots = frozenset(args.roots or ROOT_CHOICES)
+            checked = validate_storage_tree(args.root, allowed_roots, args.root_name)
             print(f"storage tree validated: {checked} entries")
             return 0
+        allowed_roots = frozenset(args.roots or ROOT_CHOICES)
         destination = args.destination if args.command == "extract" else None
-        total_bytes = process_archive(destination)
+        total_bytes = process_archive(destination, allowed_roots)
         if args.command == "validate" and args.summary:
             print(total_bytes)
         else:

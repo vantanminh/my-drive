@@ -12,7 +12,14 @@ from pathlib import Path
 ROOTS = {
     "database": "/var/lib/postgresql/data",
     "storage": "/srv/my-drive/data",
+    "preview": "/srv/my-drive/previews",
 }
+
+MOUNT_SPECS = (
+    ("db", ROOTS["database"]),
+    ("app", ROOTS["storage"]),
+    ("app", ROOTS["preview"]),
+)
 
 
 def fail(message: str) -> "NoReturn":
@@ -95,7 +102,7 @@ def mounts(document: dict) -> list[str]:
         fail("services are missing")
 
     result: list[str] = []
-    for service_name, target in (("db", ROOTS["database"]), ("app", ROOTS["storage"])):
+    for service_name, target in MOUNT_SPECS:
         service = services.get(service_name)
         if not isinstance(service, dict):
             fail(f"service {service_name} is missing")
@@ -117,6 +124,21 @@ def mounts(document: dict) -> list[str]:
         if "\n" in str(resolved) or "\r" in str(resolved):
             fail("bind sources cannot contain newlines")
         result.append(str(resolved))
+
+    paths = [Path(path) for path in result]
+    for index, left in enumerate(paths):
+        for right in paths[index + 1 :]:
+            try:
+                left.relative_to(right)
+                overlaps = True
+            except ValueError:
+                try:
+                    right.relative_to(left)
+                    overlaps = True
+                except ValueError:
+                    overlaps = False
+            if overlaps:
+                fail("database, storage, and preview bind sources must not overlap")
     return result
 
 

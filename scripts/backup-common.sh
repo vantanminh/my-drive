@@ -45,24 +45,22 @@ compose() {
 }
 
 acquire_operation_lock() {
-    local database_key storage_key first_key second_key lock_key lock_path lock_fd
+    local root lock_key lock_path lock_fd
+    local -a lock_keys
     [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "backup and restore must run as root to use the protected shared operation lock"
     [[ -d /run/lock && ! -L /run/lock && -w /run/lock ]] || die "the protected operation lock directory /run/lock is unavailable"
     require_command "$SHA256SUM_BIN"
     require_command cut
 
-    database_key="$(printf '%s' "$DATABASE_DATA_ROOT" | "$SHA256SUM_BIN" | cut -c1-32)"
-    storage_key="$(printf '%s' "$STORAGE_DATA_ROOT" | "$SHA256SUM_BIN" | cut -c1-32)"
-    [[ "$database_key" != "$storage_key" ]] || die "database and storage bind sources must be distinct"
-    if [[ "$database_key" < "$storage_key" ]]; then
-        first_key="$database_key"
-        second_key="$storage_key"
-    else
-        first_key="$storage_key"
-        second_key="$database_key"
-    fi
+    require_command sort
+    lock_keys=()
+    for root in "$DATABASE_DATA_ROOT" "$STORAGE_DATA_ROOT" "$PREVIEW_DATA_ROOT"; do
+        lock_keys+=("$(printf '%s' "$root" | "$SHA256SUM_BIN" | cut -c1-32)")
+    done
+    mapfile -t lock_keys < <(printf '%s\n' "${lock_keys[@]}" | sort -u)
+    [[ "${#lock_keys[@]}" -eq 3 ]] || die "database, storage, and preview bind sources must be distinct"
 
-    for lock_key in "$first_key" "$second_key"; do
+    for lock_key in "${lock_keys[@]}"; do
         lock_path="/run/lock/my-drive-${lock_key}.backup-restore.lock"
         [[ ! -L "$lock_path" && ( ! -e "$lock_path" || -f "$lock_path" ) ]] || die "unsafe backup/restore lock path: $lock_path"
         exec {lock_fd}>>"$lock_path"
@@ -241,15 +239,16 @@ validate_backup_root() {
 }
 
 validate_separate_backup_filesystem() {
-    local db_root="$1" storage_root="$2" backup_device db_device storage_device
-    [[ -d "$db_root" && -d "$storage_root" ]] || die "Compose database and storage bind sources must exist"
+    local db_root="$1" storage_root="$2" preview_root="$3" backup_device data_device data_root
+    [[ -d "$db_root" && -d "$storage_root" && -d "$preview_root" ]] || die "Compose database, storage, and preview bind sources must exist"
     db_root="$(realpath -e -- "$db_root")"
     storage_root="$(realpath -e -- "$storage_root")"
+    preview_root="$(realpath -e -- "$preview_root")"
     backup_device="$(stat -c '%d' -- "$BACKUP_ROOT")"
-    db_device="$(stat -c '%d' -- "$db_root")"
-    storage_device="$(stat -c '%d' -- "$storage_root")"
-    [[ "$backup_device" != "$db_device" ]] || die "BACKUP_ROOT is on the same filesystem as PostgreSQL data"
-    [[ "$backup_device" != "$storage_device" ]] || die "BACKUP_ROOT is on the same filesystem as HDD storage"
+    for data_root in "$db_root" "$storage_root" "$preview_root"; do
+        data_device="$(stat -c '%d' -- "$data_root")"
+        [[ "$backup_device" != "$data_device" ]] || die "BACKUP_ROOT is on the same filesystem as a configured application data root"
+    done
 }
 
 load_compose_metadata() {
@@ -269,15 +268,24 @@ resolve_compose_mounts() {
     local mounts
     mounts="$(compose_mounts)" || die "could not resolve Compose bind mounts"
     mapfile -t COMPOSE_MOUNTS <<<"$mounts"
-    [[ "${#COMPOSE_MOUNTS[@]}" -eq 2 ]] || die "Compose must define exactly the database and storage bind sources"
+    [[ "${#COMPOSE_MOUNTS[@]}" -eq 3 ]] || die "Compose must define exactly the database, storage, and preview bind sources"
     DATABASE_DATA_ROOT="${COMPOSE_MOUNTS[0]}"
     STORAGE_DATA_ROOT="${COMPOSE_MOUNTS[1]}"
-    case "$DATABASE_DATA_ROOT/" in
-        "$STORAGE_DATA_ROOT/"*) die "database and storage bind sources must not overlap" ;;
-    esac
-    case "$STORAGE_DATA_ROOT/" in
-        "$DATABASE_DATA_ROOT/"*) die "database and storage bind sources must not overlap" ;;
-    esac
+    PREVIEW_DATA_ROOT="${COMPOSE_MOUNTS[2]}"
+    local -a roots=("$DATABASE_DATA_ROOT" "$STORAGE_DATA_ROOT" "$PREVIEW_DATA_ROOT")
+    local left right i j
+    for ((i = 0; i < ${#roots[@]}; i += 1)); do
+        for ((j = i + 1; j < ${#roots[@]}; j += 1)); do
+            left="${roots[i]}"
+            right="${roots[j]}"
+            case "$left/" in
+                "$right/"*) die "database, storage, and preview bind sources must not overlap" ;;
+            esac
+            case "$right/" in
+                "$left/"*) die "database, storage, and preview bind sources must not overlap" ;;
+            esac
+        done
+    done
 }
 
 require_running_database() {

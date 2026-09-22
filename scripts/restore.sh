@@ -9,6 +9,7 @@ require_command "$AGE_BIN"
 require_command mktemp
 require_command sleep
 require_command date
+require_command find
 verify_identity_file
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "restore must run as root so restored files can be owned by the app user (10001)"
 
@@ -17,10 +18,16 @@ resolve_compose_mounts
 acquire_operation_lock
 require_running_database
 STORAGE_DATA_ROOT="$(realpath -e -- "$STORAGE_DATA_ROOT")"
-[[ -d "$STORAGE_DATA_ROOT" ]] || die "storage root must already exist"
-for child in objects uploads trash previews; do
+PREVIEW_DATA_ROOT="$(realpath -e -- "$PREVIEW_DATA_ROOT")"
+[[ -d "$STORAGE_DATA_ROOT" && ! -L "$STORAGE_DATA_ROOT" ]] || die "storage root must already exist as a real directory"
+[[ -d "$PREVIEW_DATA_ROOT" && ! -L "$PREVIEW_DATA_ROOT" ]] || die "preview root must already exist as a real directory"
+for child in objects uploads trash; do
     [[ -d "$STORAGE_DATA_ROOT/$child" && ! -L "$STORAGE_DATA_ROOT/$child" ]] || die "storage root is missing a safe $child directory"
 done
+"$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$STORAGE_DATA_ROOT" \
+    --roots objects uploads trash >/dev/null
+"$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$PREVIEW_DATA_ROOT" \
+    --roots previews --root-name previews >/dev/null
 
 restore_target="$PROJECT_NAME/$DATABASE_NAME"
 if [[ "${CONFIRM_RESTORE_DB:-}" != "$restore_target" ]]; then
@@ -39,14 +46,17 @@ fi
 "$PYTHON_BIN" "$SCRIPT_DIR/backup_bundle.py" "${target_check_args[@]}"
 
 archive_bytes="$("$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/storage.tar.gz.age" \
-    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --summary)"
+    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --summary --roots objects uploads trash)"
 [[ "$archive_bytes" =~ ^[0-9]+$ ]] || die "could not measure restored storage size"
-"$PYTHON_BIN" - "$STORAGE_DATA_ROOT" "$archive_bytes" "$MIN_FREE_BYTES" "$MIN_FREE_PERCENT" <<'PY'
+preview_archive_bytes="$("$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/previews.tar.gz.age" \
+    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --summary --roots previews)"
+[[ "$preview_archive_bytes" =~ ^[0-9]+$ ]] || die "could not measure restored preview size"
+"$PYTHON_BIN" - "$STORAGE_DATA_ROOT" "$archive_bytes" "$MIN_FREE_BYTES" "$MIN_FREE_PERCENT" "HDD storage" <<'PY'
 import math
 import shutil
 import sys
 
-path, payload_text, min_bytes_text, min_percent_text = sys.argv[1:]
+path, payload_text, min_bytes_text, min_percent_text, label = sys.argv[1:]
 payload_bytes = int(payload_text)
 minimum_bytes = int(min_bytes_text)
 minimum_percent = float(min_percent_text)
@@ -54,8 +64,27 @@ usage = shutil.disk_usage(path)
 reserve = max(minimum_bytes, math.ceil(usage.total * minimum_percent / 100.0))
 if usage.free < payload_bytes + reserve:
     print(
-        f"error: restore needs {payload_bytes} bytes plus a {reserve}-byte free-space reserve; "
-        f"only {usage.free} bytes are available on the HDD",
+        f"error: restore needs {payload_bytes} bytes plus a {reserve}-byte free-space reserve on {label}; "
+        f"only {usage.free} bytes are available",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+"$PYTHON_BIN" - "$PREVIEW_DATA_ROOT" "$preview_archive_bytes" "$MIN_FREE_BYTES" "$MIN_FREE_PERCENT" "SSD previews" <<'PY'
+import math
+import shutil
+import sys
+
+path, payload_text, min_bytes_text, min_percent_text, label = sys.argv[1:]
+payload_bytes = int(payload_text)
+minimum_bytes = int(min_bytes_text)
+minimum_percent = float(min_percent_text)
+usage = shutil.disk_usage(path)
+reserve = max(minimum_bytes, math.ceil(usage.total * minimum_percent / 100.0))
+if usage.free < payload_bytes + reserve:
+    print(
+        f"error: restore needs {payload_bytes} bytes plus a {reserve}-byte free-space reserve on {label}; "
+        f"only {usage.free} bytes are available",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -67,10 +96,16 @@ previous_database="restoreold_$$_${RANDOM}"
 [[ "${#scratch_database}" -le 63 && "${#previous_database}" -le 63 ]] || die "generated PostgreSQL database name is too long"
 rollback_dir="$STORAGE_DATA_ROOT/.pre-restore-$timestamp"
 [[ ! -e "$rollback_dir" ]] || die "rollback directory already exists: $rollback_dir"
+preview_parent="$(dirname -- "$PREVIEW_DATA_ROOT")"
+preview_rollback_dir="$preview_parent/.pre-restore-previews-$timestamp"
+[[ ! -e "$preview_rollback_dir" ]] || die "preview rollback directory already exists: $preview_rollback_dir"
 restore_work=""
 restore_stage=""
+preview_restore_work=""
+preview_restore_stage=""
 scratch_created=0
 storage_cutover_started=0
+preview_cutover_started=0
 database_cutover_started=0
 restore_committed=0
 APP_NEEDS_RESTART=0
@@ -78,6 +113,7 @@ INDEXER_NEEDS_RESTART=0
 MEDIA_INDEXER_DEFINED=0
 DATABASE_ROLLBACK_CONFIRMED=0
 STORAGE_ROLLBACK_CONFIRMED=0
+PREVIEW_ROLLBACK_CONFIRMED=0
 KEEP_SERVICES_STOPPED=0
 
 database_exists() {
@@ -146,7 +182,7 @@ rollback_storage() {
     local child
     [[ -d "$rollback_dir" ]] || return 0
     mkdir -p -- "$restore_stage/.failed-restore" 2>/dev/null || true
-    for child in previews trash uploads objects; do
+    for child in trash uploads objects; do
         if [[ -d "$STORAGE_DATA_ROOT/$child" && ! -e "$restore_stage/$child" ]]; then
             mv -- "$STORAGE_DATA_ROOT/$child" "$restore_stage/.failed-restore/$child" || return 1
         fi
@@ -154,6 +190,18 @@ rollback_storage() {
             mv -- "$rollback_dir/$child" "$STORAGE_DATA_ROOT/$child" || return 1
         fi
     done
+}
+
+rollback_previews() {
+    local child
+    [[ -d "$preview_rollback_dir" ]] || return 0
+    mkdir -p -- "$preview_restore_work/.failed-restore" 2>/dev/null || true
+    while IFS= read -r -d '' child; do
+        mv -- "$child" "$preview_restore_work/.failed-restore/" || return 1
+    done < <(find "$PREVIEW_DATA_ROOT" -mindepth 1 -maxdepth 1 -print0)
+    while IFS= read -r -d '' child; do
+        mv -- "$child" "$PREVIEW_DATA_ROOT/" || return 1
+    done < <(find "$preview_rollback_dir" -mindepth 1 -maxdepth 1 -print0)
 }
 
 cleanup() {
@@ -182,6 +230,18 @@ cleanup() {
             KEEP_SERVICES_STOPPED=1
         fi
     fi
+    if (( status != 0 && preview_cutover_started && !restore_committed )); then
+        if (( database_cutover_started && !DATABASE_ROLLBACK_CONFIRMED )); then
+            printf 'error: preview rollback was not attempted because database state is uncertain; inspect %s and %s\n' "$PREVIEW_DATA_ROOT" "$preview_rollback_dir" >&2
+            KEEP_SERVICES_STOPPED=1
+        elif rollback_previews; then
+            PREVIEW_ROLLBACK_CONFIRMED=1
+        else
+            printf 'error: preview rollback failed; inspect %s and %s\n' "$PREVIEW_DATA_ROOT" "$preview_rollback_dir" >&2
+            status=1
+            KEEP_SERVICES_STOPPED=1
+        fi
+    fi
 
     if (( status != 0 && scratch_created && ( !database_cutover_started || DATABASE_ROLLBACK_CONFIRMED ) )); then
         compose exec -T db psql -X -v ON_ERROR_STOP=1 -U "$DATABASE_USER" -d postgres \
@@ -193,6 +253,12 @@ cleanup() {
         rm -rf -- "$restore_work"
     elif [[ -n "$restore_work" && -d "$restore_work" ]]; then
         printf 'restore staging retained for recovery at: %s\n' "$restore_work" >&2
+    fi
+    if [[ -n "$preview_restore_work" && -d "$preview_restore_work" ]] && \
+        (( !preview_cutover_started || restore_committed || PREVIEW_ROLLBACK_CONFIRMED )); then
+        rm -rf -- "$preview_restore_work"
+    elif [[ -n "$preview_restore_work" && -d "$preview_restore_work" ]]; then
+        printf 'preview restore staging retained for recovery at: %s\n' "$preview_restore_work" >&2
     fi
 
     if (( APP_NEEDS_RESTART )); then
@@ -214,6 +280,7 @@ cleanup() {
         printf 'restore committed for %s\n' "$restore_target"
         printf 'pre-restore database retained as: %s\n' "$previous_database"
         printf 'pre-restore storage retained at: %s\n' "$rollback_dir"
+        printf 'pre-restore previews retained at: %s\n' "$preview_rollback_dir"
         if (( status != 0 )); then
             printf 'error: restore committed, but post-restore app recovery failed; inspect app health before reopening access\n' >&2
         fi
@@ -256,7 +323,14 @@ scratch_created=1
 restore_work="$(mktemp -d "$STORAGE_DATA_ROOT/.restore-work.XXXXXXXX")"
 restore_stage="$restore_work/storage"
 "$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/storage.tar.gz.age" \
-    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" extract "$restore_stage" >/dev/null
+    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" extract "$restore_stage" \
+        --roots objects uploads trash >/dev/null
+
+preview_restore_work="$(mktemp -d "$preview_parent/.my-drive-preview-work.XXXXXXXX")"
+preview_restore_stage="$preview_restore_work/preview"
+"$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/previews.tar.gz.age" \
+    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" extract "$preview_restore_stage" \
+        --roots previews >/dev/null
 
 ready_rows="$restore_stage/.ready-objects.tsv"
 compose exec -T db psql -X -A -t -F $'\t' -v ON_ERROR_STOP=1 \
@@ -268,12 +342,21 @@ rm -f -- "$ready_rows"
 
 mkdir -- "$rollback_dir"
 storage_cutover_started=1
-for child in objects uploads trash previews; do
+for child in objects uploads trash; do
     mv -- "$STORAGE_DATA_ROOT/$child" "$rollback_dir/$child"
 done
-for child in objects uploads trash previews; do
+for child in objects uploads trash; do
     mv -- "$restore_stage/$child" "$STORAGE_DATA_ROOT/$child"
 done
+
+mkdir -- "$preview_rollback_dir"
+preview_cutover_started=1
+while IFS= read -r -d '' child; do
+    mv -- "$child" "$preview_rollback_dir/"
+done < <(find "$PREVIEW_DATA_ROOT" -mindepth 1 -maxdepth 1 -print0)
+while IFS= read -r -d '' child; do
+    mv -- "$child" "$PREVIEW_DATA_ROOT/"
+done < <(find "$preview_restore_stage/previews" -mindepth 1 -maxdepth 1 -print0)
 
 database_cutover_started=1
 compose exec -T db psql -X -v ON_ERROR_STOP=1 -U "$DATABASE_USER" -d postgres \

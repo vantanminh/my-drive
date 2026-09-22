@@ -20,7 +20,7 @@ require_command head
 validate_backup_root "${BACKUP_ROOT:-}"
 load_compose_metadata
 resolve_compose_mounts
-validate_separate_backup_filesystem "$DATABASE_DATA_ROOT" "$STORAGE_DATA_ROOT"
+validate_separate_backup_filesystem "$DATABASE_DATA_ROOT" "$STORAGE_DATA_ROOT" "$PREVIEW_DATA_ROOT"
 acquire_operation_lock
 require_running_database
 
@@ -72,10 +72,20 @@ compose exec -T db sh -ec 'exec pg_dump --format=custom --no-owner --no-acl --us
     | "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/database.dump.age"
 
 "$TAR_BIN" --numeric-owner --warning=no-file-changed --create --gzip --file=- \
-    --directory "$STORAGE_DATA_ROOT" objects uploads trash previews \
+    --directory "$STORAGE_DATA_ROOT" objects uploads trash \
     | "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/storage.tar.gz.age"
 
-"$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$STORAGE_DATA_ROOT"
+"$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$STORAGE_DATA_ROOT" \
+    --roots objects uploads trash
+
+"$TAR_BIN" --numeric-owner --warning=no-file-changed --create --gzip --file=- \
+    --directory "$PREVIEW_DATA_ROOT" \
+    --transform='s,^\.$,previews/,' \
+    --transform='s,^\./,previews/,' . \
+    | "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/previews.tar.gz.age"
+
+"$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$PREVIEW_DATA_ROOT" \
+    --roots previews --root-name previews
 
 "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/compose.yaml.age" "$COMPOSE_FILE_PATH"
 "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/environment.env.age" "$APP_ENV_FILE"
@@ -85,7 +95,7 @@ compose exec -T db sh -ec 'exec pg_dump --format=custom --no-owner --no-acl --us
     "$(basename -- "$COMPOSE_FILE_PATH")" "$(basename -- "$APP_ENV_FILE")" "$backup_id"
 (
     cd -- "$staging_dir"
-    "$SHA256SUM_BIN" database.dump.age storage.tar.gz.age compose.yaml.age environment.env.age manifest.json >SHA256SUMS
+    "$SHA256SUM_BIN" database.dump.age storage.tar.gz.age previews.tar.gz.age compose.yaml.age environment.env.age manifest.json >SHA256SUMS
 )
 
 mv -T -- "$staging_dir" "$final_dir"

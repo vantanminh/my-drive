@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-FORMAT = "my-drive-encrypted-backup-v1"
+FORMAT = "my-drive-encrypted-backup-v2"
 ARTIFACTS = (
     "database.dump.age",
     "storage.tar.gz.age",
+    "previews.tar.gz.age",
     "compose.yaml.age",
     "environment.env.age",
 )

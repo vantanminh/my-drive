@@ -23,7 +23,9 @@ backup_dir="$(realpath -e -- "$backup_dir")"
 "$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/compose.yaml.age" >/dev/null
 "$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/environment.env.age" >/dev/null
 "$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/storage.tar.gz.age" \
-    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate >/dev/null
+    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --roots objects uploads trash >/dev/null
+"$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/previews.tar.gz.age" \
+    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --roots previews >/dev/null
 "$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/database.dump.age" \
     | compose exec -T db pg_restore --list >/dev/null
 
