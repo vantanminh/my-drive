@@ -148,8 +148,9 @@ expiry, trashing a shared folder, or reaching `max_downloads` disables access.
 
 ## Running a prebuilt Docker image
 
-GitHub Actions builds both Docker targets (`runtime` and
-`media-indexer-runtime`) for pull requests into `master`. A push to `master`
+GitHub Actions validates and builds the Docker targets (`runtime`,
+`media-indexer-runtime`, and `media-indexer-db-setup`) for pull requests into
+`master`. A push to `master`
 publishes the `latest`, `master`, and `sha-<commit>` tags. Pushing a version
 tag such as `v1.2.3` publishes `v1.2.3` and `sha-<commit>` tags. Images are
 built for `linux/amd64` and published to GHCR as
@@ -216,8 +217,9 @@ docker compose --env-file .env.local -f compose.local.yaml ps
 
 Open `http://localhost:3000` (or the port set by `APP_PORT`) and sign in with
 the bootstrap owner credentials from `.env.local`. The local Compose file uses
-the locally built image tags and will not pull the app images. To watch the
-services or stop them while keeping their data:
+the locally built image tags when they are available; build those tags first or
+set the image variables to published GHCR tags. To watch the services or stop
+them while keeping their data:
 
 ```sh
 docker compose --env-file .env.local -f compose.local.yaml logs -f app
@@ -226,7 +228,8 @@ docker compose --env-file .env.local -f compose.local.yaml down
 ```
 
 The app image contains the Rust service and built web client. The separate
-indexer image contains the constrained image decoder and worker. Neither image
+indexer image contains the constrained image decoder and worker, while the
+database setup image grants the restricted indexer role. Neither image
 contains secrets or persistent data. The named volumes retain PostgreSQL,
 uploaded files, and generated previews across container restarts.
 
@@ -249,11 +252,12 @@ docker compose --env-file .env.local -f compose.local.yaml up -d
 docker compose --env-file .env.local -f compose.local.yaml ps
 ```
 
-Use the exact SHA tags from the commit you want to run. `compose.local.yaml`
-uses `pull_policy: never`, so the explicit `docker pull` commands make the
-selected app, indexer, and database setup images available without silently
-changing the version. The database setup image only grants the restricted
-indexer role; it does not contain application data.
+Use the exact SHA tags from the commit you want to run. The explicit
+`docker pull` commands pin the selected app, indexer, and database setup images;
+`compose.local.yaml` also uses `pull_policy: missing`, so a clean machine can
+pull a referenced GHCR tag while an already available local image is reused.
+The database setup image only grants the restricted indexer role; it does not
+contain application data.
 
 ## Single-server Compose deployment
 
