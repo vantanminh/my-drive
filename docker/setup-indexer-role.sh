@@ -49,14 +49,16 @@ GRANT SELECT (id, size_bytes, storage_key, mime_detected, checksum_sha256, state
     ON storage_objects TO media_indexer;
 GRANT SELECT (singleton, paused) ON media_index_control TO media_indexer;
 
-GRANT SELECT (id, owner_id) ON face_clusters TO media_indexer;
+GRANT SELECT (id, owner_id, label, updated_at) ON face_clusters TO media_indexer;
 GRANT INSERT (id, owner_id) ON face_clusters TO media_indexer;
+GRANT DELETE ON face_clusters TO media_indexer;
 GRANT SELECT (file_version_id, cluster_id, recipe_version, face_index,
-              confidence, box_left, box_top, box_width, box_height)
+              confidence, box_left, box_top, box_width, box_height, descriptor)
     ON face_observations TO media_indexer;
 GRANT INSERT (file_version_id, cluster_id, recipe_version, face_index,
-              confidence, box_left, box_top, box_width, box_height)
+              confidence, box_left, box_top, box_width, box_height, descriptor)
     ON face_observations TO media_indexer;
+GRANT DELETE ON face_observations TO media_indexer;
 GRANT USAGE, SELECT ON SEQUENCE face_observations_id_seq TO media_indexer;
 
 GRANT INSERT, UPDATE ON media_derivatives TO media_indexer_writer;
