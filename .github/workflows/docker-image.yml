@@ -226,6 +226,21 @@ jobs:
           docker compose --env-file .env.local -f compose.local.yaml logs --no-color
           exit 1
 
+      - name: Verify media indexer database grants
+        run: |
+          docker compose --env-file .env.local -f compose.local.yaml exec -T \
+            -e PGPASSWORD=ci-indexer-password-0123456789 db \
+            psql -h 127.0.0.1 -U media_indexer -d mydrive -v ON_ERROR_STOP=1 \
+            -c "BEGIN; \
+                SELECT id, owner_id, label, updated_at FROM face_clusters WHERE FALSE; \
+                SELECT id, file_version_id, cluster_id, recipe_version, face_index, confidence, \
+                       box_left, box_top, box_width, box_height, descriptor, created_at \
+                  FROM face_observations WHERE FALSE; \
+                DELETE FROM face_observations WHERE FALSE; \
+                DELETE FROM face_clusters WHERE FALSE; \
+                UPDATE face_clusters SET updated_at = updated_at WHERE FALSE; \
+                ROLLBACK;"
+
       - name: Verify stack health and clean up
         if: always()
         run: |
