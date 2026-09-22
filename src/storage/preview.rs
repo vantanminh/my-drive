@@ -58,8 +58,10 @@ impl PreviewStorage {
         recipe_version: i16,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        if !matches!(variant, "card" | "viewer" | "video_poster")
-            || recipe_version <= 0
+        if !matches!(
+            variant,
+            "card" | "viewer" | "video_poster" | "video_preview"
+        ) || recipe_version <= 0
             || bytes.is_empty()
         {
             return Err(StorageError::UnsafeKey);
@@ -75,7 +77,7 @@ impl PreviewStorage {
 
         let version_dir = self.root.join(version_id.to_string());
         ensure_directory(&version_dir)?;
-        let destination = version_dir.join(format!("{variant}-v{recipe_version}.webp"));
+        let destination = version_dir.join(derivative_filename(variant, recipe_version)?);
         let staging = version_dir.join(format!(".stage-{}.tmp", Uuid::new_v4()));
 
         let result = async {
@@ -116,8 +118,10 @@ impl PreviewStorage {
         expected_checksum: &str,
         max_bytes: u64,
     ) -> Result<Vec<u8>, StorageError> {
-        if !matches!(variant, "card" | "viewer" | "video_poster")
-            || recipe_version <= 0
+        if !matches!(
+            variant,
+            "card" | "viewer" | "video_poster" | "video_preview"
+        ) || recipe_version <= 0
             || expected_size <= 0
             || u64::try_from(expected_size).unwrap_or(u64::MAX) > max_bytes
             || expected_checksum.len() != 64
@@ -130,7 +134,7 @@ impl PreviewStorage {
         self.validate_mount()?;
         let version_dir = self.root.join(version_id.to_string());
         reject_symlink_or_non_directory(&version_dir)?;
-        let path = version_dir.join(format!("{variant}-v{recipe_version}.webp"));
+        let path = version_dir.join(derivative_filename(variant, recipe_version)?);
         let metadata = tokio_fs::symlink_metadata(&path).await?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(StorageError::UnsafeKey);
@@ -170,6 +174,20 @@ impl PreviewStorage {
         }
         Ok(())
     }
+}
+
+fn derivative_filename(variant: &str, recipe_version: i16) -> Result<String, StorageError> {
+    if recipe_version <= 0 {
+        return Err(StorageError::UnsafeKey);
+    }
+    let extension = if variant == "video_preview" {
+        "mp4"
+    } else if matches!(variant, "card" | "viewer" | "video_poster") {
+        "webp"
+    } else {
+        return Err(StorageError::UnsafeKey);
+    };
+    Ok(format!("{variant}-v{recipe_version}.{extension}"))
 }
 
 fn ensure_directory(path: &std::path::Path) -> Result<(), StorageError> {
@@ -271,6 +289,10 @@ mod tests {
             .publish_derivative(version_id, "video_poster", 1, b"checked-video-poster")
             .await
             .unwrap();
+        storage
+            .publish_derivative(version_id, "video_preview", 1, b"checked-video-mp4")
+            .await
+            .unwrap();
 
         assert_eq!(
             fs::read(root.join(format!("{version_id}/card-v1.webp"))).unwrap(),
@@ -281,10 +303,14 @@ mod tests {
             b"checked-video-poster"
         );
         assert_eq!(
+            fs::read(root.join(format!("{version_id}/video_preview-v1.mp4"))).unwrap(),
+            b"checked-video-mp4"
+        );
+        assert_eq!(
             fs::read_dir(root.join(version_id.to_string()))
                 .unwrap()
                 .count(),
-            2
+            3
         );
         let poster_checksum = format!("{:x}", Sha256::digest(b"checked-video-poster"));
         assert_eq!(
@@ -306,6 +332,21 @@ mod tests {
                 .publish_derivative(version_id, "../objects", 1, b"no")
                 .await
                 .is_err()
+        );
+        let video_checksum = format!("{:x}", Sha256::digest(b"checked-video-mp4"));
+        assert_eq!(
+            storage
+                .read_derivative(
+                    version_id,
+                    "video_preview",
+                    1,
+                    i64::try_from(b"checked-video-mp4".len()).unwrap(),
+                    &video_checksum,
+                    1024,
+                )
+                .await
+                .unwrap(),
+            b"checked-video-mp4"
         );
     }
 

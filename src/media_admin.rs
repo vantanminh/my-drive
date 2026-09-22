@@ -84,6 +84,7 @@ struct StatusResponse {
     preview_storage_available: bool,
     paused: bool,
     counts: StatusCounts,
+    task_metrics: Vec<TaskMetrics>,
     pending_bytes: i64,
     processed_bytes: i64,
     jobs: Vec<JobSummary>,
@@ -101,8 +102,30 @@ struct StatusCounts {
     failed: i64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskMetrics {
+    task: String,
+    counts: StatusCounts,
+    pending_bytes: i64,
+    processed_bytes: i64,
+}
+
 #[derive(FromRow)]
 struct StatusAggregate {
+    queued: i64,
+    running: i64,
+    completed: i64,
+    unsupported: i64,
+    retry_wait: i64,
+    failed: i64,
+    pending_bytes: Option<i64>,
+    processed_bytes: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct TaskAggregate {
+    task: String,
     queued: i64,
     running: i64,
     completed: i64,
@@ -176,9 +199,35 @@ async fn status(
                 AS processed_bytes \
           FROM media_index_jobs AS job \
           JOIN file_versions AS version ON version.id = job.file_version_id \
-         WHERE job.task IN ('image_preview', 'video_thumbnail', 'face_index')",
+         WHERE job.task IN ('image_preview', 'video_thumbnail', 'video_preview', 'face_index')",
     )
     .fetch_one(&state.pool)
+    .await
+    .map_err(AdminError::Database)?;
+    let task_metrics = sqlx::query_as::<_, TaskAggregate>(
+        "SELECT job.task, \
+            COUNT(*) FILTER (WHERE job.state = 'queued')::BIGINT AS queued, \
+            COUNT(*) FILTER (WHERE job.state = 'running')::BIGINT AS running, \
+            COUNT(*) FILTER (WHERE job.state = 'completed')::BIGINT AS completed, \
+            COUNT(*) FILTER (WHERE job.state = 'unsupported')::BIGINT AS unsupported, \
+            COUNT(*) FILTER (WHERE job.state = 'retry_wait')::BIGINT AS retry_wait, \
+            COUNT(*) FILTER (WHERE job.state = 'failed')::BIGINT AS failed, \
+            COALESCE(SUM(version.size_bytes) FILTER (WHERE job.state IN \
+                ('queued', 'running', 'retry_wait', 'failed')), 0)::BIGINT AS pending_bytes, \
+            COALESCE(SUM(job.processed_bytes) FILTER (WHERE job.state = 'running'), 0)::BIGINT \
+                AS processed_bytes \
+          FROM media_index_jobs AS job \
+          JOIN file_versions AS version ON version.id = job.file_version_id \
+         WHERE job.task IN ('image_preview', 'video_thumbnail', 'video_preview', 'face_index') \
+         GROUP BY job.task \
+         ORDER BY CASE job.task \
+            WHEN 'image_preview' THEN 0 \
+            WHEN 'video_thumbnail' THEN 1 \
+            WHEN 'video_preview' THEN 2 \
+            WHEN 'face_index' THEN 3 \
+            ELSE 4 END",
+    )
+    .fetch_all(&state.pool)
     .await
     .map_err(AdminError::Database)?;
     let mut jobs = sqlx::query_as::<_, JobSummaryRow>(
@@ -188,7 +237,7 @@ async fn status(
            FROM media_index_jobs AS job \
            JOIN file_versions AS version ON version.id = job.file_version_id \
            JOIN drive_entries AS entry ON entry.id = version.file_id \
-          WHERE job.task IN ('image_preview', 'video_thumbnail', 'face_index') \
+          WHERE job.task IN ('image_preview', 'video_thumbnail', 'video_preview', 'face_index') \
             AND ($1::BIGINT IS NULL OR job.id < $1) \
           ORDER BY job.id DESC LIMIT $2",
     )
@@ -231,6 +280,22 @@ async fn status(
             retry_wait: aggregate.retry_wait,
             failed: aggregate.failed,
         },
+        task_metrics: task_metrics
+            .into_iter()
+            .map(|task| TaskMetrics {
+                task: task.task,
+                counts: StatusCounts {
+                    queued: task.queued,
+                    running: task.running,
+                    completed: task.completed,
+                    unsupported: task.unsupported,
+                    retry_wait: task.retry_wait,
+                    failed: task.failed,
+                },
+                pending_bytes: task.pending_bytes.unwrap_or_default(),
+                processed_bytes: task.processed_bytes.unwrap_or_default(),
+            })
+            .collect(),
         pending_bytes: aggregate.pending_bytes.unwrap_or_default(),
         processed_bytes: aggregate.processed_bytes.unwrap_or_default(),
         jobs,
@@ -304,7 +369,7 @@ async fn retry_failed(
             SET state = 'queued', attempts = 0, available_at = now(), lease_expires_at = NULL, \
                 current_stage = NULL, processed_bytes = 0, error_code = NULL, \
                 last_error_at = NULL, completed_at = NULL, updated_at = now() \
-          WHERE task IN ('image_preview', 'video_thumbnail', 'face_index') AND state = 'failed' \
+          WHERE task IN ('image_preview', 'video_thumbnail', 'video_preview', 'face_index') AND state = 'failed' \
             AND ($1::BIGINT IS NULL OR id = $1)",
     )
     .bind(request.job_id)

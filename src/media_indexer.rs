@@ -32,6 +32,9 @@ const MAX_THUMBNAIL_BYTES: u64 = 24 * 1024 * 1024;
 const CARD_MAX_BYTES: usize = 512 * 1024;
 const VIEWER_MAX_BYTES: usize = 4 * 1024 * 1024;
 const VIDEO_POSTER_MAX_BYTES: usize = 512 * 1024;
+const VIDEO_PREVIEW_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_FACE_MATCH_CANDIDATES: i64 = 512;
+const FACE_DESCRIPTOR_DISTANCE_THRESHOLD: u32 = 42;
 
 #[derive(Debug, Error)]
 enum WorkerError {
@@ -53,6 +56,7 @@ struct ClaimedJob {
     file_version_id: Uuid,
     owner_id: Uuid,
     task: String,
+    recipe_version: i16,
     version_size_bytes: i64,
     object_size_bytes: Option<i64>,
     storage_key: Option<String>,
@@ -60,6 +64,12 @@ struct ClaimedJob {
     object_checksum_sha256: Option<String>,
     object_state: Option<String>,
     attempts: i32,
+}
+
+#[derive(Debug, FromRow)]
+struct FaceClusterCandidate {
+    cluster_id: Uuid,
+    descriptor: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,8 +86,10 @@ struct JobFailure {
 
 struct GeneratedDerivative {
     variant: &'static str,
-    width: i32,
-    height: i32,
+    mime_type: &'static str,
+    extension: &'static str,
+    width: Option<i32>,
+    height: Option<i32>,
     bytes: Vec<u8>,
     checksum: String,
 }
@@ -268,7 +280,33 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
     sqlx::query(
         "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-         SELECT version.id, 'face_index', 1 \
+         SELECT version.id, 'video_preview', 1 \
+           FROM file_versions AS version \
+           JOIN files AS file ON file.current_version_id = version.id \
+           JOIN drive_entries AS entry ON entry.id = file.id \
+           JOIN storage_objects AS object ON object.id = version.storage_object_id \
+          WHERE entry.deleted_at IS NULL \
+            AND object.state = 'ready' \
+            AND object.mime_detected IN ( \
+                'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', \
+                'video/x-msvideo', 'video/ogg', 'video/mpeg', 'video/mp2t', \
+                'video/x-flv', 'video/x-ms-wmv', 'video/3gpp' \
+            ) \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM media_index_jobs AS existing \
+                 WHERE existing.file_version_id = version.id \
+                   AND existing.task = 'video_preview' \
+                   AND existing.recipe_version = 1 \
+            ) \
+          ORDER BY version.created_at, version.id \
+          LIMIT 100 \
+         ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+         SELECT version.id, 'face_index', 2 \
            FROM file_versions AS version \
            JOIN files AS file ON file.current_version_id = version.id \
            JOIN drive_entries AS entry ON entry.id = file.id \
@@ -287,7 +325,7 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
                 SELECT 1 FROM media_index_jobs AS existing \
                  WHERE existing.file_version_id = version.id \
                    AND existing.task = 'face_index' \
-                   AND existing.recipe_version = 1 \
+                   AND existing.recipe_version = 2 \
             ) \
           ORDER BY version.created_at, version.id \
           LIMIT 100 \
@@ -303,7 +341,7 @@ async fn fail_exhausted_leases(pool: &PgPool) -> Result<(), sqlx::Error> {
         "UPDATE media_index_jobs \
             SET state = 'failed', lease_expires_at = NULL, current_stage = NULL, \
                 error_code = 'decode_failed', last_error_at = now(), updated_at = now() \
-          WHERE task IN ('image_preview', 'video_thumbnail', 'face_index') AND state = 'running' \
+          WHERE task IN ('image_preview', 'video_thumbnail', 'video_preview', 'face_index') AND state = 'running' \
             AND lease_expires_at <= now() AND attempts >= $1",
     )
     .bind(MAX_ATTEMPTS)
@@ -317,7 +355,7 @@ async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
         "WITH candidate AS ( \
              SELECT job.id \
                FROM media_index_jobs AS job \
-              WHERE job.task IN ('image_preview', 'video_thumbnail', 'face_index') AND job.attempts < $1 \
+              WHERE job.task IN ('image_preview', 'video_thumbnail', 'video_preview', 'face_index') AND job.attempts < $1 \
                 AND ( \
                     (job.state IN ('queued', 'retry_wait') AND job.available_at <= now()) \
                     OR (job.state = 'running' AND job.lease_expires_at <= now()) \
@@ -326,7 +364,8 @@ async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
               ORDER BY CASE job.task \
                            WHEN 'image_preview' THEN 0 \
                            WHEN 'video_thumbnail' THEN 1 \
-                           WHEN 'face_index' THEN 2 \
+                           WHEN 'video_preview' THEN 2 \
+                           WHEN 'face_index' THEN 3 \
                            ELSE 3 \
                        END, \
                        COALESCE(job.lease_expires_at, job.available_at), job.id \
@@ -341,7 +380,7 @@ async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
            JOIN drive_entries AS entry ON entry.id = version.file_id \
            LEFT JOIN storage_objects AS object ON object.id = version.storage_object_id \
           WHERE job.id = candidate.id AND version.id = job.file_version_id \
-         RETURNING job.id, job.file_version_id, entry.owner_id, job.task, version.size_bytes AS version_size_bytes, \
+         RETURNING job.id, job.file_version_id, entry.owner_id, job.task, job.recipe_version, version.size_bytes AS version_size_bytes, \
                    object.size_bytes AS object_size_bytes, object.storage_key, \
                    object.mime_detected, object.checksum_sha256 AS object_checksum_sha256, \
                    object.state AS object_state, job.attempts",
@@ -361,6 +400,7 @@ async fn process_job(
     match job.task.as_str() {
         "image_preview" => process_image_job(pool, storage, previews, job).await,
         "video_thumbnail" => process_video_job(pool, storage, previews, job).await,
+        "video_preview" => process_video_preview_job(pool, storage, previews, job).await,
         "face_index" => process_face_job(pool, storage, job).await,
         _ => Err(unsupported("unsupported_format")),
     }
@@ -433,8 +473,10 @@ async fn process_image_job(
         }
         generated.push(GeneratedDerivative {
             variant,
-            width: i32::try_from(width).map_err(|_| unsupported("resource_limit"))?,
-            height: i32::try_from(height).map_err(|_| unsupported("resource_limit"))?,
+            mime_type: "image/webp",
+            extension: "webp",
+            width: Some(i32::try_from(width).map_err(|_| unsupported("resource_limit"))?),
+            height: Some(i32::try_from(height).map_err(|_| unsupported("resource_limit"))?),
             checksum: format!("{:x}", Sha256::digest(&bytes)),
             bytes,
         });
@@ -499,8 +541,64 @@ async fn process_video_job(
     }
     let generated = [GeneratedDerivative {
         variant: "video_poster",
-        width: i32::try_from(width).map_err(|_| unsupported("resource_limit"))?,
-        height: i32::try_from(height).map_err(|_| unsupported("resource_limit"))?,
+        mime_type: "image/webp",
+        extension: "webp",
+        width: Some(i32::try_from(width).map_err(|_| unsupported("resource_limit"))?),
+        height: Some(i32::try_from(height).map_err(|_| unsupported("resource_limit"))?),
+        checksum: format!("{:x}", Sha256::digest(&bytes)),
+        bytes,
+    }];
+    publish_and_complete(pool, previews, job, actual_size, &generated).await
+}
+
+async fn process_video_preview_job(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    previews: &PreviewStorage,
+    job: &ClaimedJob,
+) -> Result<(), JobFailure> {
+    let mime = job
+        .mime_detected
+        .as_deref()
+        .ok_or_else(|| unsupported("unsupported_format"))?;
+    if !supports_video_mime(mime) {
+        return Err(unsupported("unsupported_format"));
+    }
+    let (input_path, actual_size) = prepare_source(pool, storage, job, mime).await?;
+    set_stage(pool, job, "transcoding_video_preview", actual_size)
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?;
+
+    let output = TempPath::create("mp4").map_err(|_| retryable("preview_storage_unavailable"))?;
+    transcode_video_preview(input_path.path(), output.path())
+        .await
+        .map_err(|error| {
+            tracing::warn!(job_id = job.id, error = ?error, "browser video preview encoding failed");
+            map_decode_tool_error(error)
+        })?;
+    let output_size = tokio_fs::metadata(output.path())
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?
+        .len();
+    if output_size == 0 || output_size > VIDEO_PREVIEW_MAX_BYTES {
+        return Err(unsupported("resource_limit"));
+    }
+    let bytes = tokio_fs::read(output.path())
+        .await
+        .map_err(|_| retryable("preview_storage_unavailable"))?;
+    if bytes.len() as u64 != output_size
+        || !matches_magic("video/mp4", &bytes[..bytes.len().min(512)])
+    {
+        return Err(permanent("decode_failed"));
+    }
+    let generated = [GeneratedDerivative {
+        variant: "video_preview",
+        mime_type: "video/mp4",
+        extension: "mp4",
+        // Video delivery does not use image dimensions. Keep the metadata
+        // nullable rather than fabricating a raster size for this derivative.
+        width: None,
+        height: None,
         checksum: format!("{:x}", Sha256::digest(&bytes)),
         bytes,
     }];
@@ -554,6 +652,62 @@ async fn process_face_job(
         .begin()
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
+    if detections
+        .iter()
+        .any(|face| face.descriptor.len() != face_indexer::DESCRIPTOR_LEN)
+    {
+        return Err(permanent("decode_failed"));
+    }
+    // Recipe 2 replaces older geometry-only observations for this file. Keep
+    // newer observations intact if an older job is retried out of order.
+    sqlx::query(
+        "DELETE FROM face_observations \
+           WHERE file_version_id = $1 AND recipe_version < $2",
+    )
+    .bind(job.file_version_id)
+    .bind(job.recipe_version)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| retryable("face_index_unavailable"))?;
+    // Keep an explicitly labelled empty group so a recipe refresh never
+    // erases the owner's manual identity choice.
+    sqlx::query(
+        "DELETE FROM face_clusters AS cluster \
+          WHERE cluster.owner_id = $1 \
+            AND cluster.label IS NULL \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM face_observations AS observation \
+                 WHERE observation.cluster_id = cluster.id \
+            )",
+    )
+    .bind(job.owner_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| retryable("face_index_unavailable"))?;
+    let mut candidates = sqlx::query_as::<_, FaceClusterCandidate>(
+        "SELECT representative.cluster_id, representative.descriptor \
+           FROM ( \
+               SELECT DISTINCT ON (observation.cluster_id) \
+                      observation.cluster_id, observation.descriptor \
+                 FROM face_observations AS observation \
+                 JOIN face_clusters AS cluster ON cluster.id = observation.cluster_id \
+                 JOIN file_versions AS version ON version.id = observation.file_version_id \
+                 JOIN drive_entries AS entry ON entry.id = version.file_id \
+                WHERE entry.owner_id = $1 \
+                  AND entry.deleted_at IS NULL \
+                  AND observation.cluster_id IS NOT NULL \
+                  AND observation.descriptor IS NOT NULL \
+                ORDER BY observation.cluster_id, observation.created_at DESC, observation.id DESC \
+           ) AS representative \
+           JOIN face_clusters AS cluster ON cluster.id = representative.cluster_id \
+          ORDER BY cluster.updated_at DESC, representative.cluster_id \
+          LIMIT $2",
+    )
+    .bind(job.owner_id)
+    .bind(MAX_FACE_MATCH_CANDIDATES)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(|_| retryable("face_index_unavailable"))?;
     let completed = sqlx::query(
         "UPDATE media_index_jobs \
             SET state = 'completed', lease_expires_at = NULL, current_stage = NULL, \
@@ -574,36 +728,83 @@ async fn process_face_job(
         return Err(retryable("face_index_unavailable"));
     }
     for (face_index, face) in detections.iter().enumerate() {
-        let cluster_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO face_clusters (id, owner_id) VALUES ($1, $2)")
-            .bind(cluster_id)
-            .bind(job.owner_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| retryable("face_index_unavailable"))?;
+        let cluster_id = if let Some(cluster_id) = matching_cluster(&face.descriptor, &candidates) {
+            cluster_id
+        } else {
+            let cluster_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO face_clusters (id, owner_id) VALUES ($1, $2)")
+                .bind(cluster_id)
+                .bind(job.owner_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| retryable("face_index_unavailable"))?;
+            candidates.push(FaceClusterCandidate {
+                cluster_id,
+                descriptor: face.descriptor.clone(),
+            });
+            cluster_id
+        };
         sqlx::query(
             "INSERT INTO face_observations \
              (file_version_id, cluster_id, recipe_version, face_index, confidence, \
-              box_left, box_top, box_width, box_height) \
-             VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8)",
+              box_left, box_top, box_width, box_height, descriptor) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(job.file_version_id)
         .bind(cluster_id)
+        .bind(job.recipe_version)
         .bind(i16::try_from(face_index).unwrap_or(i16::MAX))
         .bind(face.confidence)
         .bind(face.left)
         .bind(face.top)
         .bind(face.width)
         .bind(face.height)
+        .bind(&face.descriptor)
         .execute(&mut *transaction)
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
+        sqlx::query("UPDATE face_clusters SET updated_at = now() WHERE id = $1")
+            .bind(cluster_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| retryable("face_index_unavailable"))?;
     }
     transaction
         .commit()
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
     Ok(())
+}
+
+fn matching_cluster(descriptor: &[u8], candidates: &[FaceClusterCandidate]) -> Option<Uuid> {
+    let mut best: Option<(u32, Uuid)> = None;
+    for candidate in candidates {
+        let Some(distance) = descriptor_distance(descriptor, &candidate.descriptor) else {
+            continue;
+        };
+        if distance > FACE_DESCRIPTOR_DISTANCE_THRESHOLD {
+            continue;
+        }
+        if best.is_none_or(|(best_distance, best_id)| {
+            distance < best_distance
+                || (distance == best_distance && candidate.cluster_id < best_id)
+        }) {
+            best = Some((distance, candidate.cluster_id));
+        }
+    }
+    best.map(|(_, cluster_id)| cluster_id)
+}
+
+fn descriptor_distance(left: &[u8], right: &[u8]) -> Option<u32> {
+    if left.len() != face_indexer::DESCRIPTOR_LEN || right.len() != face_indexer::DESCRIPTOR_LEN {
+        return None;
+    }
+    let total = left
+        .iter()
+        .zip(right)
+        .map(|(left, right)| u32::from(left.abs_diff(*right)))
+        .sum::<u32>();
+    Some(total / face_indexer::DESCRIPTOR_LEN as u32)
 }
 
 async fn prepare_source(
@@ -686,7 +887,7 @@ async fn publish_and_complete(
             .publish_derivative(
                 job.file_version_id,
                 derivative.variant,
-                1,
+                job.recipe_version,
                 &derivative.bytes,
             )
             .await
@@ -720,16 +921,20 @@ async fn publish_and_complete(
     for derivative in generated {
         sqlx::query(
             "SELECT public.media_indexer_upsert_derivative( \
-                $1, $2, 1::smallint, $3, 'image/webp', $4, $5, $6, $7 \
+                $1, $2, $3, $4, $5, $6, $7, $8, $9 \
              )",
         )
         .bind(job.file_version_id)
         .bind(derivative.variant)
+        .bind(job.recipe_version)
         .bind(format!(
-            "{}/{derivative_variant}-v1.webp",
+            "{}/{derivative_variant}-v{recipe_version}.{extension}",
             job.file_version_id,
-            derivative_variant = derivative.variant
+            derivative_variant = derivative.variant,
+            recipe_version = job.recipe_version,
+            extension = derivative.extension,
         ))
+        .bind(derivative.mime_type)
         .bind(i64::try_from(derivative.bytes.len()).unwrap_or(i64::MAX))
         .bind(derivative.width)
         .bind(derivative.height)
@@ -988,6 +1193,81 @@ async fn extract_video_frame(input: &Path, output: &Path) -> Result<(), ToolErro
             "1",
             "-f",
             "image2",
+            "-y",
+            output,
+        ])
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let result = timeout(TOOL_TIMEOUT, command.status())
+        .await
+        .map_err(|_| ToolError::TimedOut)?
+        .map_err(|_| ToolError::Failed)?;
+    if result.success() {
+        Ok(())
+    } else {
+        Err(ToolError::Failed)
+    }
+}
+
+async fn transcode_video_preview(input: &Path, output: &Path) -> Result<(), ToolError> {
+    let input = input.to_str().ok_or(ToolError::InvalidOutput)?;
+    let output = output.to_str().ok_or(ToolError::InvalidOutput)?;
+    let mut command = Command::new("ffmpeg");
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+            "-max_alloc",
+            "134217728",
+            "-probesize",
+            "1M",
+            "-analyzeduration",
+            "2M",
+            "-i",
+            input,
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-map_metadata",
+            "-1",
+            "-sn",
+            "-dn",
+            "-vf",
+            "scale=1280:1280:force_original_aspect_ratio=decrease,format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "28",
+            "-profile:v",
+            "main",
+            "-level:v",
+            "4.0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
             "-y",
             output,
         ])
@@ -1389,9 +1669,9 @@ fn retryable(code: &'static str) -> JobFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        backfill_batch, claim_one, matches_magic, record_failure, retryable, run_once,
-        supports_ffmpeg_image_mime, supports_image_mime, supports_video_mime,
-        validate_metadata_free_webp,
+        FaceClusterCandidate, backfill_batch, claim_one, descriptor_distance, matches_magic,
+        matching_cluster, record_failure, retryable, run_once, supports_ffmpeg_image_mime,
+        supports_image_mime, supports_video_mime, validate_metadata_free_webp,
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
     use std::net::SocketAddr;
@@ -1426,6 +1706,35 @@ mod tests {
             assert!(supports_ffmpeg_image_mime(mime), "{mime}");
         }
         assert!(!supports_ffmpeg_image_mime("image/jpeg"));
+    }
+
+    #[test]
+    fn face_descriptor_matching_is_bounded_and_deterministic() {
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let descriptor = vec![128_u8; crate::face_indexer::DESCRIPTOR_LEN];
+        let near = vec![150_u8; crate::face_indexer::DESCRIPTOR_LEN];
+        let far = vec![240_u8; crate::face_indexer::DESCRIPTOR_LEN];
+        let candidates = vec![
+            FaceClusterCandidate {
+                cluster_id: second_id,
+                descriptor: near.clone(),
+            },
+            FaceClusterCandidate {
+                cluster_id: first_id,
+                descriptor: near,
+            },
+            FaceClusterCandidate {
+                cluster_id: Uuid::from_u128(3),
+                descriptor: far,
+            },
+        ];
+        assert_eq!(
+            descriptor_distance(&descriptor, &candidates[0].descriptor),
+            Some(22)
+        );
+        assert_eq!(matching_cluster(&descriptor, &candidates), Some(first_id));
+        assert_eq!(matching_cluster(&[0_u8; 8], &candidates), None);
     }
 
     #[test]
@@ -1707,14 +2016,15 @@ mod tests {
         .await
         .expect("count ineligible backfill jobs");
         assert_eq!(decoy_jobs, 0);
-        let video_job: (String, i16) = sqlx::query_as(
+        let video_jobs: Vec<(String, i16)> = sqlx::query_as(
             "SELECT task, recipe_version FROM media_index_jobs WHERE file_version_id = $1",
         )
         .bind(video.1)
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await
-        .expect("fetch backfilled video poster job");
-        assert_eq!(video_job, ("video_thumbnail".to_owned(), 1));
+        .expect("fetch backfilled video preview jobs");
+        assert!(video_jobs.contains(&("video_thumbnail".to_owned(), 1)));
+        assert!(video_jobs.contains(&("video_preview".to_owned(), 1)));
 
         let mut cleanup_versions = candidates
             .iter()

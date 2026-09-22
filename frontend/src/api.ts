@@ -28,7 +28,7 @@ export type MediaIndexJob = {
   id: number;
   fileId: string;
   fileName: string;
-  task: 'image_preview' | 'video_thumbnail' | 'face_index' | string;
+  task: 'image_preview' | 'video_thumbnail' | 'video_preview' | 'face_index' | string;
   state: string;
   attempts: number;
   currentStage: string | null;

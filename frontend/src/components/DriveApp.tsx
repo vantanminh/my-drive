@@ -148,11 +148,13 @@ function mediaStageLabel(stage: string | null): string {
     thumbnailing_card: 'Building image card preview',
     extracting_video_poster: 'Extracting video poster frame',
     encoding_video_poster: 'Encoding video poster',
+    transcoding_video_preview: 'Building browser video preview',
     extracting_face_frame: 'Extracting face index frame',
     detecting_faces: 'Detecting faces',
     publishing_viewer: 'Saving image viewer preview',
     publishing_card: 'Saving image card preview',
-    publishing_video_poster: 'Saving video poster'
+    publishing_video_poster: 'Saving video poster',
+    publishing_video_preview: 'Saving browser video preview'
   };
   return stage ? labels[stage] || 'Processing media' : 'Starting';
 }
@@ -161,6 +163,7 @@ function mediaTaskLabel(task: string): string {
   switch (task) {
     case 'image_preview': return 'Image preview';
     case 'video_thumbnail': return 'Video poster';
+    case 'video_preview': return 'Browser video preview';
     case 'face_index': return 'Face index';
     default: return 'Media job';
   }

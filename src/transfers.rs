@@ -40,6 +40,7 @@ const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 const IMAGE_PREVIEW_RECIPE_VERSION: i16 = 1;
 const VIDEO_THUMBNAIL_RECIPE_VERSION: i16 = 1;
 const MAX_CARD_DERIVATIVE_BYTES: u64 = 512 * 1024;
+const MAX_VIDEO_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
 const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id";
 
 #[derive(Debug, Error)]
@@ -241,7 +242,7 @@ struct DownloadRecord {
 }
 
 #[derive(FromRow)]
-struct ImageDerivative {
+struct MediaDerivative {
     recipe_version: i16,
     mime_type: String,
     size_bytes: i64,
@@ -817,10 +818,21 @@ async fn finalize_upload(
             .await
             .map_err(map_database_error)?;
         }
+        if is_indexable_video_mime(detected_media_type) {
+            sqlx::query(
+                "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+                 VALUES ($1, 'video_preview', 1) \
+                 ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+            )
+            .bind(version_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        }
         if is_face_indexable_media(detected_media_type) {
             sqlx::query(
                 "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-                 VALUES ($1, 'face_index', 1) \
+                 VALUES ($1, 'face_index', 2) \
                  ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
             )
             .bind(version_id)
@@ -1086,6 +1098,20 @@ async fn download_response_inner(
                 "could not use indexed viewer derivative; serving original image"
             ),
         }
+    } else if inline_preview && supports_video_preview(preview_mime) {
+        match read_video_preview(state, entry.file_version_id).await {
+            Ok(Some((bytes, derivative_checksum))) => {
+                derivative_bytes = Some(bytes);
+                representation_mime = Some("video/mp4");
+                checksum = derivative_checksum;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                file_version_id = %entry.file_version_id,
+                error = %error,
+                "could not use indexed browser video derivative; serving original video"
+            ),
+        }
     }
     let size = derivative_bytes
         .as_ref()
@@ -1248,7 +1274,28 @@ async fn read_viewer_derivative(
     state: &AppState,
     file_version_id: Uuid,
 ) -> Result<Option<(Vec<u8>, String)>, String> {
-    read_image_derivative(state, file_version_id, "viewer", 4 * 1024 * 1024).await
+    read_media_derivative(
+        state,
+        file_version_id,
+        "viewer",
+        "image/webp",
+        4 * 1024 * 1024,
+    )
+    .await
+}
+
+async fn read_video_preview(
+    state: &AppState,
+    file_version_id: Uuid,
+) -> Result<Option<(Vec<u8>, String)>, String> {
+    read_media_derivative(
+        state,
+        file_version_id,
+        "video_preview",
+        "video/mp4",
+        MAX_VIDEO_PREVIEW_BYTES,
+    )
+    .await
 }
 
 async fn read_image_derivative(
@@ -1257,10 +1304,20 @@ async fn read_image_derivative(
     variant: &str,
     max_bytes: u64,
 ) -> Result<Option<(Vec<u8>, String)>, String> {
+    read_media_derivative(state, file_version_id, variant, "image/webp", max_bytes).await
+}
+
+async fn read_media_derivative(
+    state: &AppState,
+    file_version_id: Uuid,
+    variant: &str,
+    expected_mime: &str,
+    max_bytes: u64,
+) -> Result<Option<(Vec<u8>, String)>, String> {
     let Some(previews) = state.media_preview.as_ref() else {
         return Ok(None);
     };
-    let derivative = sqlx::query_as::<_, ImageDerivative>(
+    let derivative = sqlx::query_as::<_, MediaDerivative>(
         "SELECT recipe_version, mime_type, size_bytes, checksum_sha256 \
            FROM media_derivatives \
           WHERE file_version_id = $1 AND variant = $2 \
@@ -1274,8 +1331,8 @@ async fn read_image_derivative(
     let Some(derivative) = derivative else {
         return Ok(None);
     };
-    if derivative.mime_type != "image/webp" {
-        return Err("viewer derivative has an unsupported MIME type".to_owned());
+    if derivative.mime_type != expected_mime {
+        return Err(format!("{variant} derivative has an unsupported MIME type"));
     }
     let bytes = previews
         .read_derivative(
@@ -1300,6 +1357,10 @@ fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
 
 fn supports_viewer_derivative(mime_type: Option<&str>) -> bool {
     is_indexable_image_mime(mime_type)
+}
+
+fn supports_video_preview(mime_type: Option<&str>) -> bool {
+    is_indexable_video_mime(mime_type)
 }
 
 fn thumbnail_variant_for_mime(mime_type: Option<&str>) -> Option<(&'static str, u64)> {
@@ -1670,7 +1731,7 @@ mod media_type_tests {
     use super::{
         if_none_match_matches, if_range_matches, is_face_indexable_media, is_indexable_image_mime,
         is_indexable_video_mime, media_index_task, safe_preview_mime, sniff_media_type,
-        supports_viewer_derivative, thumbnail_variant_for_mime,
+        supports_video_preview, supports_viewer_derivative, thumbnail_variant_for_mime,
     };
 
     #[test]
@@ -1809,6 +1870,27 @@ mod media_type_tests {
         ] {
             assert!(!supports_viewer_derivative(mime_type));
         }
+    }
+
+    #[test]
+    fn enables_browser_video_derivatives_for_every_indexed_video_container() {
+        for mime_type in [
+            "video/mp4",
+            "video/webm",
+            "video/quicktime",
+            "video/x-matroska",
+            "video/x-msvideo",
+            "video/ogg",
+            "video/mpeg",
+            "video/mp2t",
+            "video/x-flv",
+            "video/x-ms-wmv",
+            "video/3gpp",
+        ] {
+            assert!(supports_video_preview(Some(mime_type)), "{mime_type}");
+        }
+        assert!(!supports_video_preview(Some("text/plain")));
+        assert!(!supports_video_preview(None));
     }
 
     #[test]

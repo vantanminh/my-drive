@@ -958,7 +958,7 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
         b"\x00\x00\x00\x18ftypisom1234video-data",
     )
     .await;
-    let video_preview = request(
+    let video_preview_fallback = request(
         &app,
         Method::GET,
         &format!("/api/files/{video_id}/preview"),
@@ -969,10 +969,10 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
         Body::empty(),
     )
     .await;
-    assert_eq!(video_preview.status(), StatusCode::OK);
-    assert_eq!(video_preview.headers()[CONTENT_TYPE], "video/mp4");
-    assert_eq!(video_preview.status(), StatusCode::OK);
-    let _ = response_bytes(video_preview).await;
+    assert_eq!(video_preview_fallback.status(), StatusCode::OK);
+    assert_eq!(video_preview_fallback.headers()[CONTENT_TYPE], "video/mp4");
+    assert_eq!(video_preview_fallback.status(), StatusCode::OK);
+    let _ = response_bytes(video_preview_fallback).await;
 
     let video_version_id: Uuid =
         sqlx::query_scalar("SELECT current_version_id FROM files WHERE id = $1")
@@ -980,6 +980,46 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
             .fetch_one(&pool)
             .await
             .expect("load video fixture version id");
+    let browser_video_bytes = b"\x00\x00\x00\x18ftypisombrowser-preview";
+    let browser_video_checksum = format!("{:x}", Sha256::digest(browser_video_bytes));
+    previews
+        .publish_derivative(video_version_id, "video_preview", 1, browser_video_bytes)
+        .await
+        .expect("publish browser video fixture");
+    sqlx::query(
+        "INSERT INTO media_derivatives \
+            (file_version_id, variant, recipe_version, storage_key, mime_type, size_bytes, \
+             width, height, checksum_sha256) \
+         VALUES ($1, 'video_preview', 1, $2, 'video/mp4', $3, NULL, NULL, $4)",
+    )
+    .bind(video_version_id)
+    .bind(format!("{video_version_id}/video_preview-v1.mp4"))
+    .bind(i64::try_from(browser_video_bytes.len()).unwrap())
+    .bind(&browser_video_checksum)
+    .execute(&pool)
+    .await
+    .expect("record browser video fixture");
+    let cached_video_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{video_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(cached_video_preview.status(), StatusCode::OK);
+    assert_eq!(cached_video_preview.headers()[CONTENT_TYPE], "video/mp4");
+    assert_eq!(
+        cached_video_preview.headers()[ETAG],
+        format!("\"{browser_video_checksum}\"")
+    );
+    assert_eq!(
+        response_bytes(cached_video_preview).await,
+        browser_video_bytes
+    );
     previews
         .publish_derivative(video_version_id, "video_poster", 1, card_bytes)
         .await

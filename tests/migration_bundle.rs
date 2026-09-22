@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 7);
+    assert_eq!(migrator.iter().len(), 9);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -55,4 +55,12 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     assert!(face_indexing.contains("CREATE TABLE face_clusters"));
     assert!(face_indexing.contains("CREATE TABLE face_observations"));
     assert!(face_indexing.contains("face_observation_owner_guard"));
+
+    let face_descriptors = include_str!("../migrations/0008_face_descriptor_matching.sql");
+    assert!(face_descriptors.contains("descriptor BYTEA"));
+    assert!(face_descriptors.contains("face_observations_descriptor_idx"));
+
+    let browser_video_previews = include_str!("../migrations/0009_browser_video_previews.sql");
+    assert!(browser_video_previews.contains("'video_preview'"));
+    assert!(browser_video_previews.contains("video/mp4"));
 }
