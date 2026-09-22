@@ -1399,6 +1399,9 @@ fn safe_preview_mime(mime: &str) -> Option<&'static str> {
         "image/avif" => Some("image/avif"),
         "image/bmp" => Some("image/bmp"),
         "image/x-icon" => Some("image/x-icon"),
+        "image/tiff" => Some("image/tiff"),
+        "image/heic" => Some("image/heic"),
+        "image/heif" => Some("image/heif"),
         "video/mp4" => Some("video/mp4"),
         "video/webm" => Some("video/webm"),
         "video/quicktime" => Some("video/quicktime"),
@@ -1443,12 +1446,34 @@ fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
         return Some("image/x-icon");
     }
+    if header.starts_with(&[b'I', b'I', 0x2a, 0x00])
+        || header.starts_with(&[b'M', b'M', 0x00, 0x2a])
+    {
+        return Some("image/tiff");
+    }
     if header.get(4..8).is_some_and(|brand| brand == b"ftyp") {
         if header
             .windows(4)
             .any(|brand| brand == b"avif" || brand == b"avis")
         {
             return Some("image/avif");
+        }
+        if header.windows(4).any(|brand| {
+            matches!(
+                brand,
+                b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1"
+            )
+        }) {
+            return Some(
+                if header
+                    .windows(4)
+                    .any(|brand| matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx"))
+                {
+                    "image/heic"
+                } else {
+                    "image/heif"
+                },
+            );
         }
         if header.windows(4).any(|brand| brand == b"qt  ") {
             return Some("video/quicktime");
@@ -1532,6 +1557,9 @@ fn is_indexable_image_mime(mime_type: Option<&str>) -> bool {
                 | "image/avif"
                 | "image/bmp"
                 | "image/x-icon"
+                | "image/tiff"
+                | "image/heic"
+                | "image/heif"
         )
     )
 }
@@ -1655,7 +1683,11 @@ mod media_type_tests {
             (b"RIFF\x00\x00\x00\x00WEBPrest", "image/webp"),
             (b"BMrest", "image/bmp"),
             (b"\x00\x00\x01\x00rest", "image/x-icon"),
+            (b"II*\x00rest", "image/tiff"),
+            (b"MM\x00*rest", "image/tiff"),
             (b"\x00\x00\x00\x18ftypavifrest", "image/avif"),
+            (b"\x00\x00\x00\x18ftypheicrest", "image/heic"),
+            (b"\x00\x00\x00\x18ftypmif1rest", "image/heif"),
             (b"\x00\x00\x00\x18ftypisomrest", "video/mp4"),
             (b"\x1a\x45\xdf\xa3\xa3\x42\x82\x84webmrest", "video/webm"),
             (b"\x00\x00\x00\x18ftypqt  rest", "video/quicktime"),
@@ -1690,6 +1722,9 @@ mod media_type_tests {
             "image/avif",
             "image/bmp",
             "image/x-icon",
+            "image/tiff",
+            "image/heic",
+            "image/heif",
         ] {
             assert!(is_indexable_image_mime(Some(mime_type)), "{mime_type}");
         }
@@ -1760,6 +1795,9 @@ mod media_type_tests {
             "image/avif",
             "image/bmp",
             "image/x-icon",
+            "image/tiff",
+            "image/heic",
+            "image/heif",
         ] {
             assert!(supports_viewer_derivative(Some(mime_type)), "{mime_type}");
         }
@@ -1783,6 +1821,9 @@ mod media_type_tests {
             "image/avif",
             "image/bmp",
             "image/x-icon",
+            "image/tiff",
+            "image/heic",
+            "image/heif",
         ] {
             assert_eq!(
                 thumbnail_variant_for_mime(Some(mime_type)),

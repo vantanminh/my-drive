@@ -233,7 +233,8 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
          SELECT version.id, CASE \
                  WHEN object.mime_detected IN \
                      ('image/jpeg', 'image/png', 'image/webp', 'image/gif', \
-                      'image/avif', 'image/bmp', 'image/x-icon') \
+                      'image/avif', 'image/bmp', 'image/x-icon', 'image/tiff', \
+                      'image/heic', 'image/heif') \
                  THEN 'image_preview' ELSE 'video_thumbnail' END, 1 \
            FROM file_versions AS version \
            JOIN files AS file ON file.current_version_id = version.id \
@@ -243,7 +244,8 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
             AND object.state = 'ready' \
              AND object.mime_detected IN \
                  ('image/jpeg', 'image/png', 'image/webp', 'image/gif', \
-                  'image/avif', 'image/bmp', 'image/x-icon', \
+                  'image/avif', 'image/bmp', 'image/x-icon', 'image/tiff', \
+                  'image/heic', 'image/heif', \
                   'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', \
                   'video/x-msvideo', 'video/ogg', 'video/mpeg', 'video/mp2t', \
                   'video/x-flv', 'video/x-ms-wmv', 'video/3gpp') \
@@ -253,7 +255,8 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
                     AND existing.task = CASE \
                         WHEN object.mime_detected IN \
                             ('image/jpeg', 'image/png', 'image/webp', 'image/gif', \
-                             'image/avif', 'image/bmp', 'image/x-icon') \
+                             'image/avif', 'image/bmp', 'image/x-icon', 'image/tiff', \
+                             'image/heic', 'image/heif') \
                         THEN 'image_preview' ELSE 'video_thumbnail' END \
                     AND existing.recipe_version = 1 \
             ) \
@@ -274,7 +277,8 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
             AND object.state = 'ready' \
             AND object.mime_detected IN ( \
                 'image/jpeg', 'image/png', 'image/gif', 'image/webp', \
-                'image/avif', 'image/bmp', 'image/x-icon', \
+                'image/avif', 'image/bmp', 'image/x-icon', 'image/tiff', \
+                'image/heic', 'image/heif', \
                  'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', \
                  'video/x-msvideo', 'video/ogg', 'video/mpeg', 'video/mp2t', \
                  'video/x-flv', 'video/x-ms-wmv', 'video/3gpp' \
@@ -1126,6 +1130,19 @@ fn matches_magic(mime: &str, prefix: &[u8]) -> bool {
         }
         "image/bmp" => prefix.starts_with(b"BM"),
         "image/x-icon" => prefix.starts_with(&[0x00, 0x00, 0x01, 0x00]),
+        "image/tiff" => {
+            prefix.starts_with(&[b'I', b'I', 0x2a, 0x00])
+                || prefix.starts_with(&[b'M', b'M', 0x00, 0x2a])
+        }
+        "image/heic" | "image/heif" => {
+            prefix.get(4..8) == Some(b"ftyp")
+                && prefix.windows(4).any(|value| {
+                    matches!(
+                        value,
+                        b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1"
+                    )
+                })
+        }
         "video/mp4" => prefix.get(4..8) == Some(b"ftyp") && prefix.len() >= 12,
         "video/webm" => {
             prefix.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
@@ -1184,6 +1201,9 @@ fn supports_image_mime(mime: &str) -> bool {
             | "image/avif"
             | "image/bmp"
             | "image/x-icon"
+            | "image/tiff"
+            | "image/heic"
+            | "image/heif"
     )
 }
 
@@ -1220,6 +1240,9 @@ fn media_extension(mime: &str) -> Option<&'static str> {
         "image/avif" => Some("avif"),
         "image/bmp" => Some("bmp"),
         "image/x-icon" => Some("ico"),
+        "image/tiff" => Some("tiff"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
         "video/mp4" => Some("mp4"),
         "video/webm" => Some("webm"),
         "video/quicktime" => Some("mov"),
@@ -1384,10 +1407,13 @@ mod tests {
             "image/avif",
             "image/bmp",
             "image/x-icon",
+            "image/tiff",
+            "image/heic",
+            "image/heif",
         ] {
             assert!(supports_image_mime(mime), "{mime}");
         }
-        for mime in ["image/svg+xml", "image/tiff", "image/heic"] {
+        for mime in ["image/svg+xml", "image/jp2"] {
             assert!(!supports_image_mime(mime), "{mime}");
         }
         for mime in ["image/gif", "image/avif", "image/bmp", "image/x-icon"] {
@@ -1427,6 +1453,10 @@ mod tests {
         assert!(matches_magic("image/avif", b"\x00\x00\x00\x18ftypavif"));
         assert!(matches_magic("image/bmp", b"BMrest"));
         assert!(matches_magic("image/x-icon", b"\x00\x00\x01\x00rest"));
+        assert!(matches_magic("image/tiff", b"II*\x00rest"));
+        assert!(matches_magic("image/tiff", b"MM\x00*rest"));
+        assert!(matches_magic("image/heic", b"\x00\x00\x00\x18ftypheic"));
+        assert!(matches_magic("image/heif", b"\x00\x00\x00\x18ftypmif1"));
         assert!(matches_magic("video/mp4", b"\x00\x00\x00\x18ftypisom"));
         assert!(matches_magic(
             "video/webm",

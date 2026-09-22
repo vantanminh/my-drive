@@ -283,9 +283,11 @@ physical HDD and SSD mounts and device IDs. Keep `compose.yaml`,
     to terminate TLS. Do not expose the app port directly to the public internet.
 
 The indexer creates card and viewer WebP previews for JPEG, PNG, GIF, WebP,
-AVIF, BMP, and ICO uploads. GIF, AVIF, BMP, and ICO decoding uses the approved
-libvips loaders first and a single-threaded ffmpeg fallback when the loader is
-unavailable. Source files are capped at 100 MiB, thumbnail output at 24 MiB,
+AVIF, BMP, ICO, TIFF, HEIC, and HEIF uploads. GIF, AVIF, BMP, and ICO decoding
+uses the approved libvips loaders first and a single-threaded ffmpeg fallback
+when the loader is unavailable; TIFF, HEIC, and HEIF remain bounded to their
+approved libvips loaders. Source files are capped at 100 MiB, thumbnail output
+at 24 MiB,
 and processing is bounded by the worker timeout and one decoder thread. It
 also extracts one bounded first-frame WebP poster for MP4, WebM, QuickTime
 (MOV), Matroska (MKV), AVI, OGG/Theora, MPEG, MPEG-TS, FLV, WMV, and 3GP

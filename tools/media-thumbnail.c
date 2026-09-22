@@ -12,6 +12,7 @@ static void block_unapproved_loaders(void) {
     vips_operation_block_set("VipsForeignLoadWebp", FALSE);
     vips_operation_block_set("VipsForeignLoadGif", FALSE);
     vips_operation_block_set("VipsForeignLoadHeif", FALSE);
+    vips_operation_block_set("VipsForeignLoadTiff", FALSE);
 }
 
 int main(int argc, char **argv) {

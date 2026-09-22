@@ -21,7 +21,8 @@ import type { Entry } from '../types';
 type MediaKind = 'image' | 'video';
 
 const IMAGE_MIMES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon'
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon',
+  'image/tiff', 'image/heic', 'image/heif'
 ]);
 const VIDEO_MIMES = new Set([
   'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo',
@@ -32,7 +33,7 @@ export function mediaKindFor(entry: Pick<Entry, 'name' | 'mime_detected'>): Medi
   if (entry.mime_detected && IMAGE_MIMES.has(entry.mime_detected)) return 'image';
   if (entry.mime_detected && VIDEO_MIMES.has(entry.mime_detected)) return 'video';
   const name = entry.name.toLowerCase();
-  if (/\.(jpe?g|png|gif|webp|avif|bmp|ico)$/.test(name)) return 'image';
+  if (/\.(jpe?g|png|gif|webp|avif|bmp|ico|tiff?)$/.test(name) || /\.(heic|heif)$/.test(name)) return 'image';
   if (/\.(mp4|m4v|webm|mov|qt|mkv|mk3d|avi|ogv|ogg|mpg|mpeg|mpe|ts|mts|m2ts|flv|wmv|asf|3gp|3g2)$/.test(name)) return 'video';
   return null;
 }
