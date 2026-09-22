@@ -122,6 +122,11 @@ struct FaceClusterResponse {
     label: Option<String>,
     face_count: i64,
     asset_count: i64,
+    representative_file_id: Option<Uuid>,
+    representative_box_left: Option<f32>,
+    representative_box_top: Option<f32>,
+    representative_box_width: Option<f32>,
+    representative_box_height: Option<f32>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -135,6 +140,11 @@ struct AdminFaceClusterResponse {
     label: Option<String>,
     face_count: i64,
     asset_count: i64,
+    representative_file_id: Option<Uuid>,
+    representative_box_left: Option<f32>,
+    representative_box_top: Option<f32>,
+    representative_box_width: Option<f32>,
+    representative_box_height: Option<f32>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -155,6 +165,11 @@ struct FaceClusterRow {
     label: Option<String>,
     face_count: i64,
     asset_count: i64,
+    representative_file_id: Option<Uuid>,
+    representative_box_left: Option<f32>,
+    representative_box_top: Option<f32>,
+    representative_box_width: Option<f32>,
+    representative_box_height: Option<f32>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -209,6 +224,11 @@ async fn fetch_clusters(
         "SELECT cluster.id, cluster.owner_id, owner.email AS owner_email, cluster.label, \
                 COUNT(observation.id) FILTER (WHERE entry.id IS NOT NULL)::BIGINT AS face_count, \
                 COUNT(DISTINCT observation.file_version_id) FILTER (WHERE entry.id IS NOT NULL)::BIGINT AS asset_count, \
+                representative.file_id AS representative_file_id, \
+                representative.box_left AS representative_box_left, \
+                representative.box_top AS representative_box_top, \
+                representative.box_width AS representative_box_width, \
+                representative.box_height AS representative_box_height, \
                 cluster.created_at, cluster.updated_at \
            FROM face_clusters AS cluster \
            JOIN users AS owner ON owner.id = cluster.owner_id \
@@ -216,8 +236,24 @@ async fn fetch_clusters(
            LEFT JOIN file_versions AS version ON version.id = observation.file_version_id \
            LEFT JOIN drive_entries AS entry ON entry.id = version.file_id \
                 AND entry.deleted_at IS NULL AND entry.kind = 'file' \
+           LEFT JOIN LATERAL ( \
+                SELECT representative_version.file_id, representative_observation.box_left, \
+                       representative_observation.box_top, representative_observation.box_width, \
+                       representative_observation.box_height \
+                  FROM face_observations AS representative_observation \
+                  JOIN file_versions AS representative_version \
+                    ON representative_version.id = representative_observation.file_version_id \
+                  JOIN drive_entries AS representative_entry \
+                    ON representative_entry.id = representative_version.file_id \
+                   AND representative_entry.deleted_at IS NULL \
+                   AND representative_entry.kind = 'file' \
+                 WHERE representative_observation.cluster_id = cluster.id \
+                 ORDER BY representative_observation.created_at DESC, representative_observation.id DESC \
+                 LIMIT 1 \
+           ) AS representative ON TRUE \
           WHERE ($1::UUID IS NULL OR cluster.owner_id = $1) \
-          GROUP BY cluster.id, owner.email \
+          GROUP BY cluster.id, owner.email, representative.file_id, representative.box_left, \
+                   representative.box_top, representative.box_width, representative.box_height \
           ORDER BY cluster.updated_at DESC, cluster.id DESC \
           LIMIT $2 OFFSET $3",
     )
@@ -412,6 +448,11 @@ impl From<FaceClusterRow> for FaceClusterResponse {
             label: row.label,
             face_count: row.face_count,
             asset_count: row.asset_count,
+            representative_file_id: row.representative_file_id,
+            representative_box_left: row.representative_box_left,
+            representative_box_top: row.representative_box_top,
+            representative_box_width: row.representative_box_width,
+            representative_box_height: row.representative_box_height,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -427,6 +468,11 @@ impl From<FaceClusterRow> for AdminFaceClusterResponse {
             label: row.label,
             face_count: row.face_count,
             asset_count: row.asset_count,
+            representative_file_id: row.representative_file_id,
+            representative_box_left: row.representative_box_left,
+            representative_box_top: row.representative_box_top,
+            representative_box_width: row.representative_box_width,
+            representative_box_height: row.representative_box_height,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }

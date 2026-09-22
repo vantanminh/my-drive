@@ -1,10 +1,46 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Check, GitMerge, RefreshCw, ScanFace, Tag, X } from 'lucide-react';
-import { api } from '../api';
+import { api, thumbnailUrl } from '../api';
 import { formatDate, friendlyError } from '../format';
 import type { FaceCluster } from '../types';
 
 type Props = { onClose: () => void };
+
+function FacePreview({ cluster }: { cluster: FaceCluster }) {
+  const [failed, setFailed] = useState(false);
+  const hasBox = cluster.representativeBoxLeft != null
+    && cluster.representativeBoxTop != null
+    && cluster.representativeBoxWidth != null
+    && cluster.representativeBoxHeight != null;
+
+  if (!cluster.representativeFileId || failed) {
+    return <span className="face-card-mark"><ScanFace size={18} /></span>;
+  }
+
+  return (
+    <span className="face-card-preview" aria-label="Representative face preview">
+      <img
+        src={thumbnailUrl(cluster.representativeFileId)}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+      />
+      {hasBox ? (
+        <span
+          className="face-card-box"
+          aria-hidden="true"
+          style={{
+            left: `${cluster.representativeBoxLeft! * 100}%`,
+            top: `${cluster.representativeBoxTop! * 100}%`,
+            width: `${cluster.representativeBoxWidth! * 100}%`,
+            height: `${cluster.representativeBoxHeight! * 100}%`
+          }}
+        />
+      ) : null}
+    </span>
+  );
+}
 
 export default function FaceManagementPanel({ onClose }: Props) {
   const [clusters, setClusters] = useState<FaceCluster[]>([]);
@@ -164,7 +200,7 @@ export default function FaceManagementPanel({ onClose }: Props) {
               <article className={'face-card' + (selectedCluster ? ' is-selected' : '')} key={cluster.id}>
                 <label className="face-card-select">
                   <input type="checkbox" checked={selectedCluster} onChange={() => toggleSelected(cluster.id)} aria-label={'Select ' + (cluster.label || 'unlabelled face group')} />
-                  <span className="face-card-mark"><ScanFace size={18} /></span>
+                  <FacePreview cluster={cluster} />
                 </label>
                 <div className="face-card-copy">
                   <strong>{cluster.label || 'Unlabelled face group'}</strong>

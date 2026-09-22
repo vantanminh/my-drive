@@ -25,6 +25,11 @@ export type FaceCluster = {
   label: string | null;
   faceCount: number;
   assetCount: number;
+  representativeFileId: string | null;
+  representativeBoxLeft: number | null;
+  representativeBoxTop: number | null;
+  representativeBoxWidth: number | null;
+  representativeBoxHeight: number | null;
   createdAt: string;
   updatedAt: string;
 };

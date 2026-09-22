@@ -352,7 +352,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .face-card.is-selected { background: #f7fbf8; border-color: #a9cdb6; }
 .face-card-select { display: flex; align-items: center; gap: 9px; cursor: pointer; }
 .face-card-select input { width: 15px; height: 15px; accent-color: var(--green); }
-.face-card-mark { display: grid; width: 31px; height: 31px; place-items: center; color: #558269; background: #edf4ef; border-radius: 8px; }
+.face-card-mark, .face-card-preview { display: grid; width: 48px; height: 48px; place-items: center; color: #558269; background: #edf4ef; border-radius: 9px; }
+.face-card-preview { position: relative; overflow: hidden; border: 1px solid #dcebe1; }
+.face-card-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.face-card-box { position: absolute; border: 2px solid rgb(255 255 255 / 88%); border-radius: 4px; box-shadow: 0 0 0 1px rgb(50 126 83 / 75%); }
 .face-card-copy { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
 .face-card-copy strong { overflow: hidden; color: #33434b; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .face-card-copy span { color: #8b9796; font-size: 9px; line-height: 1.35; }
