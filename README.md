@@ -230,6 +230,27 @@ indexer image contains the constrained image decoder and worker. Neither image
 contains secrets or persistent data. The named volumes retain PostgreSQL,
 uploaded files, and generated previews across container restarts.
 
+To run the published GHCR images with the same local named-volume setup, set
+the two image values in `.env.local` to a matching SHA tag, then pull and start
+the stack. This keeps the Windows Docker Desktop path independent of physical
+HDD and SSD bind mounts:
+
+```dotenv
+MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:sha-211b70d
+MY_DRIVE_INDEXER_IMAGE=ghcr.io/vantanminh/my-drive-indexer:sha-211b70d
+```
+
+```powershell
+docker pull ghcr.io/vantanminh/my-drive:sha-211b70d
+docker pull ghcr.io/vantanminh/my-drive-indexer:sha-211b70d
+docker compose --env-file .env.local -f compose.local.yaml up -d
+docker compose --env-file .env.local -f compose.local.yaml ps
+```
+
+Use the exact SHA tags from the commit you want to run. `compose.local.yaml`
+uses `pull_policy: never`, so the explicit `docker pull` commands make the
+selected images available without silently changing the version.
+
 ## Single-server Compose deployment
 
 The deployment configuration below requires a Linux host because it checks the
