@@ -12,6 +12,9 @@ mod session;
 pub use session::{AuthSettings, LoginRateLimiter, change_password, login, logout, me};
 pub(crate) use session::{AuthenticatedUser, new_temporary_password, require_csrf};
 
+pub(crate) const MAX_PASSWORD_BYTES: usize = 1024;
+pub(crate) const MIN_PASSWORD_CHARS: usize = 12;
+
 pub async fn bootstrap_owner(
     pool: &PgPool,
     credentials: Option<&BootstrapOwner>,
@@ -43,6 +46,11 @@ pub async fn bootstrap_owner(
     if !valid_email(&email) {
         return Err(anyhow!(
             "BOOTSTRAP_OWNER_EMAIL is not a valid email address"
+        ));
+    }
+    if !valid_password(&credentials.password) {
+        return Err(anyhow!(
+            "BOOTSTRAP_OWNER_PASSWORD must be between 12 and 1024 bytes"
         ));
     }
 
@@ -84,6 +92,10 @@ pub(crate) fn valid_email(email: &str) -> bool {
         && !email.chars().any(char::is_whitespace)
 }
 
+pub(crate) fn valid_password(password: &str) -> bool {
+    password.len() <= MAX_PASSWORD_BYTES && password.chars().count() >= MIN_PASSWORD_CHARS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +113,12 @@ mod tests {
         assert!(!valid_email("owner@"));
         assert!(!valid_email("owner example@example.test"));
         assert!(valid_email("owner@example.test"));
+    }
+
+    #[test]
+    fn password_validation_matches_the_account_policy() {
+        assert!(!valid_password("short"));
+        assert!(valid_password("correct horse battery staple"));
+        assert!(!valid_password(&"x".repeat(MAX_PASSWORD_BYTES + 1)));
     }
 }

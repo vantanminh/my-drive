@@ -24,14 +24,14 @@ use sqlx::FromRow;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use super::valid_email;
+use super::{MAX_PASSWORD_BYTES, MIN_PASSWORD_CHARS, valid_email};
 use crate::health::AppState;
 
 const LOGIN_FAILURE_LIMIT: usize = 10;
 const LOGIN_FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MAX_LOGIN_IDENTITIES: usize = 10_000;
-const MAX_LOGIN_PASSWORD_BYTES: usize = 1024;
-const MIN_NEW_PASSWORD_CHARS: usize = 12;
+const MAX_LOGIN_PASSWORD_BYTES: usize = MAX_PASSWORD_BYTES;
+const MIN_NEW_PASSWORD_CHARS: usize = MIN_PASSWORD_CHARS;
 const SESSION_TOKEN_BYTES: usize = 32;
 const CSRF_TOKEN_BYTES: usize = 32;
 
