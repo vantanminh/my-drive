@@ -119,6 +119,7 @@ struct JobSummary {
     id: i64,
     file_id: uuid::Uuid,
     file_name: String,
+    task: String,
     state: String,
     attempts: i32,
     current_stage: Option<String>,
@@ -134,6 +135,7 @@ struct JobSummaryRow {
     id: i64,
     file_id: uuid::Uuid,
     file_name: String,
+    task: String,
     state: String,
     attempts: i32,
     current_stage: Option<String>,
@@ -180,7 +182,7 @@ async fn status(
     .await
     .map_err(AdminError::Database)?;
     let mut jobs = sqlx::query_as::<_, JobSummaryRow>(
-        "SELECT job.id, version.file_id, entry.name AS file_name, job.state, job.attempts, \
+        "SELECT job.id, version.file_id, entry.name AS file_name, job.task, job.state, job.attempts, \
                 job.current_stage, job.processed_bytes, version.size_bytes AS total_bytes, \
                 job.error_code, job.created_at, job.updated_at \
            FROM media_index_jobs AS job \
@@ -204,6 +206,7 @@ async fn status(
             id: job.id,
             file_id: job.file_id,
             file_name: job.file_name,
+            task: job.task,
             state: job.state,
             attempts: job.attempts,
             current_stage: job.current_stage,

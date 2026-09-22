@@ -323,7 +323,13 @@ async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
                     OR (job.state = 'running' AND job.lease_expires_at <= now()) \
                 ) \
                 AND EXISTS (SELECT 1 FROM media_index_control WHERE singleton = TRUE AND paused = FALSE) \
-              ORDER BY COALESCE(job.lease_expires_at, job.available_at), job.id \
+              ORDER BY CASE job.task \
+                           WHEN 'image_preview' THEN 0 \
+                           WHEN 'video_thumbnail' THEN 1 \
+                           WHEN 'face_index' THEN 2 \
+                           ELSE 3 \
+                       END, \
+                       COALESCE(job.lease_expires_at, job.available_at), job.id \
               LIMIT 1 FOR UPDATE SKIP LOCKED \
          ) \
          UPDATE media_index_jobs AS job \

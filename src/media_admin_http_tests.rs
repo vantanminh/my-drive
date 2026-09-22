@@ -99,6 +99,7 @@ async fn owner_can_inspect_and_control_media_index_jobs() {
     assert_eq!(status["processedBytes"], 0);
     assert_eq!(status["jobs"][0]["id"], job_id);
     assert_eq!(status["jobs"][0]["fileName"], "owner-image.jpg");
+    assert_eq!(status["jobs"][0]["task"], "image_preview");
     assert_eq!(status["jobs"][0]["totalBytes"], 8);
     assert_eq!(status["jobs"][0]["errorCode"], "processing_failed");
 

@@ -157,6 +157,15 @@ function mediaStageLabel(stage: string | null): string {
   return stage ? labels[stage] || 'Processing media' : 'Starting';
 }
 
+function mediaTaskLabel(task: string): string {
+  switch (task) {
+    case 'image_preview': return 'Image preview';
+    case 'video_thumbnail': return 'Video poster';
+    case 'face_index': return 'Face index';
+    default: return 'Media job';
+  }
+}
+
 function mediaFailureLabel(code: string | null): string {
   const labels: Record<string, string> = {
     unsupported_format: 'This media format is not supported for previews.',
@@ -328,7 +337,7 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
           <div className="media-index-active" aria-live="polite">
             <Activity size={16} />
             {activeJob ? (
-              <span><strong>{activeJob.fileName}</strong> · {mediaStageLabel(activeJob.currentStage)} · {formatSize(activeJob.processedBytes)} / {formatSize(activeJob.totalBytes)}</span>
+              <span><strong>{activeJob.fileName}</strong> · {mediaTaskLabel(activeJob.task)} · {mediaStageLabel(activeJob.currentStage)} · {formatSize(activeJob.processedBytes)} / {formatSize(activeJob.totalBytes)}</span>
             ) : <span>No media preview job is running right now.</span>}
           </div>
 
@@ -338,7 +347,7 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
               <ul>
                 {visibleFailures.map((job) => (
                   <li key={job.id}>
-                    <div><strong title={job.fileName}>{job.fileName}</strong><span>{mediaFailureLabel(job.errorCode)}</span></div>
+                    <div><strong title={job.fileName}>{job.fileName}</strong><span>{mediaTaskLabel(job.task)} · {mediaFailureLabel(job.errorCode)}</span></div>
                     <button
                       className="button button-secondary"
                       type="button"
