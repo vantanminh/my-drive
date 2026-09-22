@@ -335,3 +335,11 @@ export function thumbnailUrl(id: string): string {
 export function publicDownloadUrl(token: string, id: string): string {
   return '/api/public/shares/' + encodeURIComponent(token) + '/download/' + encodeURIComponent(id);
 }
+
+export function publicPreviewUrl(token: string, id: string): string {
+  return '/api/public/shares/' + encodeURIComponent(token) + '/preview/' + encodeURIComponent(id);
+}
+
+export function publicThumbnailUrl(token: string, id: string): string {
+  return '/api/public/shares/' + encodeURIComponent(token) + '/thumbnail/' + encodeURIComponent(id);
+}

@@ -49,11 +49,17 @@ function formatPlaybackTime(seconds: number): string {
 }
 
 type Props = {
-  entry: Entry;
+  entry: Pick<Entry, 'id' | 'name' | 'mime_detected' | 'size_bytes'>;
   onClose: () => void;
+  sources?: {
+    preview: string;
+    thumbnail?: string;
+    download?: string;
+  };
+  showDownload?: boolean;
 };
 
-export default function MediaViewer({ entry, onClose }: Props) {
+export default function MediaViewer({ entry, onClose, sources, showDownload = true }: Props) {
   const kind = mediaKindFor(entry) || 'image';
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
@@ -309,7 +315,7 @@ export default function MediaViewer({ entry, onClose }: Props) {
                 </label>
               </>
             )}
-            <a className="media-tool media-download" href={downloadUrl(entry.id)} aria-label="Download original" title="Download original"><Download size={17} /></a>
+            {showDownload && <a className="media-tool media-download" href={sources?.download ?? downloadUrl(entry.id)} aria-label="Download original" title="Download original"><Download size={17} /></a>}
             <button ref={closeButtonRef} className="media-tool media-close" onClick={onClose} aria-label="Close preview" title="Close preview"><X size={18} /></button>
           </div>
         </header>
@@ -319,13 +325,13 @@ export default function MediaViewer({ entry, onClose }: Props) {
             <div className="media-viewer-error" role="status">
               <strong>This file cannot be previewed in this browser.</strong>
               <span>The file is still available in its original format.</span>
-              <a className="button button-secondary" href={downloadUrl(entry.id)}><Download size={15} /> Download original</a>
+              {showDownload && <a className="button button-secondary" href={sources?.download ?? downloadUrl(entry.id)}><Download size={15} /> Download original</a>}
             </div>
           ) : kind === 'image' ? (
             <div className="media-image-scroll">
               <img
                 className="media-image"
-                src={previewUrl(entry.id)}
+                src={sources?.preview ?? previewUrl(entry.id)}
                 alt={entry.name}
                 onError={() => setLoadError(true)}
                 style={{ transform: `scale(${zoom}) rotate(${rotation}deg)` }}
@@ -335,8 +341,8 @@ export default function MediaViewer({ entry, onClose }: Props) {
             <video
               ref={videoRef}
               className="media-video"
-              src={previewUrl(entry.id)}
-              poster={thumbnailUrl(entry.id)}
+              src={sources?.preview ?? previewUrl(entry.id)}
+              poster={sources?.thumbnail ?? thumbnailUrl(entry.id)}
               controls
               playsInline
               preload="metadata"

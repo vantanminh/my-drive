@@ -63,6 +63,15 @@ async fn shares_enforce_owner_scope_password_expiry_download_limits_and_revoke()
         b"share content",
     )
     .await;
+    let (shared_image, _) = insert_file(
+        &pool,
+        &storage,
+        owner_id,
+        Some(nested_folder),
+        "shared.png",
+        b"\x89PNG\r\n\x1a\npreview",
+    )
+    .await;
     let (outside_file, _) =
         insert_file(&pool, &storage, owner_id, None, "outside.txt", b"outside").await;
     let app = make_app(pool.clone(), temporary_storage.path());
@@ -295,9 +304,31 @@ async fn shares_enforce_owner_scope_password_expiry_download_limits_and_revoke()
     )
     .await;
     assert_eq!(nested_view.status(), StatusCode::OK);
+    let nested_view = response_json(nested_view).await;
+    let nested_ids = nested_view["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect::<Vec<_>>();
+    let shared_file_id = shared_file.to_string();
+    let shared_image_id = shared_image.to_string();
+    assert!(nested_ids.contains(&shared_file_id.as_str()));
+    assert!(nested_ids.contains(&shared_image_id.as_str()));
+
+    let range_preview = request_with_cookie(
+        &app,
+        Method::GET,
+        &format!("{public_url}/preview/{shared_image}"),
+        &grant_cookie,
+        Some((RANGE, "bytes=0-7")),
+    )
+    .await;
+    assert_eq!(range_preview.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(range_preview.headers()[CONTENT_TYPE], "image/png");
     assert_eq!(
-        response_json(nested_view).await["entries"][0]["id"],
-        shared_file.to_string()
+        response_bytes(range_preview).await,
+        b"\x89PNG\r\n\x1a\n".to_vec()
     );
 
     let outside_download = request_with_cookie(

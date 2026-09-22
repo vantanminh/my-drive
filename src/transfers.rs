@@ -951,7 +951,7 @@ async fn thumbnail_head(
     thumbnail_response(&state, user.id, id, &headers, true).await
 }
 
-async fn thumbnail_response(
+pub(crate) async fn thumbnail_response(
     state: &AppState,
     owner_id: Uuid,
     id: Uuid,
@@ -1034,14 +1034,24 @@ async fn thumbnail_response(
     Ok(response)
 }
 
-async fn preview_response(
+pub(crate) async fn preview_response(
     state: &AppState,
     owner_id: Uuid,
     id: Uuid,
     request_headers: &HeaderMap,
     head_only: bool,
 ) -> Result<Response, TransferError> {
-    download_response_inner(state, owner_id, id, request_headers, head_only, true).await
+    download_response_inner(state, owner_id, id, request_headers, head_only, true, true).await
+}
+
+pub(crate) async fn preview_derivative_response(
+    state: &AppState,
+    owner_id: Uuid,
+    id: Uuid,
+    request_headers: &HeaderMap,
+    head_only: bool,
+) -> Result<Response, TransferError> {
+    download_response_inner(state, owner_id, id, request_headers, head_only, true, false).await
 }
 
 pub(crate) async fn download_response(
@@ -1051,7 +1061,7 @@ pub(crate) async fn download_response(
     request_headers: &HeaderMap,
     head_only: bool,
 ) -> Result<Response, TransferError> {
-    download_response_inner(state, owner_id, id, request_headers, head_only, false).await
+    download_response_inner(state, owner_id, id, request_headers, head_only, false, true).await
 }
 
 async fn download_response_inner(
@@ -1061,6 +1071,7 @@ async fn download_response_inner(
     request_headers: &HeaderMap,
     head_only: bool,
     inline_preview: bool,
+    allow_original_preview: bool,
 ) -> Result<Response, TransferError> {
     let entry = load_download_record(state, owner_id, id).await?;
     if entry.state != "ready" {
@@ -1091,7 +1102,18 @@ async fn download_response_inner(
                 representation_mime = Some("image/webp");
                 checksum = derivative_checksum;
             }
+            Ok(None) if !allow_original_preview => {
+                return Err(TransferError::UnsupportedPreview);
+            }
             Ok(None) => {}
+            Err(error) if !allow_original_preview => {
+                tracing::warn!(
+                    file_version_id = %entry.file_version_id,
+                    error = %error,
+                    "could not use indexed viewer derivative for derivative-only preview"
+                );
+                return Err(TransferError::UnsupportedPreview);
+            }
             Err(error) => tracing::warn!(
                 file_version_id = %entry.file_version_id,
                 error = %error,
@@ -1105,13 +1127,26 @@ async fn download_response_inner(
                 representation_mime = Some("video/mp4");
                 checksum = derivative_checksum;
             }
+            Ok(None) if !allow_original_preview => {
+                return Err(TransferError::UnsupportedPreview);
+            }
             Ok(None) => {}
+            Err(error) if !allow_original_preview => {
+                tracing::warn!(
+                    file_version_id = %entry.file_version_id,
+                    error = %error,
+                    "could not use indexed browser video derivative for derivative-only preview"
+                );
+                return Err(TransferError::UnsupportedPreview);
+            }
             Err(error) => tracing::warn!(
                 file_version_id = %entry.file_version_id,
                 error = %error,
                 "could not use indexed browser video derivative; serving original video"
             ),
         }
+    } else if inline_preview && !allow_original_preview {
+        return Err(TransferError::UnsupportedPreview);
     }
     let size = derivative_bytes
         .as_ref()

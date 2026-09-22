@@ -267,6 +267,14 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/public/shares/{token}/download/{entry_id}",
             get(download_shared),
         )
+        .route(
+            "/api/public/shares/{token}/preview/{entry_id}",
+            get(preview_shared),
+        )
+        .route(
+            "/api/public/shares/{token}/thumbnail/{entry_id}",
+            get(thumbnail_shared),
+        )
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 
@@ -641,6 +649,58 @@ async fn download_shared(
     }
     reserve_download(&state, &share, entry_id).await?;
     transfers::download_response(&state, share.owner_id, entry_id, &headers, false)
+        .await
+        .map_err(ShareError::Transfer)
+}
+
+async fn preview_shared(
+    State(state): State<AppState>,
+    Path((token, entry_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ShareError> {
+    let share = fetch_active_share(&state, &token).await?;
+    require_password_grant(&state, &headers, &share).await?;
+    if !file_in_share(
+        &state,
+        share.owner_id,
+        share.resource_type.as_str(),
+        share.resource_id,
+        entry_id,
+    )
+    .await?
+    {
+        return Err(ShareError::NotFound);
+    }
+    if share.allow_download {
+        transfers::preview_response(&state, share.owner_id, entry_id, &headers, false)
+            .await
+            .map_err(ShareError::Transfer)
+    } else {
+        transfers::preview_derivative_response(&state, share.owner_id, entry_id, &headers, false)
+            .await
+            .map_err(ShareError::Transfer)
+    }
+}
+
+async fn thumbnail_shared(
+    State(state): State<AppState>,
+    Path((token, entry_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ShareError> {
+    let share = fetch_active_share(&state, &token).await?;
+    require_password_grant(&state, &headers, &share).await?;
+    if !file_in_share(
+        &state,
+        share.owner_id,
+        share.resource_type.as_str(),
+        share.resource_id,
+        entry_id,
+    )
+    .await?
+    {
+        return Err(ShareError::NotFound);
+    }
+    transfers::thumbnail_response(&state, share.owner_id, entry_id, &headers, false)
         .await
         .map_err(ShareError::Transfer)
 }

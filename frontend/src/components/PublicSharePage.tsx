@@ -1,8 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { ArrowLeft, ArrowRight, Download, File, FileImage, FileSpreadsheet, FileText, Folder, LockKeyhole, ShieldCheck } from 'lucide-react';
-import { ApiError, api, publicDownloadUrl } from '../api';
+import { ArrowLeft, ArrowRight, Download, File, FileImage, FileSpreadsheet, FileText, Film, Folder, LockKeyhole, ShieldCheck } from 'lucide-react';
+import { ApiError, api, publicDownloadUrl, publicPreviewUrl, publicThumbnailUrl } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import type { PublicEntry, PublicShareView } from '../types';
+import MediaViewer, { mediaKindFor } from './MediaViewer';
 
 type Props = {
   token: string;
@@ -11,10 +12,15 @@ type Props = {
 function PublicFileIcon({ entry }: { entry: PublicEntry }) {
   if (entry.kind === 'folder') return <Folder size={21} className="file-icon folder-icon" />;
   const name = entry.name.toLowerCase();
-  if (/\.(png|jpe?g|gif|webp|svg)$/.test(name)) return <FileImage size={21} className="file-icon" />;
+  if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|heif)$/.test(name)) return <FileImage size={21} className="file-icon image-icon" />;
+  if (/\.(mp4|m4v|webm|mov|qt|mkv|mk3d|avi|ogv|ogg|mpg|mpeg|mpe|ts|mts|m2ts|flv|wmv|asf|3gp|3g2)$/.test(name)) return <Film size={21} className="file-icon video-icon" />;
   if (/\.(pdf|docx?|txt|md|rtf)$/.test(name)) return <FileText size={21} className="file-icon document-icon" />;
   if (/\.(xlsx?|csv|numbers)$/.test(name)) return <FileSpreadsheet size={21} className="file-icon sheet-icon" />;
   return <File size={21} className="file-icon" />;
+}
+
+function isPreviewable(entry: PublicEntry): boolean {
+  return entry.kind === 'file' && mediaKindFor({ name: entry.name, mime_detected: null }) !== null;
 }
 
 export default function PublicSharePage({ token }: Props) {
@@ -25,6 +31,7 @@ export default function PublicSharePage({ token }: Props) {
   const [needsPassword, setNeedsPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [viewer, setViewer] = useState<PublicEntry | null>(null);
 
   async function load(nextFolderId?: string) {
     setLoading(true);
@@ -160,9 +167,11 @@ export default function PublicSharePage({ token }: Props) {
                       <PublicFileIcon entry={entry} />
                       {entry.kind === 'folder' ? (
                         <button className="entry-name" onClick={() => void load(entry.id)}>{entry.name}</button>
-                      ) : (
-                        <span className="entry-name">{entry.name}</span>
-                      )}
+                      ) : isPreviewable(entry) ? (
+                          <button className="entry-name" onClick={() => setViewer(entry)}>{entry.name}</button>
+                        ) : (
+                          <span className="entry-name">{entry.name}</span>
+                        )}
                     </div>
                     <span className="entry-size">{entry.kind === 'folder' ? '—' : formatSize(entry.size_bytes)}</span>
                     <span className="entry-modified">{formatDate(entry.updated_at)}</span>
@@ -197,6 +206,18 @@ export default function PublicSharePage({ token }: Props) {
         </section>
       )}
       <footer className="public-footer">Shared with My Drive <span>·</span> Your files stay private</footer>
+      {viewer && (
+        <MediaViewer
+          entry={{ ...viewer, mime_detected: null }}
+          onClose={() => setViewer(null)}
+          sources={{
+            preview: publicPreviewUrl(token, viewer.id),
+            thumbnail: publicThumbnailUrl(token, viewer.id),
+            ...(view?.allow_download ? { download: publicDownloadUrl(token, viewer.id) } : {})
+          }}
+          showDownload={view?.allow_download ?? false}
+        />
+      )}
     </main>
   );
 }
