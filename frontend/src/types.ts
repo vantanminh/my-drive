@@ -20,6 +20,21 @@ export type ManagedAccountPage = {
   nextOffset: number | null;
 };
 
+export type FaceCluster = {
+  id: string;
+  label: string | null;
+  faceCount: number;
+  assetCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type FaceClusterPage = {
+  clusters: FaceCluster[];
+  limit: number;
+  nextOffset: number | null;
+};
+
 export type CreatedManagedAccount = {
   account: ManagedAccount;
   temporaryPassword: string;

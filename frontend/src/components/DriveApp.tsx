@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent,
 import {
   Activity, Check, ChevronDown, ChevronRight, CircleUserRound, CloudUpload, Download, Eye, File, FileImage, Film,
   FileSpreadsheet, FileText, Folder, FolderPlus, HardDrive, LockKeyhole, LogOut, MoreHorizontal,
-  Pause, Play, RotateCcw, Search, Share2, Trash2, Upload, Users, X
+  Pause, Play, RotateCcw, ScanFace, Search, Share2, Trash2, Upload, Users, X
 } from 'lucide-react';
 import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
@@ -10,6 +10,7 @@ import type { Entry, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
 import MediaViewer, { mediaKindFor } from './MediaViewer';
 import AccountManagementPanel from './AccountManagementPanel';
+import FaceManagementPanel from './FaceManagementPanel';
 
 type Props = {
   user: User;
@@ -452,6 +453,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [viewer, setViewer] = useState<Entry | null>(null);
   const [mediaIndexOpen, setMediaIndexOpen] = useState(false);
   const [accountAdminOpen, setAccountAdminOpen] = useState(false);
+  const [faceAdminOpen, setFaceAdminOpen] = useState(false);
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
     readSavedUploads().map((saved) => ({
@@ -552,6 +554,11 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     setSection(sectionValue);
     setQuery('');
     if (sectionValue !== 'drive') setBreadcrumbs([]);
+    if (sectionValue !== 'drive') {
+      setMediaIndexOpen(false);
+      setAccountAdminOpen(false);
+      setFaceAdminOpen(false);
+    }
     setError('');
     setNotice('');
   }
@@ -892,6 +899,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                   setBreadcrumbs([]);
                   setQuery('');
                   setMediaIndexOpen(false);
+                  setFaceAdminOpen(false);
                   setAccountAdminOpen(true);
                 }}><Users size={15} /> Manage accounts</button>
                 <div className="menu-divider" />
@@ -946,10 +954,27 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     aria-label={mediaIndexOpen ? 'Hide media indexing controls' : 'Show media indexing controls'}
                     onClick={() => {
                       setAccountAdminOpen(false);
+                      setFaceAdminOpen(false);
                       setMediaIndexOpen((open) => !open);
                     }}
                   >
-                    <Activity size={16} /> <span>{mediaIndexOpen ? 'Hide indexing' : 'Image indexing'}</span>
+                    <Activity size={16} /> <span>{mediaIndexOpen ? 'Hide indexing' : 'Media indexing'}</span>
+                  </button>
+                ) : null}
+                {user.role === 'owner' ? (
+                  <button
+                    className="button button-secondary face-admin-trigger"
+                    type="button"
+                    aria-expanded={faceAdminOpen}
+                    aria-controls={faceAdminOpen ? 'face-admin-panel' : undefined}
+                    aria-label={faceAdminOpen ? 'Hide face group controls' : 'Show face group controls'}
+                    onClick={() => {
+                      setAccountAdminOpen(false);
+                      setMediaIndexOpen(false);
+                      setFaceAdminOpen((open) => !open);
+                    }}
+                  >
+                    <ScanFace size={16} /> <span>{faceAdminOpen ? 'Hide faces' : 'Face groups'}</span>
                   </button>
                 ) : null}
                 <button className="button button-secondary" onClick={() => setModal({ kind: 'new-folder' })}>
@@ -979,6 +1004,8 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             user.role === 'owner' ? (
               accountAdminOpen ? (
                 <AccountManagementPanel onClose={() => setAccountAdminOpen(false)} />
+              ) : faceAdminOpen ? (
+                <FaceManagementPanel onClose={() => setFaceAdminOpen(false)} />
               ) : mediaIndexOpen ? <MediaIndexPanel onClose={() => setMediaIndexOpen(false)} /> : null
             ) : null
           ) : null}

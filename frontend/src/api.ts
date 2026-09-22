@@ -3,6 +3,7 @@ import type {
   CreatedManagedAccount,
   Entry,
   EntryPage,
+  FaceClusterPage,
   ManagedAccountPage,
   PublicShareView,
   ShareList,
@@ -142,6 +143,25 @@ export const api = {
     request<void>('/api/admin/accounts/' + encodeURIComponent(id), {
       method: 'PATCH',
       json: update,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  faceClusters: (offset = 0, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: '50' });
+    if (offset) query.set('offset', String(offset));
+    return request<FaceClusterPage>('/api/faces?' + query.toString(), { signal, cache: 'no-store' });
+  },
+  renameFaceCluster: (id: string, label: string | null) =>
+    request<{ id: string; label: string | null }>('/api/faces/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      json: { label },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  mergeFaceClusters: (targetId: string, sourceIds: string[]) =>
+    request<{ targetId: string; mergedClusters: number; movedFaces: number }>('/api/faces/merge', {
+      method: 'POST',
+      json: { targetId, sourceIds },
       csrf: true,
       cache: 'no-store'
     }),
