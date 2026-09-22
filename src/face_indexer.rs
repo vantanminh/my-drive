@@ -6,14 +6,17 @@ use thiserror::Error;
 pub(crate) const DEFAULT_MODEL_PATH: &str = "/usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin";
 pub(crate) const MAX_FRAME_SIDE: u32 = 1280;
 pub(crate) const MAX_FRAME_BYTES: usize = (MAX_FRAME_SIDE as usize) * (MAX_FRAME_SIDE as usize);
+pub(crate) const DESCRIPTOR_SIDE: u32 = 16;
+pub(crate) const DESCRIPTOR_LEN: usize = (DESCRIPTOR_SIDE as usize) * (DESCRIPTOR_SIDE as usize);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct DetectedFace {
     pub(crate) left: f32,
     pub(crate) top: f32,
     pub(crate) width: f32,
     pub(crate) height: f32,
     pub(crate) confidence: f32,
+    pub(crate) descriptor: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -133,9 +136,78 @@ pub(crate) fn detect(
                 width,
                 height,
                 confidence: (score / 10.0).clamp(0.0, 1.0),
+                descriptor: sample_descriptor(&frame, left, top, width, height),
             })
         })
         .collect())
+}
+
+/// Build a small contrast-normalized face descriptor without a neural
+/// embedding model. Sampling only 16x16 grayscale pixels keeps CPU and storage
+/// bounded on the low-power indexer while still giving repeated photographs a
+/// stable appearance signature. The descriptor is an implementation detail;
+/// callers must not expose it through an API.
+fn sample_descriptor(frame: &GrayFrame, left: f32, top: f32, width: f32, height: f32) -> Vec<u8> {
+    let x0 = ((left.clamp(0.0, 1.0) * frame.width as f32).floor() as u32)
+        .min(frame.width.saturating_sub(1));
+    let y0 = ((top.clamp(0.0, 1.0) * frame.height as f32).floor() as u32)
+        .min(frame.height.saturating_sub(1));
+    let x1 = (((left + width).clamp(0.0, 1.0) * frame.width as f32).ceil() as u32)
+        .max(x0.saturating_add(1))
+        .min(frame.width);
+    let y1 = (((top + height).clamp(0.0, 1.0) * frame.height as f32).ceil() as u32)
+        .max(y0.saturating_add(1))
+        .min(frame.height);
+    let sample_width = x1.saturating_sub(x0).max(1);
+    let sample_height = y1.saturating_sub(y0).max(1);
+    let mut samples = [0_u8; DESCRIPTOR_LEN];
+    let mut sum = 0_u64;
+    for row in 0..DESCRIPTOR_SIDE {
+        for column in 0..DESCRIPTOR_SIDE {
+            let x = x0.saturating_add(
+                ((u64::from(column) * 2 + 1) * u64::from(sample_width)
+                    / u64::from(DESCRIPTOR_SIDE * 2))
+                .min(u64::from(sample_width.saturating_sub(1))) as u32,
+            );
+            let y = y0.saturating_add(
+                ((u64::from(row) * 2 + 1) * u64::from(sample_height)
+                    / u64::from(DESCRIPTOR_SIDE * 2))
+                .min(u64::from(sample_height.saturating_sub(1))) as u32,
+            );
+            let index = usize::try_from(y)
+                .ok()
+                .and_then(|y| {
+                    usize::try_from(x)
+                        .ok()
+                        .and_then(|x| y.checked_mul(frame.width as usize)?.checked_add(x))
+                })
+                .unwrap_or(0)
+                .min(frame.pixels.len().saturating_sub(1));
+            let offset = usize::try_from(row * DESCRIPTOR_SIDE + column).unwrap_or(0);
+            samples[offset] = frame.pixels[index];
+            sum = sum.saturating_add(u64::from(samples[offset]));
+        }
+    }
+
+    let count = DESCRIPTOR_LEN as f64;
+    let mean = sum as f64 / count;
+    let variance = samples
+        .iter()
+        .map(|sample| {
+            let delta = f64::from(*sample) - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / count;
+    let standard_deviation = variance.sqrt().max(1.0);
+    samples
+        .iter()
+        .map(|sample| {
+            ((f64::from(*sample) - mean) * 48.0 / standard_deviation + 128.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        })
+        .collect()
 }
 
 fn parse_dimension(token: Option<&[u8]>) -> Result<u32, FaceDetectionError> {
@@ -171,7 +243,7 @@ fn next_token<'a>(bytes: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_FRAME_SIDE, parse_pgm};
+    use super::{parse_pgm, sample_descriptor, GrayFrame, DESCRIPTOR_LEN, MAX_FRAME_SIDE};
 
     #[test]
     fn parses_bounded_binary_pgm_with_comments() {
@@ -192,5 +264,34 @@ mod tests {
         assert!(parse_pgm(b"P2\n1 1\n255\n0").is_err());
         let header = format!("P5\n{} 1\n255\n", MAX_FRAME_SIDE + 1);
         assert!(parse_pgm(header.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn descriptor_is_bounded_and_contrast_normalized() {
+        let frame = GrayFrame {
+            width: 32,
+            height: 32,
+            pixels: (0..1024).map(|value| (value % 251) as u8).collect(),
+        };
+        let descriptor = sample_descriptor(&frame, 0.25, 0.25, 0.5, 0.5);
+        assert_eq!(descriptor.len(), DESCRIPTOR_LEN);
+        assert!(descriptor.iter().any(|value| *value != 128));
+    }
+
+    #[test]
+    fn descriptor_is_stable_for_identical_crop_and_changes_for_other_crop() {
+        let pixels = (0..4096)
+            .map(|value| ((value * 17 + value / 31) % 251) as u8)
+            .collect();
+        let frame = GrayFrame {
+            width: 64,
+            height: 64,
+            pixels,
+        };
+        let first = sample_descriptor(&frame, 0.1, 0.1, 0.3, 0.3);
+        let same = sample_descriptor(&frame, 0.1, 0.1, 0.3, 0.3);
+        let other = sample_descriptor(&frame, 0.6, 0.6, 0.3, 0.3);
+        assert_eq!(first, same);
+        assert_ne!(first, other);
     }
 }
