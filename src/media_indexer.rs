@@ -35,6 +35,7 @@ const VIDEO_POSTER_MAX_BYTES: usize = 512 * 1024;
 const VIDEO_PREVIEW_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FACE_MATCH_CANDIDATES: i64 = 512;
 const FACE_DESCRIPTOR_DISTANCE_THRESHOLD: u32 = 42;
+const MAX_FACE_OBSERVATIONS_PER_FILE: usize = 64;
 
 #[derive(Debug, Error)]
 enum WorkerError {
@@ -621,16 +622,7 @@ async fn process_face_job(
     set_stage(pool, job, "extracting_face_frame", actual_size)
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
-    let frame_path = TempPath::create("pgm").map_err(|_| retryable("face_index_unavailable"))?;
-    extract_gray_frame(input_path.path(), frame_path.path())
-        .await
-        .map_err(|error| {
-            tracing::warn!(job_id = job.id, error = ?error, "face frame extraction failed");
-            map_face_tool_error(error)
-        })?;
-    let frame_bytes = tokio_fs::read(frame_path.path())
-        .await
-        .map_err(|_| retryable("face_index_unavailable"))?;
+    let frame_bytes = extract_face_frames(input_path.path(), mime, job.id).await?;
     let model_path = std::env::var_os("FACE_DETECTOR_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_PATH));
@@ -638,12 +630,18 @@ async fn process_face_job(
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
     let detections = tokio::task::spawn_blocking(move || {
-        let frame = face_indexer::parse_pgm(&frame_bytes)?;
-        face_indexer::detect(&model_path, frame)
+        let frames = frame_bytes
+            .iter()
+            .map(|bytes| face_indexer::parse_pgm(bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        face_indexer::detect_frames(&model_path, &frames)
     })
     .await
     .map_err(|_| retryable("face_index_unavailable"))?
-    .map_err(map_face_detection_error)?;
+    .map_err(map_face_detection_error)?
+    .into_iter()
+    .take(MAX_FACE_OBSERVATIONS_PER_FILE)
+    .collect::<Vec<_>>();
 
     if !owns_lease(pool, job).await.unwrap_or(false) {
         return Err(retryable("face_index_unavailable"));
@@ -1285,9 +1283,88 @@ async fn transcode_video_preview(input: &Path, output: &Path) -> Result<(), Tool
     }
 }
 
-async fn extract_gray_frame(input: &Path, output: &Path) -> Result<(), ToolError> {
+fn face_seek_points(duration: Option<f64>) -> Vec<f64> {
+    let Some(duration) = duration.filter(|value| value.is_finite() && *value > 2.0) else {
+        return vec![0.0];
+    };
+    vec![0.0, duration * 0.5, duration * 0.9]
+}
+
+async fn video_face_seek_points(input: &Path) -> Vec<f64> {
+    let Some(input) = input.to_str() else {
+        return vec![0.0];
+    };
+    let output = timeout(
+        TOOL_TIMEOUT.min(Duration::from_secs(15)),
+        Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                input,
+            ])
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output(),
+    )
+    .await;
+    let duration = output
+        .ok()
+        .and_then(Result::ok)
+        .filter(|result| result.status.success())
+        .and_then(|result| String::from_utf8(result.stdout).ok())
+        .and_then(|value| value.trim().parse::<f64>().ok());
+    face_seek_points(duration)
+}
+
+async fn extract_face_frames(
+    input: &Path,
+    mime: &str,
+    job_id: i64,
+) -> Result<Vec<Vec<u8>>, JobFailure> {
+    let seek_points = if supports_video_mime(mime) {
+        video_face_seek_points(input).await
+    } else {
+        vec![0.0]
+    };
+    let mut frames = Vec::with_capacity(seek_points.len());
+    let mut first_error = None;
+    for seek in seek_points {
+        let frame_path =
+            TempPath::create("pgm").map_err(|_| retryable("face_index_unavailable"))?;
+        match extract_gray_frame(input, frame_path.path(), seek).await {
+            Ok(()) => {
+                let bytes = tokio_fs::read(frame_path.path())
+                    .await
+                    .map_err(|_| retryable("face_index_unavailable"))?;
+                frames.push(bytes);
+            }
+            Err(error) => {
+                tracing::warn!(job_id, seek, error = ?error, "face frame extraction failed");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if frames.is_empty() {
+        return Err(map_face_tool_error(
+            first_error.unwrap_or(ToolError::Failed),
+        ));
+    }
+    Ok(frames)
+}
+
+async fn extract_gray_frame(
+    input: &Path,
+    output: &Path,
+    seek_seconds: f64,
+) -> Result<(), ToolError> {
     let input = input.to_str().ok_or(ToolError::InvalidOutput)?;
     let output = output.to_str().ok_or(ToolError::InvalidOutput)?;
+    let seek = format!("{seek_seconds:.3}");
     let mut command = Command::new("ffmpeg");
     command
         .args([
@@ -1308,7 +1385,7 @@ async fn extract_gray_frame(input: &Path, output: &Path) -> Result<(), ToolError
             "-analyzeduration",
             "2M",
             "-ss",
-            "0",
+            &seek,
             "-i",
             input,
             "-map",
@@ -1669,9 +1746,10 @@ fn retryable(code: &'static str) -> JobFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        FaceClusterCandidate, backfill_batch, claim_one, descriptor_distance, matches_magic,
-        matching_cluster, record_failure, retryable, run_once, supports_ffmpeg_image_mime,
-        supports_image_mime, supports_video_mime, validate_metadata_free_webp,
+        FaceClusterCandidate, backfill_batch, claim_one, descriptor_distance, face_seek_points,
+        matches_magic, matching_cluster, record_failure, retryable, run_once,
+        supports_ffmpeg_image_mime, supports_image_mime, supports_video_mime,
+        validate_metadata_free_webp,
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
     use std::net::SocketAddr;
@@ -1706,6 +1784,18 @@ mod tests {
             assert!(supports_ffmpeg_image_mime(mime), "{mime}");
         }
         assert!(!supports_ffmpeg_image_mime("image/jpeg"));
+    }
+
+    #[test]
+    fn video_face_sampling_is_bounded_and_falls_back_to_first_frame() {
+        assert_eq!(face_seek_points(None), vec![0.0]);
+        assert_eq!(face_seek_points(Some(2.0)), vec![0.0]);
+        let points = face_seek_points(Some(120.0));
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0], 0.0);
+        assert_eq!(points[1], 60.0);
+        assert_eq!(points[2], 108.0);
+        assert!(points.iter().all(|point| *point <= 120.0));
     }
 
     #[test]

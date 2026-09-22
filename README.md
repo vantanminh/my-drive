@@ -299,12 +299,13 @@ at 24 MiB,
 and processing is bounded by the worker timeout and one decoder thread. It
 also extracts one bounded first-frame WebP poster for MP4, WebM, QuickTime
 (MOV), Matroska (MKV), AVI, OGG/Theora, MPEG, MPEG-TS, FLV, WMV, and 3GP
-uploads with a single ffmpeg worker thread. Face indexing queues the same bounded first
-frame for supported images and videos, runs the bundled CPU SeetaFace detector
-at a maximum 1280-pixel frame side, and stores owner-scoped bounding boxes and
-confidence values. The face screen can merge those detections into a labelled
-group; this slice does not persist biometric embeddings or perform automatic
-identity matching. The detector model is pinned and checksum-verified during
+uploads with a single ffmpeg worker thread. Face indexing uses one bounded frame
+for images and up to three duration-based samples for videos, runs the bundled
+CPU SeetaFace detector at a maximum 1280-pixel frame side, and stores owner-scoped
+bounding boxes and confidence values, plus a compact internal descriptor for
+bounded identity grouping. The face screen can label or merge those
+owner-scoped groups; the descriptor is never returned by the API. The detector
+model is pinned and checksum-verified during
 the Docker build; its BSD-2-Clause notice is in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 Compose creates a limited PostgreSQL role for the worker after the app has

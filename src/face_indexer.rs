@@ -84,9 +84,9 @@ pub(crate) fn parse_pgm(bytes: &[u8]) -> Result<GrayFrame, FaceDetectionError> {
     })
 }
 
-pub(crate) fn detect(
+pub(crate) fn detect_frames(
     model_path: &Path,
-    frame: GrayFrame,
+    frames: &[GrayFrame],
 ) -> Result<Vec<DetectedFace>, FaceDetectionError> {
     if !model_path.is_file() {
         return Err(FaceDetectionError::ModelUnavailable(io::Error::new(
@@ -106,13 +106,12 @@ pub(crate) fn detect(
     detector.set_score_thresh(2.8);
     detector.set_pyramid_scale_factor(0.8);
     detector.set_slide_window_step(4, 4);
-    let image = ImageData::new(&frame.pixels, frame.width, frame.height);
-    let mut faces = detector.detect(&image);
-    faces.sort_by(|left, right| right.score().total_cmp(&left.score()));
-    Ok(faces
-        .into_iter()
-        .take(32)
-        .filter_map(|face| {
+    let mut detected = Vec::new();
+    for frame in frames {
+        let image = ImageData::new(&frame.pixels, frame.width, frame.height);
+        let mut faces = detector.detect(&image);
+        faces.sort_by(|left, right| right.score().total_cmp(&left.score()));
+        detected.extend(faces.into_iter().take(32).filter_map(|face| {
             let bbox = face.bbox();
             let left = bbox.x().max(0) as f32 / frame.width as f32;
             let top = bbox.y().max(0) as f32 / frame.height as f32;
@@ -136,10 +135,11 @@ pub(crate) fn detect(
                 width,
                 height,
                 confidence: (score / 10.0).clamp(0.0, 1.0),
-                descriptor: sample_descriptor(&frame, left, top, width, height),
+                descriptor: sample_descriptor(frame, left, top, width, height),
             })
-        })
-        .collect())
+        }));
+    }
+    Ok(detected)
 }
 
 /// Build a small contrast-normalized face descriptor without a neural
