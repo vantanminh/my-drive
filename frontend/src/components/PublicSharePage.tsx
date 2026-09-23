@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { ArrowLeft, ArrowRight, Download, File, FileImage, FileSpreadsheet, FileText, Film, Folder, LockKeyhole, ShieldCheck } from 'lucide-react';
 import { ApiError, api, publicDownloadUrl, publicPreviewUrl, publicThumbnailUrl } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
-import type { PublicEntry, PublicShareView } from '../types';
+import { buildPublicPath, navigateTo, parsePublicRoute, useBrowserHref } from '../route';
+import type { Breadcrumb, PublicEntry, PublicShareView } from '../types';
 import MediaViewer, { mediaKindFor } from './MediaViewer';
 
 type Props = {
@@ -24,24 +25,33 @@ function isPreviewable(entry: PublicEntry): boolean {
 }
 
 export default function PublicSharePage({ token }: Props) {
+  const href = useBrowserHref();
+  const route = useMemo(() => {
+    const search = href.includes('?') ? href.slice(href.indexOf('?')) : '';
+    const pathname = href.includes('?') ? href.slice(0, href.indexOf('?')) : href;
+    return parsePublicRoute(pathname, search);
+  }, [href]);
+  const requestedFolderId = route && route.token === token ? route.folderIds.at(-1) : undefined;
   const [view, setView] = useState<PublicShareView | null>(null);
-  const [folderId, setFolderId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const [password, setPassword] = useState('');
   const [needsPassword, setNeedsPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [viewer, setViewer] = useState<PublicEntry | null>(null);
+  const loadRequest = useRef(0);
 
   async function load(nextFolderId?: string) {
+    const requestId = ++loadRequest.current;
     setLoading(true);
     setError('');
     try {
       const result = await api.publicShare(token, nextFolderId);
+      if (requestId !== loadRequest.current) return;
       setView(result);
-      setFolderId(nextFolderId);
       setNeedsPassword(false);
     } catch (cause) {
+      if (requestId !== loadRequest.current) return;
       if (cause instanceof ApiError && cause.code === 'password_required') {
         setNeedsPassword(true);
         setView(null);
@@ -49,15 +59,50 @@ export default function PublicSharePage({ token }: Props) {
         setError(friendlyError(cause));
       }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequest.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    void load();
-    // A public URL has a fixed token for the lifetime of this page.
+    void load(requestedFolderId);
+    // The token identifies the share; the folder id comes from the address bar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [token, requestedFolderId]);
+
+  useEffect(() => {
+    if (!view) return;
+    const currentId = view.current_folder;
+    if (requestedFolderId && currentId !== requestedFolderId) return;
+    if (!requestedFolderId && view.resource.kind === 'folder' && currentId && currentId !== view.resource.id) return;
+    const nested = view.resource.kind === 'folder' ? view.breadcrumbs.slice(1) : [];
+    const rows = view.resource.kind === 'file' ? [view.resource] : view.entries;
+    const fileId = route?.fileId && rows.some((entry) => entry.id === route.fileId && entry.kind === 'file')
+      ? route.fileId
+      : null;
+    navigateTo(buildPublicPath(token, nested, fileId), 'replace');
+    document.title = (view.resource.kind === 'file'
+      ? view.resource.name
+      : view.breadcrumbs.at(-1)?.name || view.resource.name) + ' · Shared · My Drive';
+  }, [requestedFolderId, route?.fileId, token, view]);
+
+  useEffect(() => {
+    if (!view || !route?.fileId) {
+      setViewer(null);
+      return;
+    }
+    const rows = view.resource.kind === 'file' ? [view.resource] : view.entries;
+    const match = rows.find((entry) => entry.id === route.fileId && entry.kind === 'file');
+    setViewer(match ?? null);
+  }, [route?.fileId, view]);
+
+  function openFolder(entry: PublicEntry) {
+    const nested = view?.breadcrumbs.slice(1) ?? [];
+    navigateTo(buildPublicPath(token, [...nested, { id: entry.id, name: entry.name }], null));
+  }
+
+  function openCrumb(index: number, crumbs: Breadcrumb[]) {
+    navigateTo(buildPublicPath(token, crumbs.slice(1, index + 1), null));
+  }
 
   async function unlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -66,7 +111,7 @@ export default function PublicSharePage({ token }: Props) {
     try {
       await api.unlockShare(token, password);
       setPassword('');
-      await load();
+      await load(requestedFolderId);
     } catch (cause) {
       setError(friendlyError(cause));
     } finally {
@@ -123,13 +168,7 @@ export default function PublicSharePage({ token }: Props) {
             <>
               <div className="public-heading">
                 <div>
-                  <button className="back-link" onClick={() => {
-                    if (view.breadcrumbs.length > 1) {
-                      void load(view.breadcrumbs[view.breadcrumbs.length - 2].id);
-                    } else {
-                      void load();
-                    }
-                  }} disabled={!folderId}>
+                  <button className="back-link" onClick={() => openCrumb(Math.max(view.breadcrumbs.length - 2, 0), view.breadcrumbs)} disabled={view.breadcrumbs.length <= 1}>
                     <ArrowLeft size={16} /> Back to shared folder
                   </button>
                   <div className="public-title-line">
@@ -152,7 +191,7 @@ export default function PublicSharePage({ token }: Props) {
                   {view.breadcrumbs.map((crumb, index) => (
                     <span className="breadcrumb-item" key={crumb.id}>
                       {index > 0 && <span className="breadcrumb-slash">/</span>}
-                      <button onClick={() => void load(crumb.id)}>{crumb.name}</button>
+                      <button onClick={() => openCrumb(index, view.breadcrumbs)}>{crumb.name}</button>
                     </span>
                   ))}
                 </nav>
@@ -166,9 +205,9 @@ export default function PublicSharePage({ token }: Props) {
                     <div className="entry-main">
                       <PublicFileIcon entry={entry} />
                       {entry.kind === 'folder' ? (
-                        <button className="entry-name" onClick={() => void load(entry.id)}>{entry.name}</button>
-                      ) : isPreviewable(entry) ? (
-                          <button className="entry-name" onClick={() => setViewer(entry)}>{entry.name}</button>
+                        <button className="entry-name" onClick={() => openFolder(entry)}>{entry.name}</button>
+                        ) : isPreviewable(entry) ? (
+                          <button className="entry-name" onClick={() => navigateTo(buildPublicPath(token, view.breadcrumbs.slice(1), entry.id), 'replace')}>{entry.name}</button>
                         ) : (
                           <span className="entry-name">{entry.name}</span>
                         )}
@@ -200,7 +239,7 @@ export default function PublicSharePage({ token }: Props) {
             <div className="public-error" role="alert">
               <h1>Link unavailable</h1>
               <p>{error}</p>
-              <button className="button button-secondary" onClick={() => void load(folderId)}>Try again</button>
+              <button className="button button-secondary" onClick={() => void load(requestedFolderId)}>Try again</button>
             </div>
           )}
         </section>
@@ -209,7 +248,7 @@ export default function PublicSharePage({ token }: Props) {
       {viewer && (
         <MediaViewer
           entry={{ ...viewer, mime_detected: null }}
-          onClose={() => setViewer(null)}
+          onClose={() => navigateTo(buildPublicPath(token, view?.breadcrumbs.slice(1) ?? [], null), 'replace')}
           sources={{
             preview: publicPreviewUrl(token, viewer.id),
             thumbnail: publicThumbnailUrl(token, viewer.id),

@@ -1,24 +1,27 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from './api';
 import LoginPage from './components/LoginPage';
 import PublicSharePage from './components/PublicSharePage';
 import DriveApp from './components/DriveApp';
 import PasswordChangePage from './components/PasswordChangePage';
+import { parsePublicRoute, useBrowserHref } from './route';
 import type { User } from './types';
 
-function publicTokenFromPath(): string | null {
-  const match = window.location.pathname.match(/^\/s\/([^/]+)\/?$/);
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
 export default function App() {
-  const publicToken = publicTokenFromPath();
+  const href = useBrowserHref();
+  const publicRoute = useMemo(() => {
+    const search = href.includes('?') ? href.slice(href.indexOf('?')) : '';
+    const pathname = href.includes('?') ? href.slice(0, href.indexOf('?')) : href;
+    return parsePublicRoute(pathname, search);
+  }, [href]);
   const [user, setUser] = useState<User | null>(null);
-  const [checkingSession, setCheckingSession] = useState(!publicToken);
+  const [checkingSession, setCheckingSession] = useState(!publicRoute);
 
   useEffect(() => {
-    if (publicToken) return;
+    if (publicRoute) return;
+    if (user) return;
     const controller = new AbortController();
+    setCheckingSession(true);
     api.me(controller.signal)
       .then(setUser)
       .catch((error: unknown) => {
@@ -28,9 +31,9 @@ export default function App() {
       })
       .finally(() => setCheckingSession(false));
     return () => controller.abort();
-  }, [publicToken]);
+  }, [publicRoute, user]);
 
-  if (publicToken) return <PublicSharePage token={publicToken} />;
+  if (publicRoute) return <PublicSharePage token={publicRoute.token} />;
   if (checkingSession) {
     return <main className="app-loading"><span className="spinner" />Opening your drive…</main>;
   }

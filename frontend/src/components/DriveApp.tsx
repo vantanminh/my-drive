@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
+import { buildDrivePath, clearSearchParam, navigateTo, parseDriveRoute, useBrowserHref, type DrivePanel } from '../route';
 import type { Entry, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
 import MediaViewer, { mediaKindFor } from './MediaViewer';
@@ -126,6 +127,21 @@ function EntryVisual({ entry, showThumbnail }: { entry: Entry; showThumbnail: bo
       ) : null}
     </span>
   );
+}
+
+async function folderChain(leafId: string): Promise<Breadcrumb[]> {
+  const chain: Breadcrumb[] = [];
+  const seen = new Set<string>();
+  let current = await api.getEntry(leafId);
+  while (true) {
+    if (current.deleted_at || current.kind !== 'folder' || seen.has(current.id)) {
+      throw new ApiError(404, 'not_found');
+    }
+    seen.add(current.id);
+    chain.unshift({ id: current.id, name: current.name });
+    if (!current.parent_id) return chain;
+    current = await api.getEntry(current.parent_id);
+  }
 }
 
 function displayShareStatus(share: ShareSummary): { label: string; className: string } {
@@ -470,10 +486,26 @@ function EntryMenu({
 }
 
 export default function DriveApp({ user, onLoggedOut }: Props) {
-  const [section, setSection] = useState<Section>('drive');
+  const href = useBrowserHref();
+  const route = useMemo(() => {
+    const search = href.includes('?') ? href.slice(href.indexOf('?')) : '';
+    const pathname = href.includes('?') ? href.slice(0, href.indexOf('?')) : href;
+    return parseDriveRoute(pathname, search);
+  }, [href]);
+  const section = route.section;
+  const panel: DrivePanel = section === 'drive' && user.role === 'owner' ? route.panel : null;
+  const query = section === 'drive' ? route.query : '';
   const [breadcrumbs, setBreadcrumbs] = useState<Breadcrumb[]>([]);
-  const currentFolderId = breadcrumbs.length ? breadcrumbs[breadcrumbs.length - 1].id : null;
-  const [query, setQuery] = useState('');
+  const breadcrumbsRef = useRef<Breadcrumb[]>([]);
+  const locationExtras = useRef({ panel, query, fileId: route.fileId });
+  locationExtras.current = { panel, query, fileId: route.fileId };
+  const folderKey = route.folderIds.join('/');
+  const pathReady = section !== 'drive' || route.folderIds.length === 0 || breadcrumbs.map((crumb) => crumb.id).join('/') === folderKey;
+  const currentFolderId = section !== 'drive'
+    ? null
+    : pathReady
+      ? (breadcrumbs.at(-1)?.id ?? null)
+      : (route.folderIds.at(-1) ?? null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [shares, setShares] = useState<ShareSummary[]>([]);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
@@ -485,9 +517,9 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [modal, setModal] = useState<Modal>(null);
   const [shareTarget, setShareTarget] = useState<Entry | null>(null);
   const [viewer, setViewer] = useState<Entry | null>(null);
-  const [mediaIndexOpen, setMediaIndexOpen] = useState(false);
-  const [accountAdminOpen, setAccountAdminOpen] = useState(false);
-  const [faceAdminOpen, setFaceAdminOpen] = useState(false);
+  const accountAdminOpen = panel === 'accounts';
+  const faceAdminOpen = panel === 'faces';
+  const mediaIndexOpen = panel === 'indexing';
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
     readSavedUploads().map((saved) => ({
@@ -506,8 +538,112 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘ K' : 'Ctrl K';
   const activeSectionLabel = section === 'drive'
-    ? (currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : 'My Drive')
+    ? (!pathReady ? 'Opening folder…' : currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : 'My Drive')
     : section === 'shared' ? 'Shared links' : 'Trash';
+
+  function showDrive(
+    overrides: { folders?: Breadcrumb[]; panel?: DrivePanel; query?: string; fileId?: string | null },
+    mode: 'push' | 'replace' = 'push'
+  ) {
+    const folders = overrides.folders ?? breadcrumbsRef.current;
+    breadcrumbsRef.current = folders;
+    setBreadcrumbs(folders);
+    navigateTo(buildDrivePath({
+      section: 'drive',
+      folderIds: folders.map((folder) => folder.id),
+      panel: overrides.panel === undefined ? panel : overrides.panel,
+      query: overrides.query === undefined ? query : overrides.query,
+      fileId: overrides.fileId === undefined ? (section === 'drive' ? route.fileId : null) : overrides.fileId
+    }, folders), mode);
+  }
+
+  useEffect(() => {
+    const title = (panel === 'accounts'
+      ? 'Accounts'
+      : panel === 'faces'
+        ? 'Face groups'
+        : panel === 'indexing'
+          ? 'Media indexing'
+          : activeSectionLabel) + ' · My Drive';
+    document.title = !panel && activeSectionLabel === 'My Drive' ? 'My Drive' : title;
+  }, [activeSectionLabel, panel]);
+
+  useEffect(() => {
+    if (section !== 'drive' || route.folderIds.length === 0) {
+      if (breadcrumbsRef.current.length) {
+        breadcrumbsRef.current = [];
+        setBreadcrumbs([]);
+      }
+      return;
+    }
+    if (breadcrumbsRef.current.map((crumb) => crumb.id).join('/') === folderKey) return;
+    let cancelled = false;
+    folderChain(route.folderIds[route.folderIds.length - 1])
+      .then((chain) => {
+        if (cancelled) return;
+        breadcrumbsRef.current = chain;
+        setBreadcrumbs(chain);
+        const resolvedKey = chain.map((crumb) => crumb.id).join('/');
+        if (resolvedKey === folderKey) return;
+        const extras = locationExtras.current;
+        navigateTo(buildDrivePath({
+          section: 'drive',
+          folderIds: chain.map((crumb) => crumb.id),
+          panel: extras.panel,
+          query: extras.query,
+          fileId: extras.fileId
+        }, chain), 'replace');
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        breadcrumbsRef.current = [];
+        setBreadcrumbs([]);
+        setNotice(friendlyError(cause));
+        navigateTo('/drive', 'replace');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [folderKey, section]);
+
+  useEffect(() => {
+    if (section === 'drive' && route.folderIds.length > 0 && breadcrumbsRef.current.map((crumb) => crumb.id).join('/') !== folderKey) {
+      return;
+    }
+    const folders = section === 'drive' ? breadcrumbsRef.current : [];
+    navigateTo(buildDrivePath({
+      section,
+      folderIds: folders.map((folder) => folder.id),
+      panel: section === 'drive' ? panel : null,
+      query,
+      fileId: section === 'drive' ? route.fileId : null
+    }, folders), 'replace');
+  }, [breadcrumbs, folderKey, panel, query, route.fileId, section]);
+
+  useEffect(() => {
+    if (section !== 'drive' || !route.fileId) {
+      setViewer(null);
+      return;
+    }
+    let cancelled = false;
+    api.getEntry(route.fileId)
+      .then((entry) => {
+        if (cancelled) return;
+        if (entry.kind !== 'file' || entry.deleted_at) {
+          clearSearchParam('file');
+          return;
+        }
+        setViewer(entry);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setNotice(friendlyError(cause));
+        clearSearchParam('file');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [route.fileId, section]);
 
   useEffect(() => {
     function onKeyboardShortcut(event: KeyboardEvent) {
@@ -518,15 +654,20 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       if (event.key === 'Escape') {
         setModal(null);
         setShareTarget(null);
-        setViewer(null);
+        if (route.fileId) clearSearchParam('file');
+        else setViewer(null);
         document.querySelectorAll('details[open]').forEach((element) => element.removeAttribute('open'));
       }
     }
     window.addEventListener('keydown', onKeyboardShortcut);
     return () => window.removeEventListener('keydown', onKeyboardShortcut);
-  }, [section]);
+  }, [route.fileId, section]);
 
   useEffect(() => {
+    if (!pathReady) {
+      setLoading(true);
+      return;
+    }
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setLoading(true);
@@ -565,7 +706,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [section, currentFolderId, query, refresh, shareRefresh, onLoggedOut]);
+  }, [section, currentFolderId, pathReady, query, refresh, shareRefresh, onLoggedOut]);
 
   const folderOptions = useMemo(() => {
     const options: Array<{ id: string | null; name: string }> = [{ id: null, name: 'My Drive' }];
@@ -585,43 +726,35 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   }, [breadcrumbs, entries]);
 
   function navigate(sectionValue: Section) {
-    setSection(sectionValue);
-    setQuery('');
-    if (sectionValue !== 'drive') setBreadcrumbs([]);
-    if (sectionValue !== 'drive') {
-      setMediaIndexOpen(false);
-      setAccountAdminOpen(false);
-      setFaceAdminOpen(false);
-    }
     setError('');
     setNotice('');
+    if (sectionValue === 'drive') {
+      showDrive({ query: '', fileId: null });
+      return;
+    }
+    navigateTo(sectionValue === 'shared' ? '/shared' : '/trash');
   }
 
   async function openFolder(entry: Entry) {
     try {
-      if (!query.trim()) {
-        setBreadcrumbs((path) => [...path, { id: entry.id, name: entry.name }]);
-      } else {
-        const chain: Breadcrumb[] = [];
-        let current: Entry | null = entry;
-        while (current && chain.length < 100) {
-          chain.unshift({ id: current.id, name: current.name });
-          current = current.parent_id ? await api.getEntry(current.parent_id) : null;
-        }
-        setBreadcrumbs(chain);
-      }
-      setSection('drive');
-      setQuery('');
+      const next = query.trim()
+        ? await folderChain(entry.id)
+        : [...breadcrumbsRef.current, { id: entry.id, name: entry.name }];
       setNotice('');
+      showDrive({ folders: next, query: '', fileId: null });
     } catch (cause) {
       setError(friendlyError(cause));
     }
   }
 
   function goToBreadcrumb(index: number) {
-    setBreadcrumbs(index < 0 ? [] : breadcrumbs.slice(0, index + 1));
-    setSection('drive');
-    setQuery('');
+    const next = index < 0 ? [] : breadcrumbsRef.current.slice(0, index + 1);
+    showDrive({ folders: next, query: '', fileId: null });
+  }
+
+  function openPreview(entry: Entry) {
+    setViewer(entry);
+    showDrive({ fileId: entry.id }, 'replace');
   }
 
   function updateJob(key: string, update: Partial<UploadJob>) {
@@ -806,6 +939,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       await api.renameEntry(entry.id, name);
       setModal(null);
       setNotice('Name updated');
+      const renamed = breadcrumbsRef.current.map((crumb) => crumb.id === entry.id ? { ...crumb, name } : crumb);
+      if (renamed.some((crumb, index) => crumb.name !== breadcrumbsRef.current[index]?.name)) {
+        showDrive({ folders: renamed }, 'replace');
+      }
       setRefresh((value) => value + 1);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -898,7 +1035,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   return (
     <div className="drive-app">
       <header className="app-topbar">
-        <a className="brand-wordmark" href="/" aria-label="My Drive">
+        <a className="brand-wordmark" href="/drive" aria-label="My Drive" onClick={(event) => {
+          event.preventDefault();
+          showDrive({ folders: [], panel: null, query: '', fileId: null });
+        }}>
           <span className="brand-mark"><Folder size={18} fill="currentColor" strokeWidth={1.6} /></span>
           <span>MY DRIVE</span>
         </a>
@@ -910,10 +1050,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             placeholder={section === 'drive' ? 'Search files and folders' : 'Search from My Drive'}
             value={query}
             disabled={section !== 'drive'}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => showDrive({ query: event.target.value, fileId: null }, 'replace')}
             aria-label="Search files and folders"
           />
-          {query && section === 'drive' && <button className="clear-search" onClick={() => setQuery('')} aria-label="Clear search"><X size={15} /></button>}
+          {query && section === 'drive' && <button className="clear-search" onClick={() => showDrive({ query: '', fileId: null }, 'replace')} aria-label="Clear search"><X size={15} /></button>}
           <kbd className="search-shortcut">{shortcutLabel}</kbd>
         </label>
         <details className="account-menu">
@@ -929,12 +1069,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               <>
                 <button onClick={(event) => {
                   event.currentTarget.closest('details')?.removeAttribute('open');
-                  setSection('drive');
-                  setBreadcrumbs([]);
-                  setQuery('');
-                  setMediaIndexOpen(false);
-                  setFaceAdminOpen(false);
-                  setAccountAdminOpen(true);
+                  showDrive({ folders: [], panel: 'accounts', query: '', fileId: null });
                 }}><Users size={15} /> Manage accounts</button>
                 <div className="menu-divider" />
               </>
@@ -986,11 +1121,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     aria-expanded={mediaIndexOpen}
                     aria-controls={mediaIndexOpen ? 'media-index-panel' : undefined}
                     aria-label={mediaIndexOpen ? 'Hide media indexing controls' : 'Show media indexing controls'}
-                    onClick={() => {
-                      setAccountAdminOpen(false);
-                      setFaceAdminOpen(false);
-                      setMediaIndexOpen((open) => !open);
-                    }}
+                    onClick={() => showDrive({ panel: mediaIndexOpen ? null : 'indexing' })}
                   >
                     <Activity size={16} /> <span>{mediaIndexOpen ? 'Hide indexing' : 'Media indexing'}</span>
                   </button>
@@ -1002,11 +1133,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     aria-expanded={faceAdminOpen}
                     aria-controls={faceAdminOpen ? 'face-admin-panel' : undefined}
                     aria-label={faceAdminOpen ? 'Hide face group controls' : 'Show face group controls'}
-                    onClick={() => {
-                      setAccountAdminOpen(false);
-                      setMediaIndexOpen(false);
-                      setFaceAdminOpen((open) => !open);
-                    }}
+                    onClick={() => showDrive({ panel: faceAdminOpen ? null : 'faces' })}
                   >
                     <ScanFace size={16} /> <span>{faceAdminOpen ? 'Hide faces' : 'Face groups'}</span>
                   </button>
@@ -1037,10 +1164,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           {section === 'drive' ? (
             user.role === 'owner' ? (
               accountAdminOpen ? (
-                <AccountManagementPanel onClose={() => setAccountAdminOpen(false)} />
+                <AccountManagementPanel onClose={() => showDrive({ panel: null })} />
               ) : faceAdminOpen ? (
-                <FaceManagementPanel onClose={() => setFaceAdminOpen(false)} />
-              ) : mediaIndexOpen ? <MediaIndexPanel onClose={() => setMediaIndexOpen(false)} /> : null
+                <FaceManagementPanel onClose={() => showDrive({ panel: null })} />
+              ) : mediaIndexOpen ? <MediaIndexPanel onClose={() => showDrive({ panel: null })} /> : null
             ) : null
           ) : null}
 
@@ -1111,7 +1238,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                           <button className="entry-name" onClick={() => void openFolder(entry)}>{entry.name}</button>
                         ) : entry.kind === 'file' && section !== 'trash' ? (
                           mediaKindFor(entry) ? (
-                            <button className="entry-name" onClick={() => setViewer(entry)}>{entry.name}</button>
+                            <button className="entry-name" onClick={() => openPreview(entry)}>{entry.name}</button>
                           ) : <a className="entry-name" href={downloadUrl(entry.id)}>{entry.name}</a>
                         ) : (
                           <span className="entry-name">{entry.name}</span>
@@ -1135,7 +1262,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                           section={section}
                           currentFolderId={currentFolderId}
                           onOpen={() => void openFolder(entry)}
-                          onPreview={() => setViewer(entry)}
+                          onPreview={() => openPreview(entry)}
                           onDownload={() => window.location.assign(downloadUrl(entry.id))}
                           onShare={() => setShareTarget(entry)}
                           onRename={() => setModal({ kind: 'rename', entry })}
@@ -1269,7 +1396,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         />
       )}
 
-      {viewer && <MediaViewer entry={viewer} onClose={() => setViewer(null)} />}
+      {viewer && <MediaViewer entry={viewer} onClose={() => clearSearchParam('file')} />}
     </div>
   );
 }
