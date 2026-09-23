@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 9);
+    assert_eq!(migrator.iter().len(), 10);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -63,4 +63,12 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     let browser_video_previews = include_str!("../migrations/0009_browser_video_previews.sql");
     assert!(browser_video_previews.contains("'video_preview'"));
     assert!(browser_video_previews.contains("video/mp4"));
+
+    let google_drive = include_str!("../migrations/0010_google_drive_sync.sql");
+    assert!(google_drive.contains("CREATE TABLE google_drive_connections"));
+    assert!(google_drive.contains("CREATE TABLE google_drive_sources"));
+    assert!(google_drive.contains("CREATE TABLE google_drive_runs"));
+    assert!(google_drive.contains("CREATE TABLE google_drive_items"));
+    assert!(google_drive.contains("CREATE TABLE google_drive_links"));
+    assert!(google_drive.contains("refresh_token BYTEA NOT NULL"));
 }
