@@ -568,6 +568,7 @@ fn config(storage_root: &Path) -> Config {
         session_ttl_seconds: 3600,
         bootstrap_owner: None,
         cookie_secure: false,
+        google_drive: None,
     }
 }
 
@@ -578,6 +579,7 @@ fn make_app(pool: PgPool, storage_root: &Path) -> Router {
         pool,
         storage,
         media_preview: None,
+        google_drive: None,
         auth_settings: AuthSettings {
             cookie_secure: false,
             session_ttl_seconds: 3600,

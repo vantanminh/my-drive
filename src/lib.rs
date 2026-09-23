@@ -6,6 +6,7 @@ mod db;
 mod drive;
 mod face_indexer;
 mod faces;
+mod google_drive;
 mod health;
 mod maintenance;
 mod media_admin;
@@ -33,7 +34,7 @@ use anyhow::Context;
 use tokio::net::TcpListener;
 use tracing::info;
 
-pub use config::{BootstrapOwner, Config, ConfigError, MediaPreviewConfig};
+pub use config::{BootstrapOwner, Config, ConfigError, GoogleDriveSettings, MediaPreviewConfig};
 
 pub async fn run() -> anyhow::Result<()> {
     let config = Config::from_env().context("load configuration")?;
@@ -81,13 +82,16 @@ pub async fn run() -> anyhow::Result<()> {
     };
     let maintenance_pool = pool.clone();
     let maintenance_storage = storage.clone();
+    let google_drive = config.google_drive.clone();
     // Drop the configuration now so database and bootstrap secrets are not
-    // retained for the lifetime of the HTTP server.
+    // retained for the lifetime of the HTTP server. Google OAuth material stays
+    // only on the sync worker and request state when the feature is configured.
     drop(config);
     let state = health::AppState {
         pool,
         storage,
         media_preview,
+        google_drive: google_drive.clone(),
         auth_settings,
         transfer_settings,
         login_rate_limiter: auth::LoginRateLimiter::default(),
@@ -97,10 +101,18 @@ pub async fn run() -> anyhow::Result<()> {
         .with_context(|| format!("bind HTTP listener at {bind_addr}"))?;
 
     tokio::spawn(maintenance::run_worker(
-        maintenance_pool,
-        maintenance_storage,
+        maintenance_pool.clone(),
+        maintenance_storage.clone(),
         maintenance_settings,
     ));
+    if let Some(settings) = google_drive {
+        tokio::spawn(google_drive::run_worker(
+            maintenance_pool,
+            maintenance_storage,
+            settings,
+            transfer_settings,
+        ));
+    }
     info!(address = %bind_addr, "My Drive is listening");
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal())

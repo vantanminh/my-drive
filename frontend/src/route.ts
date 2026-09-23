@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 export type WorkspaceSection = 'drive' | 'shared' | 'trash';
-export type DrivePanel = 'accounts' | 'faces' | 'indexing' | null;
+export type DrivePanel = 'accounts' | 'faces' | 'indexing' | 'google-drive' | null;
 
 export type DriveRoute = {
   section: WorkspaceSection;
@@ -67,7 +67,7 @@ function fileIdFromSearch(params: URLSearchParams): string | null {
 
 function panelFromSearch(params: URLSearchParams): DrivePanel {
   const panel = params.get('panel');
-  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing') return panel;
+  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive') return panel;
   return null;
 }
 
@@ -108,6 +108,7 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
   if (parts[0] === 'accounts' && parts.length === 1) return { ...drive, panel: 'accounts' };
   if (parts[0] === 'faces' && parts.length === 1) return { ...drive, panel: 'faces' };
   if (parts[0] === 'indexing' && parts.length === 1) return { ...drive, panel: 'indexing' };
+  if (parts[0] === 'google-drive' && parts.length === 1) return { ...drive, panel: 'google-drive' };
   return drive;
 }
 
@@ -127,6 +128,7 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
     if (route.panel === 'accounts') return '/accounts';
     if (route.panel === 'faces') return '/faces';
     if (route.panel === 'indexing') return '/indexing';
+    if (route.panel === 'google-drive') return '/google-drive';
     return '/drive';
   }
 

@@ -1260,12 +1260,14 @@ fn make_app_with_preview(
         session_ttl_seconds: 3600,
         bootstrap_owner: None,
         cookie_secure: false,
+        google_drive: None,
     };
     let storage = LocalStorage::initialize(&config).expect("initialize test storage");
     api::router(AppState {
         pool,
         storage,
         media_preview,
+        google_drive: None,
         auth_settings: AuthSettings {
             cookie_secure: false,
             session_ttl_seconds: 3600,

@@ -9,8 +9,8 @@ file contents and upload staging belong on a separately mounted HDD.
 The service now includes validated configuration, PostgreSQL migrations,
 first-owner bootstrap, a fail-closed storage mount guard, live/ready health
 endpoints, authenticated folder and trash APIs, resumable HDD-backed uploads,
-private downloads with byte ranges, quota checks, secure public shares, and a
-responsive browser client. A background maintenance worker expires abandoned
+private downloads with byte ranges, quota checks, secure public shares, paced
+Google Drive folder import, and a responsive browser client. A background maintenance worker expires abandoned
 upload sessions, purges trash after its retention period, and checks for
 missing payloads while preserving recoverable database state.
 
@@ -345,6 +345,36 @@ files are rebuildable cache data; the source files remain on the HDD. For a
 native systemd installation, configure separate `STORAGE_*` and
 `MEDIA_PREVIEW_*` roots, mount points, and expected device IDs in the restricted
 environment file. Keep device matching enabled for both mounts.
+
+## Google Drive import
+
+Signed-in accounts can connect a Google account and choose folders to copy into
+their drive. The copy includes nested folders and files. Google Docs, Sheets,
+and Slides are exported to Office files; drawings are exported as PNG. Other
+Google-only formats are skipped. Payloads are written to the HDD object tree.
+PostgreSQL metadata stays on the SSD, and image or video previews are still
+produced by the media indexer on the SSD preview mount.
+
+Images are downloaded and indexed before videos. Other files are copied but not
+indexed. The sync worker is a single task. It pauses between 256 KiB chunks so
+it uses only a fraction of one core, and it waits while image preview jobs are
+queued or the indexer is running. The indexer also waits briefly between jobs
+so thumbnail and video work does not stay at full CPU. Pause, resume, and the
+live file and byte counts are on the Google Drive screen.
+
+Leave the feature disabled by omitting all four settings. Set them together:
+
+```dotenv
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+GOOGLE_OAUTH_REDIRECT_URI=https://drive.example.com/api/google-drive/callback
+GOOGLE_DRIVE_TOKEN_KEY=
+```
+
+Create an OAuth client with the Drive read-only scope and that exact redirect
+URI. Generate `GOOGLE_DRIVE_TOKEN_KEY` with `openssl rand -hex 32`. The service
+uses it to encrypt refresh tokens before they are stored. Changing the key
+requires each account to connect again.
 
 ## Encrypted backup and restore
 

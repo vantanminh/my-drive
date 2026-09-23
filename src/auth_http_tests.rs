@@ -65,12 +65,14 @@ async fn browser_login_csrf_and_session_revocation_flow() {
         session_ttl_seconds: 3600,
         bootstrap_owner: None,
         cookie_secure: true,
+        google_drive: None,
     };
     let storage = LocalStorage::initialize(&config).expect("initialize test storage");
     let app = api::router(AppState {
         pool: pool.clone(),
         storage,
         media_preview: None,
+        google_drive: None,
         auth_settings: AuthSettings {
             cookie_secure: true,
             session_ttl_seconds: 3600,
