@@ -7,6 +7,7 @@ mod drive;
 mod face_indexer;
 mod faces;
 mod health;
+mod library;
 mod maintenance;
 mod media_admin;
 mod media_indexer;

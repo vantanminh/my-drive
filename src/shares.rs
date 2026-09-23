@@ -123,6 +123,7 @@ struct ErrorBody {
 enum ResourceType {
     File,
     Folder,
+    Album,
 }
 
 impl ResourceType {
@@ -130,6 +131,7 @@ impl ResourceType {
         match self {
             Self::File => "file",
             Self::Folder => "folder",
+            Self::Album => "album",
         }
     }
 }
@@ -244,11 +246,20 @@ struct ShareRecord {
     id: Uuid,
     owner_id: Uuid,
     resource_type: String,
-    resource_id: Uuid,
+    resource_id: Option<Uuid>,
+    album_id: Option<Uuid>,
     password_hash: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     allow_download: bool,
     password_locked_until: Option<DateTime<Utc>>,
+}
+
+impl ShareRecord {
+    fn subject_id(&self) -> Result<Uuid, ShareError> {
+        self.resource_id
+            .or(self.album_id)
+            .ok_or(ShareError::NotFound)
+    }
 }
 
 #[derive(FromRow)]
@@ -305,18 +316,34 @@ async fn create_share(
         return Err(ShareError::BadRequest);
     }
 
-    let require_folder = matches!(request.resource_type, ResourceType::Folder);
-    drive::ensure_active_entry(&state, user.id, request.resource_id, require_folder).await?;
-    let actual_type: Option<String> =
-        sqlx::query_scalar("SELECT kind FROM drive_entries WHERE id = $1 AND owner_id = $2")
-            .bind(request.resource_id)
-            .bind(user.id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(map_database_error)?;
-    if actual_type.as_deref() != Some(request.resource_type.as_str()) {
-        return Err(ShareError::BadRequest);
-    }
+    let (resource_id, album_id) = if matches!(request.resource_type, ResourceType::Album) {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM albums WHERE id = $1 AND owner_id = $2)",
+        )
+        .bind(request.resource_id)
+        .bind(user.id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(map_database_error)?;
+        if !exists {
+            return Err(ShareError::NotFound);
+        }
+        (None, Some(request.resource_id))
+    } else {
+        let require_folder = matches!(request.resource_type, ResourceType::Folder);
+        drive::ensure_active_entry(&state, user.id, request.resource_id, require_folder).await?;
+        let actual_type: Option<String> =
+            sqlx::query_scalar("SELECT kind FROM drive_entries WHERE id = $1 AND owner_id = $2")
+                .bind(request.resource_id)
+                .bind(user.id)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(map_database_error)?;
+        if actual_type.as_deref() != Some(request.resource_type.as_str()) {
+            return Err(ShareError::BadRequest);
+        }
+        (Some(request.resource_id), None)
+    };
 
     let password_hash = if let Some(password) = request.password.as_ref() {
         let password = password.clone();
@@ -337,13 +364,14 @@ async fn create_share(
     let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
     sqlx::query(
         "INSERT INTO shares \
-            (id, owner_id, resource_type, resource_id, token_digest, password_hash, expires_at, allow_download, max_downloads) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            (id, owner_id, resource_type, resource_id, album_id, token_digest, password_hash, expires_at, allow_download, max_downloads) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(share_id)
     .bind(user.id)
     .bind(request.resource_type.as_str())
-    .bind(request.resource_id)
+    .bind(resource_id)
+    .bind(album_id)
     .bind(token_digest)
     .bind(password_hash.as_deref())
     .bind(request.expires_at)
@@ -388,11 +416,14 @@ async fn list_shares(
 ) -> Result<Response, ShareError> {
     let (limit, offset) = page_values(query.limit, query.offset)?;
     let rows: Vec<ShareSummary> = sqlx::query_as(
-        "SELECT share.id, share.resource_type, share.resource_id, entry.name AS resource_name, \
+        "SELECT share.id, share.resource_type, \
+                COALESCE(share.resource_id, share.album_id) AS resource_id, \
+                COALESCE(entry.name, album.name) AS resource_name, \
                 share.expires_at, share.revoked_at, (share.password_hash IS NOT NULL) AS password_protected, \
                 share.allow_download, share.max_downloads, share.download_count, share.created_at, share.last_accessed_at \
            FROM shares AS share \
-           JOIN drive_entries AS entry ON entry.id = share.resource_id AND entry.owner_id = share.owner_id \
+           LEFT JOIN drive_entries AS entry ON entry.id = share.resource_id AND entry.owner_id = share.owner_id \
+           LEFT JOIN albums AS album ON album.id = share.album_id AND album.owner_id = share.owner_id \
           WHERE share.owner_id = $1 \
           ORDER BY share.created_at DESC, share.id \
           LIMIT $2 OFFSET $3",
@@ -429,7 +460,7 @@ async fn revoke_share(
     let resource_id: Option<Uuid> = sqlx::query_scalar(
         "UPDATE shares SET revoked_at = COALESCE(revoked_at, now()) \
           WHERE id = $1 AND owner_id = $2 \
-          RETURNING resource_id",
+          RETURNING COALESCE(resource_id, album_id)",
     )
     .bind(id)
     .bind(user.id)
@@ -465,6 +496,82 @@ struct PublicShareQuery {
     offset: Option<i64>,
 }
 
+async fn public_album(
+    state: &AppState,
+    share: ShareRecord,
+    query: PublicShareQuery,
+) -> Result<Response, ShareError> {
+    let album_id = share.album_id.ok_or(ShareError::NotFound)?;
+    if query
+        .folder_id
+        .is_some_and(|folder_id| folder_id != album_id)
+    {
+        return Err(ShareError::NotFound);
+    }
+    #[derive(FromRow)]
+    struct AlbumRow {
+        name: String,
+        updated_at: DateTime<Utc>,
+    }
+    let album = sqlx::query_as::<_, AlbumRow>(
+        "SELECT name, updated_at FROM albums WHERE id = $1 AND owner_id = $2",
+    )
+    .bind(album_id)
+    .bind(share.owner_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(ShareError::NotFound)?;
+    let (limit, offset) = page_values(query.limit, query.offset)?;
+    let rows: Vec<PublicEntryRow> = sqlx::query_as(
+        "SELECT entry.id, entry.name, entry.kind, version.size_bytes, entry.updated_at \
+           FROM album_items AS item \
+           JOIN entry_index AS idx ON idx.entry_id = item.file_id \
+           JOIN drive_entries AS entry ON entry.id = item.file_id \
+           LEFT JOIN files AS file ON file.id = entry.id \
+           LEFT JOIN file_versions AS version ON version.id = file.current_version_id \
+          WHERE item.album_id = $1 AND idx.owner_id = $2 \
+            AND idx.deleted_at IS NULL AND NOT idx.buried \
+          ORDER BY item.added_at DESC, entry.id \
+          LIMIT $3 OFFSET $4",
+    )
+    .bind(album_id)
+    .bind(share.owner_id)
+    .bind(i64::from(limit) + 1)
+    .bind(offset)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(map_database_error)?;
+    let has_more = rows.len() > usize::from(limit);
+    let mut entries = rows.into_iter().map(PublicEntry::from).collect::<Vec<_>>();
+    if has_more {
+        entries.pop();
+    }
+    touch_share(state, share.id).await?;
+    Ok(no_store(
+        Json(PublicShareView {
+            share_id: share.id,
+            resource: PublicEntry {
+                id: album_id,
+                name: album.name.clone(),
+                kind: "folder".to_owned(),
+                size_bytes: None,
+                updated_at: album.updated_at,
+            },
+            current_folder: Some(album_id),
+            breadcrumbs: vec![Breadcrumb {
+                id: album_id,
+                name: album.name,
+            }],
+            entries,
+            allow_download: share.allow_download,
+            expires_at: share.expires_at,
+            next_offset: has_more.then_some(offset + i64::from(limit)),
+        })
+        .into_response(),
+    ))
+}
+
 async fn public_share(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -473,8 +580,12 @@ async fn public_share(
 ) -> Result<Response, ShareError> {
     let share = fetch_active_share(&state, &token).await?;
     require_password_grant(&state, &headers, &share).await?;
+    if share.resource_type == "album" {
+        return public_album(&state, share, query).await;
+    }
+    let resource_id = share.resource_id.ok_or(ShareError::NotFound)?;
 
-    let root = fetch_public_entry(&state, share.owner_id, share.resource_id).await?;
+    let root = fetch_public_entry(&state, share.owner_id, resource_id).await?;
     let (current_folder, breadcrumbs, entries, next_offset) = if share.resource_type == "file" {
         if query.folder_id.is_some() || root.kind != "file" {
             return Err(ShareError::NotFound);
@@ -484,14 +595,13 @@ async fn public_share(
         if root.kind != "folder" {
             return Err(ShareError::NotFound);
         }
-        let folder_id = query.folder_id.unwrap_or(share.resource_id);
-        if !folder_in_share(&state, share.owner_id, share.resource_id, folder_id).await? {
+        let folder_id = query.folder_id.unwrap_or(resource_id);
+        if !folder_in_share(&state, share.owner_id, resource_id, folder_id).await? {
             return Err(ShareError::NotFound);
         }
         drive::ensure_active_entry(&state, share.owner_id, folder_id, true).await?;
         let (limit, offset) = page_values(query.limit, query.offset)?;
-        let breadcrumbs =
-            fetch_breadcrumbs(&state, share.owner_id, folder_id, share.resource_id).await?;
+        let breadcrumbs = fetch_breadcrumbs(&state, share.owner_id, folder_id, resource_id).await?;
         let rows: Vec<PublicEntryRow> = sqlx::query_as(
             "SELECT entry.id, entry.name, entry.kind, version.size_bytes, entry.updated_at \
                FROM drive_entries AS entry \
@@ -602,7 +712,7 @@ async fn unlock_share(
         "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
          VALUES ('share_password_success', NULL, $1, $2)",
     )
-    .bind(share.resource_id)
+    .bind(share.subject_id()?)
     .bind(json!({ "share_id": share.id }))
     .execute(&mut *transaction)
     .await
@@ -640,7 +750,7 @@ async fn download_shared(
         &state,
         share.owner_id,
         share.resource_type.as_str(),
-        share.resource_id,
+        share.subject_id()?,
         entry_id,
     )
     .await?
@@ -664,7 +774,7 @@ async fn preview_shared(
         &state,
         share.owner_id,
         share.resource_type.as_str(),
-        share.resource_id,
+        share.subject_id()?,
         entry_id,
     )
     .await?
@@ -693,7 +803,7 @@ async fn thumbnail_shared(
         &state,
         share.owner_id,
         share.resource_type.as_str(),
-        share.resource_id,
+        share.subject_id()?,
         entry_id,
     )
     .await?
@@ -708,7 +818,7 @@ async fn thumbnail_shared(
 async fn fetch_active_share(state: &AppState, token: &str) -> Result<ShareRecord, ShareError> {
     let token_digest = share_token_digest(token)?;
     let share: ShareRecord = sqlx::query_as(
-        "SELECT id, owner_id, resource_type, resource_id, password_hash, expires_at, \
+        "SELECT id, owner_id, resource_type, resource_id, album_id, password_hash, expires_at, \
                 allow_download, password_locked_until \
            FROM shares \
           WHERE token_digest = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())",
@@ -718,11 +828,27 @@ async fn fetch_active_share(state: &AppState, token: &str) -> Result<ShareRecord
     .await
     .map_err(map_database_error)?
     .ok_or(ShareError::NotFound)?;
+    if share.resource_type == "album" {
+        let album_id = share.album_id.ok_or(ShareError::NotFound)?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM albums WHERE id = $1 AND owner_id = $2)",
+        )
+        .bind(album_id)
+        .bind(share.owner_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(map_database_error)?;
+        if !exists {
+            return Err(ShareError::NotFound);
+        }
+        return Ok(share);
+    }
+    let resource_id = share.resource_id.ok_or(ShareError::NotFound)?;
     let require_folder = share.resource_type == "folder";
-    drive::ensure_active_entry(state, share.owner_id, share.resource_id, require_folder).await?;
+    drive::ensure_active_entry(state, share.owner_id, resource_id, require_folder).await?;
     let actual_kind: Option<String> =
         sqlx::query_scalar("SELECT kind FROM drive_entries WHERE id = $1 AND owner_id = $2")
-            .bind(share.resource_id)
+            .bind(resource_id)
             .bind(share.owner_id)
             .fetch_optional(&state.pool)
             .await
@@ -814,7 +940,7 @@ async fn record_password_failure(
         "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
          VALUES ('share_password_failure', NULL, $1, $2)",
     )
-    .bind(share.resource_id)
+    .bind(share.subject_id()?)
     .bind(json!({
         "share_id": share.id,
         "attempts": update.failed_password_attempts
@@ -924,6 +1050,23 @@ async fn file_in_share(
     share_root_id: Uuid,
     file_id: Uuid,
 ) -> Result<bool, ShareError> {
+    if resource_type == "album" {
+        let in_album: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM album_items AS item \
+                 JOIN entry_index AS idx ON idx.entry_id = item.file_id \
+                WHERE item.album_id = $1 AND item.file_id = $2 AND idx.owner_id = $3 \
+                  AND idx.kind = 'file' AND idx.deleted_at IS NULL AND NOT idx.buried \
+             )",
+        )
+        .bind(share_root_id)
+        .bind(file_id)
+        .bind(owner_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(map_database_error)?;
+        return Ok(in_album);
+    }
     let in_scope: bool = sqlx::query_scalar(
         "WITH RECURSIVE parent_chain(id, parent_id, deleted_at) AS ( \
              SELECT id, parent_id, deleted_at FROM drive_entries \

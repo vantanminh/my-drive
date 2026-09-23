@@ -1,7 +1,22 @@
 import { useEffect, useState } from 'react';
 
-export type WorkspaceSection = 'drive' | 'shared' | 'trash';
+export type WorkspaceSection = 'drive' | 'shared' | 'trash' | 'photos' | 'storage';
 export type DrivePanel = 'accounts' | 'faces' | 'indexing' | null;
+export type PhotosTab = 'timeline' | 'people' | 'albums';
+export type DriveSort = 'name' | 'updated_at' | 'created_at' | 'size';
+export type DriveOrder = 'asc' | 'desc';
+
+export type DriveFilters = {
+  category: string;
+  minSize: string;
+  maxSize: string;
+  createdFrom: string;
+  createdTo: string;
+  modifiedFrom: string;
+  modifiedTo: string;
+  mime: string;
+  inFolder: boolean;
+};
 
 export type DriveRoute = {
   section: WorkspaceSection;
@@ -9,6 +24,12 @@ export type DriveRoute = {
   panel: DrivePanel;
   query: string;
   fileId: string | null;
+  albumId: string | null;
+  personId: string | null;
+  photosTab: PhotosTab;
+  sort: DriveSort;
+  order: DriveOrder;
+  filters: DriveFilters;
 };
 
 export type NamedEntry = {
@@ -23,6 +44,42 @@ export type PublicRoute = {
 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const emptyFilters = (): DriveFilters => ({
+  category: '',
+  minSize: '',
+  maxSize: '',
+  createdFrom: '',
+  createdTo: '',
+  modifiedFrom: '',
+  modifiedTo: '',
+  mime: '',
+  inFolder: false
+});
+
+export function hasActiveFilters(filters: DriveFilters): boolean {
+  return Boolean(
+    filters.category || filters.minSize || filters.maxSize || filters.createdFrom || filters.createdTo
+    || filters.modifiedFrom || filters.modifiedTo || filters.mime || filters.inFolder
+  );
+}
+
+function blankRoute(partial: Partial<DriveRoute> = {}): DriveRoute {
+  return {
+    section: 'drive',
+    folderIds: [],
+    panel: null,
+    query: '',
+    fileId: null,
+    albumId: null,
+    personId: null,
+    photosTab: 'timeline',
+    sort: 'name',
+    order: 'asc',
+    filters: emptyFilters(),
+    ...partial
+  };
+}
 
 export function slugifyName(name: string): string {
   const slug = name
@@ -71,16 +128,62 @@ function panelFromSearch(params: URLSearchParams): DrivePanel {
   return null;
 }
 
+function sortFromSearch(params: URLSearchParams): DriveSort {
+  const sort = params.get('sort');
+  if (sort === 'name' || sort === 'updated_at' || sort === 'created_at' || sort === 'size') return sort;
+  return 'name';
+}
+
+function orderFromSearch(params: URLSearchParams): DriveOrder {
+  return params.get('order') === 'desc' ? 'desc' : 'asc';
+}
+
+function filtersFromSearch(params: URLSearchParams): DriveFilters {
+  return {
+    category: params.get('type') ?? '',
+    minSize: params.get('min') ?? '',
+    maxSize: params.get('max') ?? '',
+    createdFrom: params.get('created_from') ?? '',
+    createdTo: params.get('created_to') ?? '',
+    modifiedFrom: params.get('modified_from') ?? '',
+    modifiedTo: params.get('modified_to') ?? '',
+    mime: params.get('mime') ?? '',
+    inFolder: params.get('in') === 'folder'
+  };
+}
+
+function writeFilters(params: URLSearchParams, filters: DriveFilters) {
+  if (filters.category) params.set('type', filters.category);
+  if (filters.minSize) params.set('min', filters.minSize);
+  if (filters.maxSize) params.set('max', filters.maxSize);
+  if (filters.createdFrom) params.set('created_from', filters.createdFrom);
+  if (filters.createdTo) params.set('created_to', filters.createdTo);
+  if (filters.modifiedFrom) params.set('modified_from', filters.modifiedFrom);
+  if (filters.modifiedTo) params.set('modified_to', filters.modifiedTo);
+  if (filters.mime) params.set('mime', filters.mime);
+  if (filters.inFolder) params.set('in', 'folder');
+}
+
 export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
   const params = searchParams(search);
   const parts = splitPath(pathname);
-  const drive: DriveRoute = {
-    section: 'drive',
-    folderIds: [],
-    panel: null,
-    query: '',
-    fileId: null
-  };
+  const drive = blankRoute();
+
+  if (parts[0] === 'photos') {
+    const photos = blankRoute({ section: 'photos', fileId: fileIdFromSearch(params) });
+    if (parts[1] === 'people') {
+      photos.photosTab = 'people';
+      if (parts[2] && UUID_RE.test(parts[2])) photos.personId = parts[2].toLowerCase();
+      return photos;
+    }
+    if (parts[1] === 'albums') {
+      photos.photosTab = 'albums';
+      if (parts[2] && UUID_RE.test(parts[2])) photos.albumId = parts[2].toLowerCase();
+      return photos;
+    }
+    return photos;
+  }
+  if (parts[0] === 'storage' && parts.length === 1) return blankRoute({ section: 'storage' });
 
   if (parts.length === 0 || parts[0] === 'drive') {
     const folderIds: string[] = [];
@@ -94,32 +197,55 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
       folderIds.push(id);
     }
     if (!valid) return drive;
-    return {
+    return blankRoute({
       section: 'drive',
       folderIds,
       panel: panelFromSearch(params),
       query: params.get('q') ?? '',
-      fileId: fileIdFromSearch(params)
-    };
+      fileId: fileIdFromSearch(params),
+      sort: sortFromSearch(params),
+      order: orderFromSearch(params),
+      filters: filtersFromSearch(params)
+    });
   }
 
-  if (parts[0] === 'shared' && parts.length === 1) return { ...drive, section: 'shared' };
-  if (parts[0] === 'trash' && parts.length === 1) return { ...drive, section: 'trash' };
-  if (parts[0] === 'accounts' && parts.length === 1) return { ...drive, panel: 'accounts' };
-  if (parts[0] === 'faces' && parts.length === 1) return { ...drive, panel: 'faces' };
-  if (parts[0] === 'indexing' && parts.length === 1) return { ...drive, panel: 'indexing' };
+  if (parts[0] === 'shared' && parts.length === 1) return blankRoute({ section: 'shared' });
+  if (parts[0] === 'trash' && parts.length === 1) return blankRoute({ section: 'trash' });
+  if (parts[0] === 'accounts' && parts.length === 1) return blankRoute({ panel: 'accounts' });
+  if (parts[0] === 'faces' && parts.length === 1) return blankRoute({ panel: 'faces' });
+  if (parts[0] === 'indexing' && parts.length === 1) return blankRoute({ panel: 'indexing' });
   return drive;
 }
 
 export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string {
   if (route.section === 'shared') return '/shared';
   if (route.section === 'trash') return '/trash';
+  if (route.section === 'storage') return '/storage';
+  if (route.section === 'photos') {
+    const parts = ['photos'];
+    if (route.photosTab === 'people') {
+      parts.push('people');
+      if (route.personId) parts.push(route.personId);
+    } else if (route.photosTab === 'albums') {
+      parts.push('albums');
+      if (route.albumId) parts.push(route.albumId);
+    }
+    const params = new URLSearchParams();
+    if (route.fileId) params.set('file', route.fileId.toLowerCase());
+    const query = params.toString();
+    return '/' + parts.map((part) => encodeURIComponent(part)).join('/') + (query ? '?' + query : '');
+  }
 
   const folderPath = folders.map((folder) => segmentFor(folder.name, folder.id));
   const params = new URLSearchParams();
-  if (route.panel && (folderPath.length > 0 || route.query || route.fileId)) params.set('panel', route.panel);
+  if (route.panel && (folderPath.length > 0 || route.query || route.fileId || hasActiveFilters(route.filters))) {
+    params.set('panel', route.panel);
+  }
   if (route.query) params.set('q', route.query);
   if (route.fileId) params.set('file', route.fileId.toLowerCase());
+  if (route.sort !== 'name') params.set('sort', route.sort);
+  if (route.order !== 'asc') params.set('order', route.order);
+  writeFilters(params, route.filters);
   const query = params.toString();
   const suffix = query ? '?' + query : '';
 

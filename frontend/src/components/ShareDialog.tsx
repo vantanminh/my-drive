@@ -2,10 +2,10 @@ import { useState, type FormEvent } from 'react';
 import { Check, Copy, Link2, LockKeyhole, Share2, X } from 'lucide-react';
 import { api } from '../api';
 import { friendlyError } from '../format';
-import type { CreatedShare, Entry } from '../types';
+import type { CreatedShare } from '../types';
 
 type Props = {
-  entry: Pick<Entry, 'id' | 'kind' | 'name'>;
+  entry: { id: string; kind: 'file' | 'folder' | 'album'; name: string };
   onClose: () => void;
   onCreated: () => void;
 };

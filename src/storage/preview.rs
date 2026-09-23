@@ -51,6 +51,14 @@ impl PreviewStorage {
         self.validate_mount()
     }
 
+    pub fn filesystem_usage(&self) -> Result<super::FilesystemUsage, StorageError> {
+        let (free_bytes, total_bytes) = capacity(&self.root)?;
+        Ok(super::FilesystemUsage {
+            total_bytes,
+            free_bytes,
+        })
+    }
+
     pub async fn publish_derivative(
         &self,
         version_id: Uuid,
