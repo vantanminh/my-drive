@@ -455,3 +455,12 @@ npm ci followed by npm run dev. Vite proxies same-origin /api requests to
 http://127.0.0.1:3000. The Rust service serves frontend/dist, including public
 /s/<token> links; the Docker image builds both client and server. An unknown
 /api route returns JSON 404 rather than the app shell.
+
+The signed-in client stores the open view in the address bar, so refreshing
+keeps the same page. `/drive` is My Drive, `/drive/<slug>--<folder-id>` is a
+folder, `/shared` is shared links, and `/trash` is trash. Owner tools use
+`/accounts`, `/faces`, and `/indexing` from the drive root, or `?panel=` when
+a folder is open. A preview adds `?file=<file-id>`. Search adds `?q=`. Public
+folder links keep their place at `/s/<token>/<slug>--<folder-id>`. The slug is
+the readable name; the id is what the app loads, so a renamed folder still
+opens after refresh.
