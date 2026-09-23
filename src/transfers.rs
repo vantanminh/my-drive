@@ -344,6 +344,9 @@ async fn create_upload(
                FROM upload_sessions \
               WHERE owner_id = $1 \
                 AND (state = 'finalizing' OR (state = 'active' AND expires_at > now()))) \
+            + (SELECT COALESCE(SUM(bytes_downloaded), 0)::BIGINT \
+                 FROM google_drive_items \
+                WHERE owner_id = $1 AND state = 'committing') \
                 AS reserved_bytes, \
             (SELECT COALESCE(SUM(expected_size - received_size), 0)::BIGINT \
                FROM upload_sessions \

@@ -49,7 +49,14 @@ export function friendlyError(error: unknown): string {
     invalid_password: 'That password is not correct.',
     download_disabled: 'The owner has disabled downloads for this link.',
     share_unavailable: 'This shared link has expired or was revoked.',
-    service_unavailable: 'The service is temporarily unavailable. Try again shortly.'
+    service_unavailable: 'The service is temporarily unavailable. Try again shortly.',
+    google_drive_unconfigured: 'Google Drive is not configured on this server yet.',
+    google_drive_not_connected: 'Connect a Google account before choosing folders.',
+    reauth_required: 'Google needs you to connect again.',
+    too_many_folders: 'You can sync up to 20 Google Drive folders.',
+    already_selected: 'That folder is already being synced.',
+    google_auth_failed: 'Google did not accept the connection. Try again.',
+    google_request_failed: 'Google Drive could not be reached. Try again shortly.'
   };
   if (messages[error.code]) return messages[error.code];
   if (error.status === 401) return 'Your session has ended. Sign in again to continue.';

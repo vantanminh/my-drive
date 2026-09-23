@@ -24,6 +24,7 @@ use crate::{
 
 const WORKER_LOCK_ID: i64 = 4_831_170_923_501;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+const INDEX_BREATHER: Duration = Duration::from_millis(1_500);
 const LEASE_SECONDS: i64 = 300;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ATTEMPTS: i32 = 5;
@@ -171,7 +172,7 @@ pub(crate) async fn run_worker(pool: PgPool, storage: LocalStorage, previews: Pr
                 break;
             }
             match run_once(&pool, &storage, &previews).await {
-                Ok(true) => {}
+                Ok(true) => sleep(INDEX_BREATHER).await,
                 Ok(false) => sleep(POLL_INTERVAL).await,
                 Err(error) => {
                     tracing::warn!(error = %error, "media index worker pass failed");
@@ -2339,6 +2340,7 @@ mod tests {
             session_ttl_seconds: 3600,
             bootstrap_owner: None,
             cookie_secure: false,
+            google_drive: None,
         })
         .expect("open HDD read-only");
         let previews = PreviewStorage::new(&MediaPreviewConfig {
