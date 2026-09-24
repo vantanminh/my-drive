@@ -1393,6 +1393,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   background: #182226;
   border-left: 1px solid rgb(255 255 255 / 8%);
 }
+.viewer-info dt { color: #b7c2c0; }
+.viewer-info dd { color: #f4f7f6; }
 .viewer-error { gap: 8px; padding: 24px; text-align: center; }
 
 .photos-page { min-width: 0; }
