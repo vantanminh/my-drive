@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, ArrowRight, Download, File, FileImage, FileSpreadsheet, FileText, Film, Folder, LockKeyhole, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Download, File, FileImage, FileSpreadsheet, FileText, Film, Folder, LockKeyhole, Presentation, ShieldCheck } from 'lucide-react';
 import { ApiError, api, publicDownloadUrl, publicPreviewUrl, publicThumbnailUrl } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import { buildPublicPath, navigateTo, parsePublicRoute, useBrowserHref } from '../route';
 import type { Breadcrumb, PublicEntry, PublicShareView } from '../types';
-import MediaViewer, { mediaKindFor } from './MediaViewer';
+import FilePreviewer from './FilePreviewer';
+import { isFilePreviewable } from './MediaViewer';
 
 type Props = {
   token: string;
@@ -15,13 +16,14 @@ function PublicFileIcon({ entry }: { entry: PublicEntry }) {
   const name = entry.name.toLowerCase();
   if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|heif)$/.test(name)) return <FileImage size={21} className="file-icon image-icon" />;
   if (/\.(mp4|m4v|webm|mov|qt|mkv|mk3d|avi|ogv|ogg|mpg|mpeg|mpe|ts|mts|m2ts|flv|wmv|asf|3gp|3g2)$/.test(name)) return <Film size={21} className="file-icon video-icon" />;
-  if (/\.(pdf|docx?|txt|md|rtf)$/.test(name)) return <FileText size={21} className="file-icon document-icon" />;
+  if (/\.(pptx?)$/.test(name)) return <Presentation size={21} className="file-icon document-icon" />;
+  if (/\.(pdf|docx?|txt|md|markdown|json|rtf)$/.test(name)) return <FileText size={21} className="file-icon document-icon" />;
   if (/\.(xlsx?|csv|numbers)$/.test(name)) return <FileSpreadsheet size={21} className="file-icon sheet-icon" />;
   return <File size={21} className="file-icon" />;
 }
 
 function isPreviewable(entry: PublicEntry): boolean {
-  return entry.kind === 'file' && mediaKindFor({ name: entry.name, mime_detected: null }) !== null;
+  return entry.kind === 'file' && isFilePreviewable({ name: entry.name, mime_detected: null });
 }
 
 export default function PublicSharePage({ token }: Props) {
@@ -246,7 +248,7 @@ export default function PublicSharePage({ token }: Props) {
       )}
       <footer className="public-footer">Shared with My Drive <span>·</span> Your files stay private</footer>
       {viewer && (
-        <MediaViewer
+        <FilePreviewer
           items={rows.filter(isPreviewable).map((entry) => ({ ...entry, mime_detected: null }))}
           index={Math.max(rows.filter(isPreviewable).findIndex((entry) => entry.id === viewer.id), 0)}
           onIndexChange={(next) => {

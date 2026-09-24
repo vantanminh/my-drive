@@ -2331,6 +2331,7 @@ mod tests {
             require_device_match: false,
             expected_device: None,
             media_preview: None,
+            document_preview_url: None,
             max_file_size: 1024,
             owner_quota_bytes: 4096,
             min_free_bytes: 0,

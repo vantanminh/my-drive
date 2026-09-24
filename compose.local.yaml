@@ -35,6 +35,8 @@ services:
         condition: service_healthy
       storage-init:
         condition: service_completed_successfully
+      document-preview:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgres://mydrive:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.local}@db:5432/mydrive
       BIND_ADDR: 0.0.0.0:3000
@@ -46,6 +48,7 @@ services:
       MEDIA_PREVIEW_EXPECTED_MOUNT: /srv/my-drive/previews
       MEDIA_PREVIEW_REQUIRE_MOUNT: "false"
       MEDIA_PREVIEW_REQUIRE_DEVICE_MATCH: "false"
+      DOCUMENT_PREVIEW_URL: http://document-preview:3100
       MAX_FILE_SIZE: ${MAX_FILE_SIZE:-5368709120}
       OWNER_QUOTA_BYTES: ${OWNER_QUOTA_BYTES:-107374182400}
       BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL:?Set BOOTSTRAP_OWNER_EMAIL in .env.local}
@@ -61,12 +64,40 @@ services:
       - local-previews:/srv/my-drive/previews:ro
     ports:
       - "127.0.0.1:${APP_PORT:-3000}:3000"
+    networks:
+      - default
+      - preview-private
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 20s
+
+  document-preview:
+    image: ${MY_DRIVE_DOCUMENT_PREVIEW_IMAGE:-my-drive-document-preview:local}
+    pull_policy: missing
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 64
+    stop_grace_period: 35s
+    networks:
+      - preview-private
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3100/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   media-indexer-db-setup:
     image: ${MY_DRIVE_INDEXER_DB_SETUP_IMAGE:-my-drive-indexer-db-setup:local}
@@ -123,3 +154,7 @@ volumes:
   local-postgres:
   local-data:
   local-previews:
+
+networks:
+  preview-private:
+    internal: true

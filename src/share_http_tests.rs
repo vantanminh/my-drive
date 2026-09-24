@@ -316,6 +316,30 @@ async fn shares_enforce_owner_scope_password_expiry_download_limits_and_revoke()
     assert!(nested_ids.contains(&shared_file_id.as_str()));
     assert!(nested_ids.contains(&shared_image_id.as_str()));
 
+    let text_preview = request_with_cookie(
+        &app,
+        Method::GET,
+        &format!("{public_url}/preview/{shared_file}"),
+        &grant_cookie,
+        None,
+    )
+    .await;
+    assert_eq!(text_preview.status(), StatusCode::OK);
+    assert_eq!(
+        text_preview.headers()[CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    assert!(
+        text_preview.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("inline;")
+    );
+    assert_eq!(
+        response_bytes(text_preview).await.as_slice(),
+        b"share content"
+    );
+
     let range_preview = request_with_cookie(
         &app,
         Method::GET,
@@ -429,6 +453,21 @@ async fn shares_enforce_owner_scope_password_expiry_download_limits_and_revoke()
     )
     .await;
     assert_eq!(disabled_download.status(), StatusCode::FORBIDDEN);
+    let disabled_preview = request(
+        &app,
+        Method::GET,
+        &format!("{disabled_url}/preview/{shared_file}"),
+        None,
+        None,
+        None,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(disabled_preview.status(), StatusCode::OK);
+    assert_eq!(
+        response_bytes(disabled_preview).await.as_slice(),
+        b"share content"
+    );
 
     sqlx::query("UPDATE shares SET expires_at = now() - interval '1 second' WHERE id = $1")
         .bind(disabled_id)
@@ -559,6 +598,7 @@ fn config(storage_root: &Path) -> Config {
         require_device_match: false,
         expected_device: None,
         media_preview: None,
+        document_preview_url: None,
         max_file_size: 1024 * 1024,
         owner_quota_bytes: 1024 * 1024,
         min_free_bytes: 0,
@@ -579,6 +619,7 @@ fn make_app(pool: PgPool, storage_root: &Path) -> Router {
         pool,
         storage,
         media_preview: None,
+        document_preview_url: None,
         google_drive: None,
         auth_settings: AuthSettings {
             cookie_secure: false,

@@ -614,6 +614,74 @@ async fn inline_media_preview_sniffs_content_preserves_ranges_and_checks_owner()
         Some(previews.clone()),
     );
 
+    let document_id = seed_file(
+        &pool,
+        owner_id,
+        temporary_storage.path(),
+        "readme.md",
+        b"# A rendered Markdown preview\n",
+    )
+    .await;
+    let document_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{document_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(document_preview.status(), StatusCode::OK);
+    assert_eq!(
+        document_preview.headers()[CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(
+        response_bytes(document_preview).await.as_slice(),
+        b"# A rendered Markdown preview\n"
+    );
+    let foreign_document_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{document_id}/preview"),
+        Some(&other_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(foreign_document_preview.status(), StatusCode::NOT_FOUND);
+
+    let pdf_id = seed_file(
+        &pool,
+        owner_id,
+        temporary_storage.path(),
+        "report.pdf",
+        b"%PDF-1.7\npreview fixture",
+    )
+    .await;
+    let pdf_preview = request(
+        &app,
+        Method::GET,
+        &format!("/api/files/{pdf_id}/preview"),
+        Some(&owner_session),
+        None,
+        None,
+        &[],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(pdf_preview.status(), StatusCode::OK);
+    assert_eq!(pdf_preview.headers()[CONTENT_TYPE], "application/pdf");
+    assert_eq!(pdf_preview.headers()["x-frame-options"], "SAMEORIGIN");
+    assert_eq!(
+        pdf_preview.headers()["content-security-policy"],
+        "default-src 'none'; frame-ancestors 'self'"
+    );
+
     let image_id = seed_file(
         &pool,
         owner_id,
@@ -1251,6 +1319,7 @@ fn make_app_with_preview(
         require_device_match: false,
         expected_device: None,
         media_preview: None,
+        document_preview_url: None,
         max_file_size: 1024,
         owner_quota_bytes: 1024,
         min_free_bytes: 0,
@@ -1267,6 +1336,7 @@ fn make_app_with_preview(
         pool,
         storage,
         media_preview,
+        document_preview_url: None,
         google_drive: None,
         auth_settings: AuthSettings {
             cookie_secure: false,

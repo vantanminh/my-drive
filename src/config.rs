@@ -18,6 +18,7 @@ pub struct Config {
     pub upload_session_ttl_seconds: u64,
     pub trash_retention_days: u64,
     pub session_ttl_seconds: u64,
+    pub document_preview_url: Option<String>,
     pub bootstrap_owner: Option<BootstrapOwner>,
     pub cookie_secure: bool,
     pub google_drive: Option<GoogleDriveSettings>,
@@ -207,6 +208,24 @@ impl Config {
             return Err(ConfigError::Invalid("TRASH_RETENTION_DAYS"));
         }
         let google_drive = google_drive_settings(vars)?;
+        let document_preview_url = match nonempty(vars, "DOCUMENT_PREVIEW_URL") {
+            Some(value) => {
+                let url = reqwest::Url::parse(value)
+                    .map_err(|_| ConfigError::Invalid("DOCUMENT_PREVIEW_URL"))?;
+                if url.scheme() != "http"
+                    || url.host_str().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.path() != "/"
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    return Err(ConfigError::Invalid("DOCUMENT_PREVIEW_URL"));
+                }
+                Some(value.trim_end_matches('/').to_owned())
+            }
+            None => None,
+        };
 
         Ok(Self {
             database_url,
@@ -224,6 +243,7 @@ impl Config {
             upload_session_ttl_seconds,
             trash_retention_days,
             session_ttl_seconds,
+            document_preview_url,
             bootstrap_owner,
             cookie_secure: bool_value(vars, "COOKIE_SECURE", true)?,
             google_drive,
@@ -407,6 +427,35 @@ mod tests {
             Config::from_vars(&vars),
             Err(ConfigError::Missing("STORAGE_ROOT"))
         ));
+    }
+
+    #[test]
+    fn document_preview_url_must_be_a_plain_http_service_origin() {
+        let mut vars = base_vars();
+        vars.insert(
+            "DOCUMENT_PREVIEW_URL".to_owned(),
+            "http://document-preview:3100".to_owned(),
+        );
+        assert_eq!(
+            Config::from_vars(&vars)
+                .expect("accept the internal preview service")
+                .document_preview_url
+                .as_deref(),
+            Some("http://document-preview:3100")
+        );
+
+        for value in [
+            "https://document-preview:3100",
+            "http://user:password@document-preview:3100",
+            "http://document-preview:3100/convert/docx",
+            "http://document-preview:3100/?target=localhost",
+        ] {
+            vars.insert("DOCUMENT_PREVIEW_URL".to_owned(), value.to_owned());
+            assert!(matches!(
+                Config::from_vars(&vars),
+                Err(ConfigError::Invalid("DOCUMENT_PREVIEW_URL"))
+            ));
+        }
     }
 
     #[test]

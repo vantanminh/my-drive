@@ -62,19 +62,27 @@ function formatPlaybackTime(seconds: number): string {
   return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
 }
 
-type SourceSet = { preview: string; thumbnail?: string; download?: string };
+export type PreviewSourceSet = { preview: string; thumbnail?: string; download?: string };
 
-type Props = {
+export type MediaViewerProps = {
   entry?: ViewerItem;
   items?: ViewerItem[];
   index?: number;
   onIndexChange?: (index: number) => void;
   onClose: () => void;
-  sources?: SourceSet;
-  sourceFor?: (item: ViewerItem) => SourceSet;
+  sources?: PreviewSourceSet;
+  sourceFor?: (item: ViewerItem) => PreviewSourceSet;
   showDownload?: boolean;
   loadDetails?: (item: ViewerItem) => Promise<EntryDetails | null>;
 };
+
+export function isDocumentPreviewable(entry: Pick<ViewerItem, 'name'>): boolean {
+  return /\.(pdf|docx?|pptx?|xlsx?|rtf|csv|txt|md|markdown|json)$/i.test(entry.name);
+}
+
+export function isFilePreviewable(entry: Pick<ViewerItem, 'name' | 'mime_detected'> & { mime_type?: string | null }): boolean {
+  return mediaKindFor(entry) !== null || isDocumentPreviewable(entry);
+}
 
 export default function MediaViewer({
   entry,
@@ -86,7 +94,7 @@ export default function MediaViewer({
   sourceFor,
   showDownload = true,
   loadDetails
-}: Props) {
+}: MediaViewerProps) {
   const gallery = items && items.length > 0 ? items : entry ? [entry] : [];
   const safeIndex = Math.min(Math.max(index, 0), Math.max(gallery.length - 1, 0));
   const current = gallery[safeIndex];

@@ -528,6 +528,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .drive-table { border-top-left-radius: 0; border-top-right-radius: 0; }
 .drive-table > .drive-grid { content-visibility: auto; contain-intrinsic-size: 68px; }
+.drive-table > .drive-grid:has(.row-menu[open]) { position: relative; z-index: 26; content-visibility: visible; }
 .table-row {
   min-height: 68px;
   padding: 0 19px;
@@ -1390,12 +1391,45 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   grid-row: 2;
   overflow: auto;
   padding: 8px 16px 18px;
-  background: #182226;
-  border-left: 1px solid rgb(255 255 255 / 8%);
+  color: #182432;
+  background: #f8faf9;
+  border-left: 1px solid #dce4e0;
 }
-.viewer-info dt { color: #b7c2c0; }
-.viewer-info dd { color: #f4f7f6; }
+.viewer-info header { color: #182432; }
+.viewer-info dt { color: #596971; }
+.viewer-info dd { color: #182432; }
+.viewer-info .viewer-icon { color: #42535b; }
+.viewer-info .viewer-icon:hover { background: #e8efec; }
 .viewer-error { gap: 8px; padding: 24px; text-align: center; }
+.viewer-document-stage { display: grid; min-height: 0; background: #e6e9e8; }
+.viewer-document-frame { display: block; width: 100%; height: 100%; min-height: 0; background: #fff; border: 0; }
+.viewer-document-scroll { width: 100%; height: 100%; overflow: auto; padding: 26px; }
+.viewer-document-sheet {
+  width: min(100%, 900px);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: clamp(24px, 5vw, 64px);
+  color: #24313a;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 16px 42px rgb(25 35 38 / 12%);
+}
+.viewer-plain-text { overflow-wrap: anywhere; white-space: pre-wrap; font: 13px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.viewer-plain-text code { font: inherit; }
+.viewer-markdown { line-height: 1.7; overflow-wrap: anywhere; }
+.viewer-markdown > :first-child { margin-top: 0; }
+.viewer-markdown h1, .viewer-markdown h2, .viewer-markdown h3, .viewer-markdown h4 { margin: 1.5em 0 .6em; color: #1d2a32; line-height: 1.25; }
+.viewer-markdown h1 { padding-bottom: .35em; border-bottom: 1px solid #e4e9e7; }
+.viewer-markdown p, .viewer-markdown ul, .viewer-markdown ol, .viewer-markdown blockquote { margin: .9em 0; }
+.viewer-markdown blockquote { padding: 2px 0 2px 16px; color: #5a676e; border-left: 3px solid #b9cec3; }
+.viewer-markdown pre { overflow: auto; padding: 16px; background: #f3f6f4; border-radius: 8px; }
+.viewer-markdown :not(pre) > code { padding: 2px 5px; background: #eef2f0; border-radius: 4px; font: .9em ui-monospace, SFMono-Regular, Consolas, monospace; }
+.viewer-markdown table { display: block; width: 100%; overflow-x: auto; border-collapse: collapse; }
+.viewer-markdown th, .viewer-markdown td { padding: 8px 11px; border: 1px solid #dce4e0; text-align: left; }
+.viewer-markdown th { background: #f3f6f4; }
+.viewer-markdown a { color: #276b4d; text-decoration: underline; text-underline-offset: 2px; }
+.viewer-document-status, .viewer-document-warning { width: min(100%, 900px); margin: 0 auto 12px; padding: 10px 14px; color: #34443d; background: #fff; border-radius: 8px; }
+.viewer-document-warning { color: #73521a; background: #fff5df; }
 
 .photos-page { min-width: 0; }
 .photos-tabs { gap: 6px; margin-bottom: 18px; }
@@ -1486,7 +1520,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .viewer-backdrop { padding: 0; }
   .viewer-shell { border-radius: 0; }
   .viewer-shell.viewer-with-info { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) auto auto; }
-  .viewer-info { grid-column: 1; grid-row: 4; max-height: 34vh; border-top: 1px solid rgb(255 255 255 / 8%); border-left: 0; }
+  .viewer-info { grid-column: 1; grid-row: 4; max-height: 34vh; border-top: 1px solid #dce4e0; border-left: 0; }
   .viewer-hide-narrow { display: none; }
   .details-drawer { top: auto; right: 12px; bottom: calc(74px + env(safe-area-inset-bottom)); left: 12px; width: auto; max-height: 46vh; }
   .photos-heading, .explorer-toolbar { align-items: stretch; flex-direction: column; }

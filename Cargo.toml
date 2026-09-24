@@ -8,6 +8,10 @@ publish = false
 name = "my-drive-media-indexer"
 path = "src/bin/media-indexer.rs"
 
+[[bin]]
+name = "my-drive-document-preview"
+path = "src/bin/document-preview.rs"
+
 [dependencies]
 anyhow = "1"
 argon2 = "0.5"
@@ -32,7 +36,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 aes-gcm = "0.10"
 
 [dev-dependencies]

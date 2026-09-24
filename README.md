@@ -149,12 +149,14 @@ expiry, trashing a shared folder, or reaching `max_downloads` disables access.
 ## Running a prebuilt Docker image
 
 GitHub Actions validates and builds the Docker targets (`runtime`,
-`media-indexer-runtime`, and `media-indexer-db-setup`) for pull requests into
+`document-preview-runtime`, `media-indexer-runtime`, and
+`media-indexer-db-setup`) for pull requests into
 `master`. A push to `master`
 publishes the `latest`, `master`, and `sha-<commit>` tags. Pushing a version
 tag such as `v1.2.3` publishes `v1.2.3` and `sha-<commit>` tags. Images are
 built for `linux/amd64` and published to GHCR as
-`ghcr.io/<owner>/<repository>` and
+`ghcr.io/<owner>/<repository>`,
+`ghcr.io/<owner>/<repository>-document-preview`, and
 `ghcr.io/<owner>/<repository>-indexer`; the owner and repository come from
 GitHub and are lowercased for valid GHCR names. The workflow uses the
 repository-provided `GITHUB_TOKEN` and does not need a separate registry
@@ -167,21 +169,24 @@ For a Linux deployment, keep `compose.yaml`,
 need the source checkout at runtime.
 Prepare the SSD and mounted HDD paths as described in
 [Single-server Compose deployment](#single-server-compose-deployment), then set
-`MY_DRIVE_IMAGE` and `MY_DRIVE_INDEXER_IMAGE` in `.env` to the published tags
+`MY_DRIVE_IMAGE`, `MY_DRIVE_DOCUMENT_PREVIEW_IMAGE`, and
+`MY_DRIVE_INDEXER_IMAGE` in `.env` to the published tags
 you want to run. For the latest images from `master`, use:
 
 ```dotenv
 MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:latest
+MY_DRIVE_DOCUMENT_PREVIEW_IMAGE=ghcr.io/vantanminh/my-drive-document-preview:latest
 MY_DRIVE_INDEXER_IMAGE=ghcr.io/vantanminh/my-drive-indexer:latest
 ```
 
 Pull and start it:
 
 ```sh
-docker compose pull app media-indexer
+docker compose pull app document-preview media-indexer
 docker compose up -d
 docker compose ps
 docker compose logs -f app
+docker compose logs -f document-preview
 docker compose logs -f media-indexer
 ```
 
@@ -192,10 +197,11 @@ Linux. It uses named Docker volumes for PostgreSQL, uploaded files, and previews
 it does not require physical HDD or SSD mounts. It is for local development,
 while `compose.yaml` below is the Linux single-server deployment configuration.
 
-Build both images from the repository root:
+Build the app, document preview, and media-indexer images from the repository root:
 
 ```sh
 docker build --target runtime -t my-drive:local .
+docker build --target document-preview-runtime -t my-drive-document-preview:local .
 docker build --target media-indexer-runtime -t my-drive-indexer:local .
 docker build --target media-indexer-db-setup -t my-drive-indexer-db-setup:local .
 ```
@@ -223,15 +229,27 @@ them while keeping their data:
 
 ```sh
 docker compose --env-file .env.local -f compose.local.yaml logs -f app
+docker compose --env-file .env.local -f compose.local.yaml logs -f document-preview
 docker compose --env-file .env.local -f compose.local.yaml logs -f media-indexer
 docker compose --env-file .env.local -f compose.local.yaml down
 ```
 
 The app image contains the Rust service and built web client. The separate
+document preview image runs LibreOffice in a read-only, resource-limited
+container on an internal-only network; it has no database or file-storage
+mounts and removes each temporary conversion after returning its PDF. The
 indexer image contains the constrained image decoder and worker, while the
-database setup image grants the restricted indexer role. Neither image
-contains secrets or persistent data. The named volumes retain PostgreSQL,
-uploaded files, and generated previews across container restarts.
+database setup image grants the restricted indexer role. The named volumes
+retain PostgreSQL, uploaded files, and generated media previews across
+container restarts.
+
+Preview is available for PDF, DOC/DOCX, PPT/PPTX, XLS/XLSX, RTF, CSV, TXT,
+Markdown, and JSON files in both the private drive and public share links.
+Office and CSV files are converted to PDF locally; PDF uses the browser viewer,
+and text, Markdown, and JSON are rendered in the app. Public previews still
+require a valid share token and any configured password grant; disabling
+downloads hides and blocks the original-download action without disabling the
+preview.
 
 To run the published GHCR images with the same local named-volume setup, set
 the two image values in `.env.local` to a matching SHA tag, then pull and start
@@ -240,12 +258,14 @@ HDD and SSD bind mounts:
 
 ```dotenv
 MY_DRIVE_IMAGE=ghcr.io/vantanminh/my-drive:sha-0beee84
+MY_DRIVE_DOCUMENT_PREVIEW_IMAGE=ghcr.io/vantanminh/my-drive-document-preview:sha-0beee84
 MY_DRIVE_INDEXER_IMAGE=ghcr.io/vantanminh/my-drive-indexer:sha-0beee84
 MY_DRIVE_INDEXER_DB_SETUP_IMAGE=ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-0beee84
 ```
 
 ```powershell
 docker pull ghcr.io/vantanminh/my-drive:sha-0beee84
+docker pull ghcr.io/vantanminh/my-drive-document-preview:sha-0beee84
 docker pull ghcr.io/vantanminh/my-drive-indexer:sha-0beee84
 docker pull ghcr.io/vantanminh/my-drive-indexer-db-setup:sha-0beee84
 docker compose --env-file .env.local -f compose.local.yaml up -d
@@ -253,7 +273,7 @@ docker compose --env-file .env.local -f compose.local.yaml ps
 ```
 
 Use the exact SHA tags from the commit you want to run. The explicit
-`docker pull` commands pin the selected app, indexer, and database setup images;
+`docker pull` commands pin the selected app, document-preview, indexer, and database setup images;
 `compose.local.yaml` also uses `pull_policy: missing`, so a clean machine can
 pull a referenced GHCR tag while an already available local image is reused.
 The database setup image only grants the restricted indexer role; it does not
@@ -311,8 +331,9 @@ physical HDD and SSD mounts and device IDs. Keep `compose.yaml`,
    required when preview storage is configured.
 4. Set `BOOTSTRAP_OWNER_EMAIL` and a unique `BOOTSTRAP_OWNER_PASSWORD` for the
    first run only. The password is Argon2id-hashed before it reaches PostgreSQL.
- 5. Set both `MY_DRIVE_IMAGE` and `MY_DRIVE_INDEXER_IMAGE` in `.env` to matching
-   GHCR tags, then pull them with `docker compose pull app media-indexer`. If
+5. Set `MY_DRIVE_IMAGE`, `MY_DRIVE_DOCUMENT_PREVIEW_IMAGE`, and
+   `MY_DRIVE_INDEXER_IMAGE` in `.env` to matching GHCR tags, then pull them with
+   `docker compose pull app document-preview media-indexer`. If
    using locally built tags, skip the pull. Start the services with
    `docker compose up -d`. The app binds to loopback; configure a reverse proxy
     to terminate TLS. Do not expose the app port directly to the public internet.

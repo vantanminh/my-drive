@@ -2,14 +2,15 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent,
 import {
   Activity, Check, ChevronDown, ChevronRight, CircleUserRound, Cloud, CloudUpload, Download, Eye, File, FileImage, Film,
   FileSpreadsheet, FileText, Folder, FolderPlus, Gauge, HardDrive, Images, Info, LayoutGrid, List, LockKeyhole, LogOut, MoreHorizontal,
-  Pause, Play, RotateCcw, ScanFace, Search, Share2, SlidersHorizontal, Trash2, Upload, Users, X
+  Pause, Play, Presentation, RotateCcw, ScanFace, Search, Share2, SlidersHorizontal, Trash2, Upload, Users, X
 } from 'lucide-react';
 import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import { buildDrivePath, clearSearchParam, emptyFilters, hasActiveFilters, navigateTo, parseDriveRoute, useBrowserHref, type DriveFilters, type DriveOrder, type DrivePanel, type DriveSort } from '../route';
 import type { Entry, EntryDetails, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
-import MediaViewer, { mediaKindFor } from './MediaViewer';
+import FilePreviewer from './FilePreviewer';
+import { isFilePreviewable, mediaKindFor } from './MediaViewer';
 import AccountManagementPanel from './AccountManagementPanel';
 import FaceManagementPanel from './FaceManagementPanel';
 import PhotosPage from './PhotosPage';
@@ -82,7 +83,8 @@ function extensionIcon(entry: { kind: string; name: string }) {
   const name = entry.name.toLowerCase();
   if (/\.(png|jpe?g|gif|webp|avif|bmp|ico|svg|tiff?|heic|heif)$/.test(name)) return <FileImage size={20} strokeWidth={1.8} className="file-icon image-icon" />;
   if (/\.(mp4|m4v|webm|mov|qt|mkv|mk3d|avi|ogv|ogg|mpg|mpeg|mpe|ts|mts|m2ts|flv|wmv|asf|3gp|3g2)$/.test(name)) return <Film size={20} strokeWidth={1.8} className="file-icon video-icon" />;
-  if (/\.(pdf|docx?|txt|md|rtf)$/.test(name)) return <FileText size={20} strokeWidth={1.8} className="file-icon document-icon" />;
+  if (/\.(pptx?)$/.test(name)) return <Presentation size={20} strokeWidth={1.8} className="file-icon document-icon" />;
+  if (/\.(pdf|docx?|txt|md|markdown|json|rtf)$/.test(name)) return <FileText size={20} strokeWidth={1.8} className="file-icon document-icon" />;
   if (/\.(xlsx?|csv|numbers)$/.test(name)) return <FileSpreadsheet size={20} strokeWidth={1.8} className="file-icon sheet-icon" />;
   return <File size={20} strokeWidth={1.8} className="file-icon" />;
 }
@@ -514,7 +516,7 @@ function EntryMenu({
           <button onClick={(event) => { closeMenu(event); onOpen(); }}><Folder size={15} /> Open folder</button>
         ) : (
           <>
-            {mediaKindFor(entry) && <button onClick={(event) => { closeMenu(event); onPreview(); }}><Eye size={15} /> Preview</button>}
+            {isFilePreviewable(entry) && <button onClick={(event) => { closeMenu(event); onPreview(); }}><Eye size={15} /> Preview</button>}
             <button onClick={(event) => { closeMenu(event); onDownload(); }}><Download size={15} /> Download</button>
           </>
         )}
@@ -1181,7 +1183,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
   const searchActive = section === 'drive' && (query.trim().length > 0 || filtersReady(route.filters, currentFolderId));
   const visibleRows = entries;
-  const previewItems = visibleRows.filter((entry) => entry.kind === 'file' && mediaKindFor(entry));
+  const previewItems = visibleRows.filter((entry) => entry.kind === 'file' && isFilePreviewable(entry));
   const pendingJobs = jobs.filter((job) => job.status !== 'done');
   const sortValue = `${route.sort}:${route.order}`;
   const allTrashSelected = section === 'trash' && visibleRows.length > 0 && visibleRows.every((entry) => trashSelection.includes(entry.id));
@@ -1541,7 +1543,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                   const open = () => {
                     if (section === 'trash') return;
                     if (entry.kind === 'folder') void openFolder(entry);
-                    else if (mediaKindFor(entry)) openPreview(entry);
+                    else if (isFilePreviewable(entry)) openPreview(entry);
                     else window.location.assign(downloadUrl(entry.id));
                   };
                   const actions = section === 'trash' ? (
@@ -1604,7 +1606,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                         {entry.kind === 'folder' && section !== 'trash' ? (
                           <button className="entry-name" onClick={() => void openFolder(entry)}>{entry.name}</button>
                         ) : entry.kind === 'file' && section !== 'trash' ? (
-                          mediaKindFor(entry) ? (
+                          isFilePreviewable(entry) ? (
                             <button className="entry-name" onClick={() => openPreview(entry)}>{entry.name}</button>
                           ) : <a className="entry-name" href={downloadUrl(entry.id)}>{entry.name}</a>
                         ) : (
@@ -1778,7 +1780,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       )}
 
       {viewer && (
-        <MediaViewer
+        <FilePreviewer
           items={previewItems.length ? previewItems : [viewer]}
           index={Math.max(previewItems.findIndex((item) => item.id === viewer.id), 0)}
           onIndexChange={(next) => {

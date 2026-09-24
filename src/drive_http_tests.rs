@@ -366,6 +366,7 @@ fn make_app(pool: PgPool) -> (Router, tempfile::TempDir) {
         require_device_match: false,
         expected_device: None,
         media_preview: None,
+        document_preview_url: None,
         max_file_size: 1024,
         owner_quota_bytes: 4096,
         min_free_bytes: 0,
@@ -382,6 +383,7 @@ fn make_app(pool: PgPool) -> (Router, tempfile::TempDir) {
         pool,
         storage,
         media_preview: None,
+        document_preview_url: None,
         google_drive: None,
         auth_settings: AuthSettings {
             cookie_secure: false,

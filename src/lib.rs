@@ -84,6 +84,7 @@ pub async fn run() -> anyhow::Result<()> {
     let maintenance_pool = pool.clone();
     let maintenance_storage = storage.clone();
     let google_drive = config.google_drive.clone();
+    let document_preview_url = config.document_preview_url.clone();
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server. Google OAuth material stays
     // only on the sync worker and request state when the feature is configured.
@@ -92,6 +93,7 @@ pub async fn run() -> anyhow::Result<()> {
         pool,
         storage,
         media_preview,
+        document_preview_url,
         google_drive: google_drive.clone(),
         auth_settings,
         transfer_settings,

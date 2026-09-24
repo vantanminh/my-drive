@@ -13,6 +13,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub storage: LocalStorage,
     pub media_preview: Option<PreviewStorage>,
+    pub document_preview_url: Option<String>,
     pub google_drive: Option<GoogleDriveSettings>,
     pub auth_settings: AuthSettings,
     pub transfer_settings: TransferSettings,

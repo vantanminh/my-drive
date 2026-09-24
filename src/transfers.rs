@@ -1,6 +1,6 @@
 mod range;
 
-use std::{io, time::SystemTime};
+use std::{io, sync::LazyLock, time::SystemTime};
 
 use axum::{
     Json, Router,
@@ -41,7 +41,17 @@ const IMAGE_PREVIEW_RECIPE_VERSION: i16 = 1;
 const VIDEO_THUMBNAIL_RECIPE_VERSION: i16 = 1;
 const MAX_CARD_DERIVATIVE_BYTES: u64 = 512 * 1024;
 const MAX_VIDEO_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_TEXT_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_OFFICE_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_DOCUMENT_PDF_BYTES: u64 = 64 * 1024 * 1024;
 const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id";
+static DOCUMENT_PREVIEW_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(40))
+        .build()
+        .expect("the document preview HTTP client configuration is valid")
+});
 
 #[derive(Debug, Error)]
 pub(crate) enum TransferError {
@@ -1044,7 +1054,7 @@ pub(crate) async fn preview_response(
     request_headers: &HeaderMap,
     head_only: bool,
 ) -> Result<Response, TransferError> {
-    download_response_inner(state, owner_id, id, request_headers, head_only, true, true).await
+    preview_response_inner(state, owner_id, id, request_headers, head_only, true).await
 }
 
 pub(crate) async fn preview_derivative_response(
@@ -1054,7 +1064,268 @@ pub(crate) async fn preview_derivative_response(
     request_headers: &HeaderMap,
     head_only: bool,
 ) -> Result<Response, TransferError> {
-    download_response_inner(state, owner_id, id, request_headers, head_only, true, false).await
+    preview_response_inner(state, owner_id, id, request_headers, head_only, false).await
+}
+
+async fn preview_response_inner(
+    state: &AppState,
+    owner_id: Uuid,
+    id: Uuid,
+    request_headers: &HeaderMap,
+    head_only: bool,
+    allow_original_media: bool,
+) -> Result<Response, TransferError> {
+    let entry = load_download_record(state, owner_id, id).await?;
+    if entry.state != "ready" {
+        return Err(TransferError::NotFound);
+    }
+    let header = read_storage_header(state, &entry.storage_key).await?;
+    if let Some(kind) = document_preview_kind(&entry.name, &header) {
+        return match kind {
+            DocumentPreviewKind::Pdf => {
+                // A PDF is itself the browser-safe preview representation. Shares
+                // with downloads disabled may still render it inline.
+                download_response_inner(state, owner_id, id, request_headers, head_only, true, true)
+                    .await
+            }
+            DocumentPreviewKind::Text => {
+                document_preview_response(state, &entry, kind, head_only).await
+            }
+            DocumentPreviewKind::Office(format) => {
+                document_preview_response(
+                    state,
+                    &entry,
+                    DocumentPreviewKind::Office(format),
+                    head_only,
+                )
+                .await
+            }
+        };
+    }
+    download_response_inner(
+        state,
+        owner_id,
+        id,
+        request_headers,
+        head_only,
+        true,
+        allow_original_media,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DocumentPreviewKind {
+    Pdf,
+    Text,
+    Office(&'static str),
+}
+
+fn document_preview_kind(name: &str, header: &[u8]) -> Option<DocumentPreviewKind> {
+    if header.starts_with(b"%PDF-") {
+        return Some(DocumentPreviewKind::Pdf);
+    }
+    let extension = std::path::Path::new(name)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "pdf" if header.starts_with(b"%PDF-") => Some(DocumentPreviewKind::Pdf),
+        "txt" | "md" | "markdown" | "json"
+            if !header.contains(&0)
+                && !is_office_container_header(header)
+                && valid_utf8_prefix(header) =>
+        {
+            Some(DocumentPreviewKind::Text)
+        }
+        "doc" | "ppt" | "xls"
+            if header.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) =>
+        {
+            Some(DocumentPreviewKind::Office(match extension.as_str() {
+                "doc" => "doc",
+                "ppt" => "ppt",
+                _ => "xls",
+            }))
+        }
+        "docx" | "pptx" | "xlsx"
+            if header.starts_with(b"PK\x03\x04")
+                || header.starts_with(b"PK\x05\x06")
+                || header.starts_with(b"PK\x07\x08") =>
+        {
+            Some(DocumentPreviewKind::Office(match extension.as_str() {
+                "docx" => "docx",
+                "pptx" => "pptx",
+                _ => "xlsx",
+            }))
+        }
+        "rtf" if header.starts_with(b"{\\rtf") => Some(DocumentPreviewKind::Office("rtf")),
+        "csv"
+            if !header.contains(&0)
+                && !is_office_container_header(header)
+                && valid_utf8_prefix(header) =>
+        {
+            Some(DocumentPreviewKind::Office("csv"))
+        }
+        _ => None,
+    }
+}
+
+fn is_office_container_header(header: &[u8]) -> bool {
+    header.starts_with(b"PK\x03\x04")
+        || header.starts_with(b"PK\x05\x06")
+        || header.starts_with(b"PK\x07\x08")
+        || header.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])
+}
+
+fn valid_utf8_prefix(bytes: &[u8]) -> bool {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => true,
+        Err(error) => error.error_len().is_none(),
+    }
+}
+
+async fn read_storage_header(
+    state: &AppState,
+    storage_key: &str,
+) -> Result<Vec<u8>, TransferError> {
+    let mut file = state
+        .storage
+        .open_object(storage_key)
+        .await
+        .map_err(TransferError::Storage)?;
+    let mut header = [0_u8; 512];
+    let length = file
+        .read(&mut header)
+        .await
+        .map_err(|error| TransferError::Storage(StorageError::Io(error)))?;
+    Ok(header[..length].to_vec())
+}
+
+async fn document_preview_response(
+    state: &AppState,
+    entry: &DownloadRecord,
+    kind: DocumentPreviewKind,
+    head_only: bool,
+) -> Result<Response, TransferError> {
+    let source_size = u64::try_from(entry.size_bytes).map_err(|_| TransferError::Inconsistent)?;
+    let (bytes, mime_type) = match kind {
+        DocumentPreviewKind::Text => {
+            if source_size > MAX_TEXT_PREVIEW_BYTES {
+                return Err(TransferError::PayloadTooLarge);
+            }
+            let mut file = state
+                .storage
+                .open_object(&entry.storage_key)
+                .await
+                .map_err(TransferError::Storage)?;
+            let mut bytes = Vec::with_capacity(
+                usize::try_from(source_size).map_err(|_| TransferError::PayloadTooLarge)?,
+            );
+            file.read_to_end(&mut bytes)
+                .await
+                .map_err(|error| TransferError::Storage(StorageError::Io(error)))?;
+            std::str::from_utf8(&bytes).map_err(|_| TransferError::UnsupportedPreview)?;
+            (bytes, "text/plain; charset=utf-8")
+        }
+        DocumentPreviewKind::Office(format) => {
+            if source_size > MAX_OFFICE_PREVIEW_BYTES {
+                return Err(TransferError::PayloadTooLarge);
+            }
+            let base_url = state
+                .document_preview_url
+                .as_deref()
+                .ok_or(TransferError::UnsupportedPreview)?;
+            let file = state
+                .storage
+                .open_object(&entry.storage_key)
+                .await
+                .map_err(TransferError::Storage)?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(file.take(source_size)));
+            let response = DOCUMENT_PREVIEW_CLIENT
+                .post(format!("{base_url}/convert/{format}"))
+                .body(body)
+                .send()
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        file_version_id = %entry.file_version_id,
+                        error = %error,
+                        "isolated document preview conversion request failed"
+                    );
+                    TransferError::UnsupportedPreview
+                })?;
+            if !response.status().is_success()
+                || response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .is_none_or(|value| value != "application/pdf")
+            {
+                tracing::warn!(
+                    file_version_id = %entry.file_version_id,
+                    status = %response.status(),
+                    "isolated document preview conversion was rejected"
+                );
+                return Err(TransferError::UnsupportedPreview);
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_DOCUMENT_PDF_BYTES)
+            {
+                return Err(TransferError::PayloadTooLarge);
+            }
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|_| TransferError::UnsupportedPreview)?;
+            if bytes.is_empty()
+                || bytes.len() as u64 > MAX_DOCUMENT_PDF_BYTES
+                || !bytes.starts_with(b"%PDF-")
+            {
+                return Err(TransferError::UnsupportedPreview);
+            }
+            (bytes.to_vec(), "application/pdf")
+        }
+        DocumentPreviewKind::Pdf => return Err(TransferError::Inconsistent),
+    };
+    let etag = format!("\"{:x}\"", sha2::Sha256::digest(&bytes));
+    let modified = httpdate::fmt_http_date(SystemTime::from(entry.version_created_at));
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static(mime_type));
+    headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline; filename=\"preview\""),
+    );
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    if mime_type == "application/pdf" {
+        headers.insert(
+            "content-security-policy",
+            HeaderValue::from_static("default-src 'none'; frame-ancestors 'self'"),
+        );
+        headers.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
+    }
+    headers.insert(
+        ETAG,
+        HeaderValue::from_str(&etag).map_err(|_| TransferError::Inconsistent)?,
+    );
+    headers.insert(
+        LAST_MODIFIED,
+        HeaderValue::from_str(&modified).map_err(|_| TransferError::Inconsistent)?,
+    );
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&bytes.len().to_string()).map_err(|_| TransferError::Inconsistent)?,
+    );
+    let mut response = Response::new(if head_only {
+        Body::empty()
+    } else {
+        Body::from(bytes)
+    });
+    *response.headers_mut() = headers;
+    Ok(response)
 }
 
 pub(crate) async fn download_response(
@@ -1195,8 +1466,15 @@ async fn download_response_inner(
     if inline_preview {
         response_headers.insert(
             "content-security-policy",
-            HeaderValue::from_static("default-src 'none'; sandbox"),
+            HeaderValue::from_static(if representation_mime == Some("application/pdf") {
+                "default-src 'none'; frame-ancestors 'self'"
+            } else {
+                "default-src 'none'; sandbox"
+            }),
         );
+        if representation_mime == Some("application/pdf") {
+            response_headers.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
+        }
     }
     response_headers.insert(
         ETAG,
@@ -1491,6 +1769,7 @@ async fn sniff_media_type_from_storage(
 
 fn safe_preview_mime(mime: &str) -> Option<&'static str> {
     match mime {
+        "application/pdf" => Some("application/pdf"),
         "image/jpeg" => Some("image/jpeg"),
         "image/png" => Some("image/png"),
         "image/gif" => Some("image/gif"),
@@ -1527,6 +1806,9 @@ fn if_range_matches(value: &str, etag: &str, last_modified: SystemTime) -> bool 
 }
 
 fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(b"%PDF-") {
+        return Some("application/pdf");
+    }
     if header.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some("image/png");
     }
@@ -1767,15 +2049,17 @@ mod media_type_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::{
-        if_none_match_matches, if_range_matches, is_face_indexable_media, is_indexable_image_mime,
-        is_indexable_video_mime, media_index_task, safe_preview_mime, sniff_media_type,
-        supports_video_preview, supports_viewer_derivative, thumbnail_variant_for_mime,
+        DocumentPreviewKind, document_preview_kind, if_none_match_matches, if_range_matches,
+        is_face_indexable_media, is_indexable_image_mime, is_indexable_video_mime,
+        media_index_task, safe_preview_mime, sniff_media_type, supports_video_preview,
+        supports_viewer_derivative, thumbnail_variant_for_mime,
     };
 
     #[test]
     fn detects_supported_media_from_file_signatures() {
         let transport_stream = [0x47_u8; 512];
         let samples: &[(&[u8], &str)] = &[
+            (b"%PDF-1.7\nrest", "application/pdf"),
             (b"\x89PNG\r\n\x1a\nrest", "image/png"),
             (b"\xff\xd8\xffrest", "image/jpeg"),
             (b"GIF89arest", "image/gif"),
@@ -1850,6 +2134,42 @@ mod media_type_tests {
         );
         assert_eq!(safe_preview_mime("image/svg+xml"), None);
         assert_eq!(safe_preview_mime("text/html"), None);
+        assert_eq!(
+            safe_preview_mime("application/pdf"),
+            Some("application/pdf")
+        );
+    }
+
+    #[test]
+    fn only_signature_checked_document_formats_are_previewable() {
+        assert_eq!(
+            document_preview_kind("report.PDF", b"%PDF-1.7"),
+            Some(DocumentPreviewKind::Pdf)
+        );
+        assert_eq!(
+            document_preview_kind("notes.md", b"# Safe Markdown\n"),
+            Some(DocumentPreviewKind::Text)
+        );
+        assert_eq!(
+            document_preview_kind("table.xlsx", b"PK\x03\x04OOXML"),
+            Some(DocumentPreviewKind::Office("xlsx"))
+        );
+        assert_eq!(
+            document_preview_kind(
+                "slides.ppt",
+                &[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]
+            ),
+            Some(DocumentPreviewKind::Office("ppt"))
+        );
+        assert_eq!(
+            document_preview_kind("notes.rtf", b"{\\rtf1\\ansi"),
+            Some(DocumentPreviewKind::Office("rtf"))
+        );
+        assert_eq!(document_preview_kind("payload.pdf", b"not a PDF"), None);
+        assert_eq!(document_preview_kind("payload.docx", b"not a ZIP"), None);
+        assert_eq!(document_preview_kind("active.html", b"<script>"), None);
+        assert_eq!(document_preview_kind("binary.txt", b"a\0b"), None);
+        assert_eq!(document_preview_kind("macro.xlsm", b"PK\x03\x04"), None);
     }
 
     #[test]

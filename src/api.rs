@@ -115,7 +115,7 @@ fn apply_security_headers(response: &mut Response) {
         headers.insert(
             HeaderName::from_static("content-security-policy"),
             HeaderValue::from_static(
-                "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self' data:",
+                "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; frame-src 'self' blob:; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self' data:",
             ),
         );
     }
@@ -131,10 +131,12 @@ fn apply_security_headers(response: &mut Response) {
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
-        HeaderName::from_static("x-frame-options"),
-        HeaderValue::from_static("DENY"),
-    );
+    if !headers.contains_key("x-frame-options") {
+        headers.insert(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        );
+    }
     headers.insert(
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
@@ -171,7 +173,18 @@ mod tests {
         );
         let csp = headers["content-security-policy"].to_str().unwrap();
         assert!(csp.contains("media-src 'self' blob:"));
+        assert!(csp.contains("frame-src 'self' blob:"));
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
+
+        let mut same_origin_frame = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .expect("response builder should accept an empty body");
+        same_origin_frame
+            .headers_mut()
+            .insert("x-frame-options", "SAMEORIGIN".parse().unwrap());
+        apply_security_headers(&mut same_origin_frame);
+        assert_eq!(same_origin_frame.headers()["x-frame-options"], "SAMEORIGIN");
     }
 }

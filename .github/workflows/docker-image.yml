@@ -65,6 +65,16 @@ jobs:
           push: false
           cache-from: type=gha,scope=my-drive-indexer
 
+      - name: Build isolated document preview image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: document-preview-runtime
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=my-drive-document-preview
+
       - name: Build indexer database setup image
         uses: docker/build-push-action@v6
         with:
@@ -178,6 +188,7 @@ jobs:
         run: |
           repository="ghcr.io/${GITHUB_REPOSITORY,,}"
           printf 'app=%s\n' "$repository" >> "$GITHUB_OUTPUT"
+          printf 'document_preview=%s-document-preview\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'indexer=%s-indexer\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'db=%s-indexer-db-setup\n' "$repository" >> "$GITHUB_OUTPUT"
 
@@ -197,6 +208,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.images.outputs.indexer }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+
+      - name: Extract document preview image metadata
+        id: document-preview-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.document_preview }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -247,6 +269,19 @@ jobs:
           cache-from: type=gha,scope=my-drive-indexer
           cache-to: type=gha,scope=my-drive-indexer,mode=max
 
+      - name: Build and publish isolated document preview image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: document-preview-runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.document-preview-meta.outputs.tags }}
+          labels: ${{ steps.document-preview-meta.outputs.labels }}
+          cache-from: type=gha,scope=my-drive-document-preview
+          cache-to: type=gha,scope=my-drive-document-preview,mode=max
+
       - name: Build and publish indexer database setup image
         uses: docker/build-push-action@v6
         with:
@@ -289,6 +324,7 @@ jobs:
           BOOTSTRAP_OWNER_EMAIL=ci-owner@example.invalid
           BOOTSTRAP_OWNER_PASSWORD=ci-bootstrap-password-0123456789
           MY_DRIVE_IMAGE=${repository}:sha-${short_sha}
+          MY_DRIVE_DOCUMENT_PREVIEW_IMAGE=${repository}-document-preview:sha-${short_sha}
           MY_DRIVE_INDEXER_IMAGE=${repository}-indexer:sha-${short_sha}
           MY_DRIVE_INDEXER_DB_SETUP_IMAGE=${repository}-indexer-db-setup:sha-${short_sha}
           EOF
