@@ -1,4 +1,5 @@
 #!/bin/sh
+# This script runs inside Linux containers and must keep LF line endings.
 set -eu
 
 : "${POSTGRES_USER:?POSTGRES_USER is required}"
