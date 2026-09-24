@@ -1487,3 +1487,27 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .storage-grid { grid-template-columns: minmax(0, 1fr) auto; }
   .storage-grid span:nth-child(n + 3) { display: none; }
 }
+
+.google-drive-panel {
+  margin: -8px 0 27px;
+  padding: 20px 21px 18px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 5px 20px rgb(24 36 50 / 3%);
+}
+.google-drive-panel h2 { margin: 7px 0 4px; color: #1b2b34; font-size: 18px; }
+.google-drive-panel p, .google-drive-note { color: #66756f; font-size: 12px; line-height: 1.45; }
+.google-drive-toolbar, .google-drive-source-head, .google-drive-folder, .google-drive-crumbs {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+}
+.google-drive-toolbar { margin: 14px 0; }
+.google-drive-browser, .google-drive-sources { display: grid; gap: 8px; margin-top: 14px; }
+.google-drive-folder, .google-drive-sources article {
+  padding: 10px 12px; border: 1px solid #e6eeea; border-radius: 8px; background: #fbfcfb;
+}
+.google-drive-folder > button:first-child, .google-drive-crumbs button {
+  display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: #24312c; cursor: pointer;
+}
+.google-drive-bar { height: 6px; margin: 8px 0; overflow: hidden; background: #e7eeea; border-radius: 99px; }
+.google-drive-bar > span { display: block; height: 100%; background: #3d7a5a; }

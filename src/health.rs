@@ -4,6 +4,7 @@ use sqlx::PgPool;
 
 use crate::{
     auth::{AuthSettings, LoginRateLimiter},
+    config::GoogleDriveSettings,
     storage::{LocalStorage, PreviewStorage},
 };
 
@@ -12,6 +13,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub storage: LocalStorage,
     pub media_preview: Option<PreviewStorage>,
+    pub google_drive: Option<GoogleDriveSettings>,
     pub auth_settings: AuthSettings,
     pub transfer_settings: TransferSettings,
     pub login_rate_limiter: LoginRateLimiter,

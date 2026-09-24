@@ -431,6 +431,7 @@ mod tests {
             session_ttl_seconds: 60,
             bootstrap_owner: None,
             cookie_secure: true,
+            google_drive: None,
         }
     }
 

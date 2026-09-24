@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 export type WorkspaceSection = 'drive' | 'shared' | 'trash' | 'photos' | 'storage';
-export type DrivePanel = 'accounts' | 'faces' | 'indexing' | null;
+export type DrivePanel = 'accounts' | 'faces' | 'indexing' | 'google-drive' | null;
 export type PhotosTab = 'timeline' | 'people' | 'albums';
 export type DriveSort = 'name' | 'updated_at' | 'created_at' | 'size';
 export type DriveOrder = 'asc' | 'desc';
@@ -124,7 +124,7 @@ function fileIdFromSearch(params: URLSearchParams): string | null {
 
 function panelFromSearch(params: URLSearchParams): DrivePanel {
   const panel = params.get('panel');
-  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing') return panel;
+  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive') return panel;
   return null;
 }
 
@@ -214,6 +214,7 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
   if (parts[0] === 'accounts' && parts.length === 1) return blankRoute({ panel: 'accounts' });
   if (parts[0] === 'faces' && parts.length === 1) return blankRoute({ panel: 'faces' });
   if (parts[0] === 'indexing' && parts.length === 1) return blankRoute({ panel: 'indexing' });
+  if (parts[0] === 'google-drive' && parts.length === 1) return blankRoute({ panel: 'google-drive' });
   return drive;
 }
 
@@ -253,6 +254,7 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
     if (route.panel === 'accounts') return '/accounts';
     if (route.panel === 'faces') return '/faces';
     if (route.panel === 'indexing') return '/indexing';
+    if (route.panel === 'google-drive') return '/google-drive';
     return '/drive';
   }
 

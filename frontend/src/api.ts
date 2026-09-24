@@ -54,6 +54,50 @@ export type MediaIndexCounts = {
   failed: number;
 };
 
+export type GoogleDriveRun = {
+  state: string;
+  discovered_files: number;
+  discovered_folders: number;
+  discovered_bytes: number;
+  downloaded_files: number;
+  downloaded_bytes: number;
+  skipped_files: number;
+  failed_files: number;
+  pending_files: number;
+  current_name: string | null;
+  current_bytes: number;
+  current_total_bytes: number | null;
+  throttle_reason: string | null;
+  error_code: string | null;
+};
+
+export type GoogleDriveSource = {
+  id: string;
+  google_folder_id: string;
+  google_folder_name: string;
+  local_folder_id: string | null;
+  run: GoogleDriveRun | null;
+};
+
+export type GoogleDriveStatus = {
+  configured: boolean;
+  connected: boolean;
+  email: string | null;
+  paused: boolean;
+  reauth_required: boolean;
+  local_root_id: string | null;
+  images_indexed: number;
+  images_waiting: number;
+  videos_indexed: number;
+  videos_waiting: number;
+  sources: GoogleDriveSource[];
+};
+
+export type GoogleDriveFolderPage = {
+  parent_id: string;
+  folders: Array<{ id: string; name: string }>;
+};
+
 export type MediaIndexStatus = {
   previewStorageAvailable: boolean;
   paused: boolean;
@@ -203,6 +247,47 @@ export const api = {
       json: jobId == null ? {} : { jobId },
       csrf: true,
       signal
+    }),
+  googleDriveStatus: (signal?: AbortSignal) =>
+    request<GoogleDriveStatus>('/api/google-drive', { signal, cache: 'no-store' }),
+  googleDriveConnect: () =>
+    request<{ authorize_url: string }>('/api/google-drive/connect', {
+      method: 'POST',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  googleDriveDisconnect: () =>
+    request<void>('/api/google-drive/disconnect', { method: 'POST', csrf: true, cache: 'no-store' }),
+  googleDrivePause: (paused: boolean) =>
+    request<{ paused: boolean }>('/api/google-drive/pause', {
+      method: 'POST',
+      json: { paused },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  googleDriveFolders: (parentId: string, signal?: AbortSignal) =>
+    request<GoogleDriveFolderPage>(
+      '/api/google-drive/folders?parent_id=' + encodeURIComponent(parentId),
+      { signal, cache: 'no-store' }
+    ),
+  googleDriveSelect: (googleFolderId: string) =>
+    request<{ id: string; local_folder_id: string }>('/api/google-drive/sources', {
+      method: 'POST',
+      json: { google_folder_id: googleFolderId },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  googleDriveRemove: (id: string) =>
+    request<void>('/api/google-drive/sources/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  googleDriveSync: (id: string) =>
+    request<{ started: boolean }>('/api/google-drive/sources/' + encodeURIComponent(id) + '/sync', {
+      method: 'POST',
+      csrf: true,
+      cache: 'no-store'
     }),
   login: async (email: string, password: string) => {
     const result = await request<{ user: User; csrf_token: string }>('/api/auth/login', {
