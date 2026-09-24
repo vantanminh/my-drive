@@ -35,6 +35,8 @@ pub(crate) enum MaintenanceError {
     Storage(#[from] StorageError),
     #[error("maintenance retention value is outside the supported range")]
     RetentionOutOfRange,
+    #[error("trash entry was not found")]
+    NotFound,
 }
 
 #[derive(FromRow)]
@@ -261,6 +263,245 @@ async fn purge_expired_trash(
         purged_entries += u64::try_from(entries.len()).unwrap_or(u64::MAX);
     }
     Ok((purged_roots, purged_entries))
+}
+
+#[derive(Debug)]
+pub(crate) struct TrashPurgeReport {
+    pub roots: u64,
+    pub entries: u64,
+}
+
+pub(crate) async fn purge_trash_roots(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    owner_id: Uuid,
+    actor_id: Uuid,
+    only_ids: Option<&[Uuid]>,
+) -> Result<TrashPurgeReport, MaintenanceError> {
+    let mut report = TrashPurgeReport {
+        roots: 0,
+        entries: 0,
+    };
+    let roots = if let Some(ids) = only_ids {
+        let mut unique = ids.to_vec();
+        unique.sort();
+        unique.dedup();
+        if unique.is_empty() || unique.len() > 100 {
+            return Err(MaintenanceError::NotFound);
+        }
+        let found = trash_roots(pool, owner_id, Some(&unique)).await?;
+        if found.len() != unique.len() {
+            return Err(MaintenanceError::NotFound);
+        }
+        found
+    } else {
+        Vec::new()
+    };
+
+    if only_ids.is_some() {
+        for root_id in roots {
+            record_purged_root(
+                &mut report,
+                purge_one_trash_root(pool, storage, owner_id, actor_id, root_id).await?,
+            );
+        }
+        return Ok(report);
+    }
+
+    loop {
+        if report.roots >= 5_000 {
+            break;
+        }
+        let batch = trash_roots(pool, owner_id, None).await?;
+        if batch.is_empty() {
+            break;
+        }
+        let purged_before = report.roots;
+        for root_id in batch {
+            record_purged_root(
+                &mut report,
+                purge_one_trash_root(pool, storage, owner_id, actor_id, root_id).await?,
+            );
+        }
+        if report.roots == purged_before {
+            break;
+        }
+    }
+    Ok(report)
+}
+
+fn record_purged_root(report: &mut TrashPurgeReport, entries: u64) {
+    if entries > 0 {
+        report.roots += 1;
+        report.entries += entries;
+    }
+}
+
+async fn trash_roots(
+    pool: &PgPool,
+    owner_id: Uuid,
+    ids: Option<&[Uuid]>,
+) -> Result<Vec<Uuid>, MaintenanceError> {
+    let filter_ids = ids.is_some();
+    let id_list = ids.unwrap_or(&[]);
+    sqlx::query_scalar(
+        "SELECT entry.id \
+           FROM drive_entries AS entry \
+           LEFT JOIN drive_entries AS parent ON parent.id = entry.parent_id \
+          WHERE entry.owner_id = $1 \
+            AND entry.deleted_at IS NOT NULL \
+            AND (entry.parent_id IS NULL OR parent.deleted_at IS NULL) \
+            AND (NOT $2 OR entry.id = ANY($3)) \
+          ORDER BY entry.deleted_at ASC, entry.id ASC \
+          LIMIT $4",
+    )
+    .bind(owner_id)
+    .bind(filter_ids)
+    .bind(id_list)
+    .bind(if filter_ids { 100 } else { BATCH_SIZE })
+    .fetch_all(pool)
+    .await
+    .map_err(MaintenanceError::Database)
+}
+
+async fn purge_one_trash_root(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    owner_id: Uuid,
+    actor_id: Uuid,
+    root_id: Uuid,
+) -> Result<u64, MaintenanceError> {
+    let mut transaction = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM drive_entries \
+          WHERE id = $1 AND owner_id = $2 AND deleted_at IS NOT NULL \
+          FOR UPDATE",
+    )
+    .bind(root_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(root_id) = locked else {
+        transaction.rollback().await?;
+        return Ok(0);
+    };
+    let entries = sqlx::query_as::<_, TrashEntry>(
+        "WITH RECURSIVE subtree(id, owner_id, kind, depth) AS ( \
+             SELECT id, owner_id, kind, 0 \
+               FROM drive_entries \
+              WHERE id = $1 AND owner_id = $2 \
+             UNION ALL \
+             SELECT child.id, child.owner_id, child.kind, parent.depth + 1 \
+               FROM drive_entries AS child \
+               JOIN subtree AS parent ON child.parent_id = parent.id \
+              WHERE child.owner_id = $2 \
+         ) \
+         SELECT id, owner_id, kind FROM subtree ORDER BY depth DESC, id ASC",
+    )
+    .bind(root_id)
+    .bind(owner_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+    if entries.is_empty() {
+        transaction.rollback().await?;
+        return Ok(0);
+    }
+    let object_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT version.storage_object_id \
+           FROM file_versions AS version \
+          WHERE version.file_id = ANY($1)",
+    )
+    .bind(entries.iter().map(|entry| entry.id).collect::<Vec<_>>())
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    for entry in &entries {
+        match entry.kind.as_str() {
+            "file" => {
+                sqlx::query("DELETE FROM file_versions WHERE file_id = $1")
+                    .bind(entry.id)
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query("DELETE FROM files WHERE id = $1")
+                    .bind(entry.id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            "folder" => {
+                sqlx::query("DELETE FROM folders WHERE id = $1")
+                    .bind(entry.id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            _ => unreachable!("drive_entries.kind is checked by PostgreSQL"),
+        }
+        sqlx::query("DELETE FROM drive_entries WHERE id = $1 AND owner_id = $2")
+            .bind(entry.id)
+            .bind(entry.owner_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+         VALUES ('entry_purged', $1, $2, jsonb_build_object('entry_count', $3, 'immediate', true))",
+    )
+    .bind(actor_id)
+    .bind(root_id)
+    .bind(i64::try_from(entries.len()).unwrap_or(i64::MAX))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    if let Err(error) = delete_unreferenced_objects(pool, storage, &object_ids).await {
+        tracing::warn!(
+            error = %error,
+            root_id = %root_id,
+            "permanent trash delete removed metadata; payload cleanup will retry"
+        );
+    }
+    Ok(u64::try_from(entries.len()).unwrap_or(u64::MAX))
+}
+
+async fn delete_unreferenced_objects(
+    pool: &PgPool,
+    storage: &LocalStorage,
+    object_ids: &[Uuid],
+) -> Result<(), MaintenanceError> {
+    if object_ids.is_empty() {
+        return Ok(());
+    }
+    let objects = sqlx::query_as::<_, StorageObject>(
+        "UPDATE storage_objects AS object SET state = 'deleting' \
+          WHERE object.id = ANY($1) \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM file_versions AS version \
+                 WHERE version.storage_object_id = object.id \
+            ) \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM upload_sessions AS upload \
+                 WHERE upload.storage_object_id = object.id \
+                   AND upload.state = 'finalizing' \
+            ) \
+        RETURNING object.id, object.storage_key",
+    )
+    .bind(object_ids)
+    .fetch_all(pool)
+    .await?;
+    for object in objects {
+        storage.remove_object(&object.storage_key).await?;
+        sqlx::query(
+            "DELETE FROM storage_objects AS object \
+              WHERE object.id = $1 AND object.state = 'deleting' \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM file_versions AS version \
+                     WHERE version.storage_object_id = object.id \
+                )",
+        )
+        .bind(object.id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn remove_unreferenced_objects(

@@ -247,13 +247,20 @@ export default function PublicSharePage({ token }: Props) {
       <footer className="public-footer">Shared with My Drive <span>·</span> Your files stay private</footer>
       {viewer && (
         <MediaViewer
-          entry={{ ...viewer, mime_detected: null }}
-          onClose={() => navigateTo(buildPublicPath(token, view?.breadcrumbs.slice(1) ?? [], null), 'replace')}
-          sources={{
-            preview: publicPreviewUrl(token, viewer.id),
-            thumbnail: publicThumbnailUrl(token, viewer.id),
-            ...(view?.allow_download ? { download: publicDownloadUrl(token, viewer.id) } : {})
+          items={rows.filter(isPreviewable).map((entry) => ({ ...entry, mime_detected: null }))}
+          index={Math.max(rows.filter(isPreviewable).findIndex((entry) => entry.id === viewer.id), 0)}
+          onIndexChange={(next) => {
+            const item = rows.filter(isPreviewable)[next];
+            if (!item || !view) return;
+            const nested = view.resource.kind === 'folder' ? view.breadcrumbs.slice(1) : [];
+            navigateTo(buildPublicPath(token, nested, item.id), 'replace');
           }}
+          onClose={() => navigateTo(buildPublicPath(token, view?.breadcrumbs.slice(1) ?? [], null), 'replace')}
+          sourceFor={(item) => ({
+            preview: publicPreviewUrl(token, item.id),
+            thumbnail: publicThumbnailUrl(token, item.id),
+            ...(view?.allow_download ? { download: publicDownloadUrl(token, item.id) } : {})
+          })}
           showDownload={view?.allow_download ?? false}
         />
       )}

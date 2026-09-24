@@ -12,6 +12,18 @@ use crate::Config;
 
 pub use preview::PreviewStorage;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilesystemUsage {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+}
+
+impl FilesystemUsage {
+    pub fn used_bytes(self) -> u64 {
+        self.total_bytes.saturating_sub(self.free_bytes)
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalStorage {
     root: PathBuf,
@@ -101,6 +113,14 @@ impl LocalStorage {
         }
         storage.root = fs::canonicalize(&storage.root)?;
         Ok(storage)
+    }
+
+    pub fn filesystem_usage(&self) -> Result<FilesystemUsage, StorageError> {
+        let (free_bytes, total_bytes) = self.capacity()?;
+        Ok(FilesystemUsage {
+            total_bytes,
+            free_bytes,
+        })
     }
 
     pub fn health(&self) -> Result<(), StorageError> {

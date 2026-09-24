@@ -16,6 +16,15 @@ use crate::{
     health::AppState,
 };
 
+const ENTRY_COLUMNS: &str = "e.id, e.parent_id, e.kind, e.name, e.created_at, e.updated_at, e.deleted_at, \
+    fv.size_bytes, so.mime_detected, idx.category, stats.total_bytes AS folder_bytes, \
+    stats.file_count AS folder_file_count, stats.subfolder_count AS folder_subfolder_count";
+const ENTRY_JOINS: &str = "LEFT JOIN files AS f ON f.id = e.id \
+    LEFT JOIN file_versions AS fv ON fv.id = f.current_version_id \
+    LEFT JOIN storage_objects AS so ON so.id = fv.storage_object_id \
+    LEFT JOIN entry_index AS idx ON idx.entry_id = e.id \
+    LEFT JOIN folder_stats AS stats ON stats.folder_id = e.id";
+
 const DEFAULT_PAGE_SIZE: u16 = 100;
 const MAX_PAGE_SIZE: u16 = 200;
 const MAX_OFFSET: u32 = 1_000_000;
@@ -71,6 +80,10 @@ struct EntrySummary {
     deleted_at: Option<DateTime<Utc>>,
     size_bytes: Option<i64>,
     mime_detected: Option<String>,
+    category: Option<String>,
+    folder_bytes: Option<i64>,
+    folder_file_count: Option<i64>,
+    folder_subfolder_count: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -88,14 +101,7 @@ struct ListQuery {
     offset: Option<u32>,
     sort_by: Option<String>,
     order: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchQuery {
-    q: String,
-    limit: Option<u16>,
-    offset: Option<u32>,
+    include_stats: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -120,8 +126,8 @@ struct MoveEntry {
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/drive", get(list_folder))
-        .route("/api/drive/search", get(search))
         .route("/api/drive/trash", get(list_trash))
+        .route("/api/drive/trash/purge", post(purge_trash))
         .route("/api/folders", post(create_folder))
         .route("/api/entries/{id}", get(get_entry).delete(trash_entry))
         .route("/api/entries/{id}/rename", patch(rename_entry))
@@ -145,14 +151,20 @@ async fn list_folder(
         query.order.as_deref(),
         "name",
         "asc",
+        true,
     )?;
+    if query.include_stats.unwrap_or(false) || query.sort_by.as_deref() == Some("size") {
+        sqlx::query("SELECT refresh_folder_stats($1, $2, TRUE)")
+            .bind(user.id)
+            .bind(query.parent_id)
+            .execute(&state.pool)
+            .await
+            .map_err(map_database_error)?;
+    }
     let sql = format!(
-        "SELECT e.id, e.parent_id, e.kind, e.name, e.created_at, e.updated_at, e.deleted_at, \
-                fv.size_bytes, so.mime_detected \
+        "SELECT {ENTRY_COLUMNS} \
            FROM drive_entries AS e \
-           LEFT JOIN files AS f ON f.id = e.id \
-           LEFT JOIN file_versions AS fv ON fv.id = f.current_version_id \
-           LEFT JOIN storage_objects AS so ON so.id = fv.storage_object_id \
+           {ENTRY_JOINS} \
           WHERE e.owner_id = $1 AND e.deleted_at IS NULL \
             AND (($2::UUID IS NULL AND e.parent_id IS NULL) OR e.parent_id = $2) \
           ORDER BY {sort_column} {direction}, e.id ASC \
@@ -190,14 +202,12 @@ async fn list_trash(
         query.order.as_deref(),
         "deleted_at",
         "desc",
+        false,
     )?;
     let sql = format!(
-        "SELECT e.id, e.parent_id, e.kind, e.name, e.created_at, e.updated_at, e.deleted_at, \
-                fv.size_bytes, so.mime_detected \
+        "SELECT {ENTRY_COLUMNS} \
            FROM drive_entries AS e \
-           LEFT JOIN files AS f ON f.id = e.id \
-           LEFT JOIN file_versions AS fv ON fv.id = f.current_version_id \
-           LEFT JOIN storage_objects AS so ON so.id = fv.storage_object_id \
+           {ENTRY_JOINS} \
           WHERE e.owner_id = $1 AND e.deleted_at IS NOT NULL \
           ORDER BY {sort_column} {direction}, e.id ASC \
           LIMIT $2 OFFSET $3"
@@ -218,49 +228,52 @@ async fn list_trash(
     }))
 }
 
-async fn search(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PurgeTrash {
+    ids: Option<Vec<Uuid>>,
+    all: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct PurgeTrashResponse {
+    roots: u64,
+    entries: u64,
+}
+
+async fn purge_trash(
     State(state): State<AppState>,
     user: AuthenticatedUser,
-    Query(query): Query<SearchQuery>,
-) -> Result<Json<EntryPage>, DriveError> {
-    let term = query.q.trim();
-    if term.is_empty() || term.chars().count() > 255 {
+    headers: HeaderMap,
+    Json(request): Json<PurgeTrash>,
+) -> Result<Json<PurgeTrashResponse>, DriveError> {
+    require_request_csrf(&headers, &user, state.auth_settings)?;
+    let report = if request.all.unwrap_or(false) {
+        crate::maintenance::purge_trash_roots(&state.pool, &state.storage, user.id, user.id, None)
+            .await
+    } else if let Some(ids) = request.ids.as_deref() {
+        crate::maintenance::purge_trash_roots(
+            &state.pool,
+            &state.storage,
+            user.id,
+            user.id,
+            Some(ids),
+        )
+        .await
+    } else {
         return Err(DriveError::BadRequest);
     }
-    let limit = page_limit(query.limit)?;
-    let offset = page_offset(query.offset)?;
-    let mut entries = sqlx::query_as::<_, EntrySummary>(
-        "WITH RECURSIVE visible_entries(id) AS ( \
-             SELECT id FROM drive_entries WHERE owner_id = $1 AND parent_id IS NULL AND deleted_at IS NULL \
-             UNION ALL \
-             SELECT child.id FROM drive_entries AS child \
-             JOIN visible_entries AS parent ON child.parent_id = parent.id \
-             WHERE child.owner_id = $1 AND child.deleted_at IS NULL \
-         ) \
-         SELECT e.id, e.parent_id, e.kind, e.name, e.created_at, e.updated_at, e.deleted_at, \
-                fv.size_bytes, so.mime_detected \
-           FROM drive_entries AS e \
-           JOIN visible_entries AS visible ON visible.id = e.id \
-           LEFT JOIN files AS f ON f.id = e.id \
-           LEFT JOIN file_versions AS fv ON fv.id = f.current_version_id \
-           LEFT JOIN storage_objects AS so ON so.id = fv.storage_object_id \
-          WHERE e.owner_id = $1 AND position(lower($2) in lower(e.name)) > 0 \
-          ORDER BY lower(e.name) ASC, e.id ASC \
-          LIMIT $3 OFFSET $4",
-    )
-    .bind(user.id)
-    .bind(term)
-    .bind(i64::from(limit) + 1)
-    .bind(i64::from(offset))
-    .fetch_all(&state.pool)
-    .await
-    .map_err(map_database_error)?;
-    let has_more = entries.len() > usize::from(limit);
-    entries.truncate(usize::from(limit));
-    Ok(Json(EntryPage {
-        entries,
-        limit,
-        next_offset: has_more.then_some(offset + u32::from(limit)),
+    .map_err(|error| match error {
+        crate::maintenance::MaintenanceError::NotFound => DriveError::NotFound,
+        crate::maintenance::MaintenanceError::Database(error) => map_database_error(error),
+        other => {
+            tracing::error!(error = %other, "permanent trash delete failed");
+            DriveError::Database(sqlx::Error::Protocol(other.to_string()))
+        }
+    })?;
+    Ok(Json(PurgeTrashResponse {
+        roots: report.roots,
+        entries: report.entries,
     }))
 }
 
@@ -466,7 +479,7 @@ async fn fetch_entry(
     owner_id: Uuid,
     id: Uuid,
 ) -> Result<EntrySummary, DriveError> {
-    sqlx::query_as::<_, EntrySummary>(
+    sqlx::query_as::<_, EntrySummary>(&format!(
         "WITH RECURSIVE parent_chain(id, parent_id, deleted_at) AS ( \
              SELECT id, parent_id, deleted_at FROM drive_entries WHERE id = $1 AND owner_id = $2 \
              UNION ALL \
@@ -475,15 +488,12 @@ async fn fetch_entry(
                JOIN parent_chain AS child ON parent.id = child.parent_id \
               WHERE parent.owner_id = $2 \
          ) \
-         SELECT e.id, e.parent_id, e.kind, e.name, e.created_at, e.updated_at, e.deleted_at, \
-                fv.size_bytes, so.mime_detected \
+         SELECT {ENTRY_COLUMNS} \
            FROM drive_entries AS e \
-           LEFT JOIN files AS f ON f.id = e.id \
-           LEFT JOIN file_versions AS fv ON fv.id = f.current_version_id \
-           LEFT JOIN storage_objects AS so ON so.id = fv.storage_object_id \
+           {ENTRY_JOINS} \
           WHERE e.id = $1 AND e.owner_id = $2 AND e.deleted_at IS NULL \
-            AND NOT EXISTS (SELECT 1 FROM parent_chain WHERE deleted_at IS NOT NULL)",
-    )
+            AND NOT EXISTS (SELECT 1 FROM parent_chain WHERE deleted_at IS NOT NULL)"
+    ))
     .bind(id)
     .bind(owner_id)
     .fetch_optional(&state.pool)
@@ -573,12 +583,15 @@ fn sort_parts(
     order: Option<&str>,
     default_sort: &'static str,
     default_order: &'static str,
+    folder_stats: bool,
 ) -> Result<(&'static str, &'static str), DriveError> {
     let column = match sort_by.unwrap_or(default_sort) {
         "name" => "lower(e.name)",
         "created_at" => "e.created_at",
         "updated_at" => "e.updated_at",
         "deleted_at" => "e.deleted_at",
+        "size" if folder_stats => "COALESCE(stats.total_bytes, fv.size_bytes, 0)",
+        "size" => "COALESCE(fv.size_bytes, 0)",
         _ => return Err(DriveError::BadRequest),
     };
     let direction = match order.unwrap_or(default_order) {
@@ -624,13 +637,13 @@ mod tests {
         assert_eq!(page_offset(Some(MAX_OFFSET)).unwrap(), MAX_OFFSET);
         assert!(page_offset(Some(MAX_OFFSET + 1)).is_err());
         assert_eq!(
-            sort_parts(Some("updated_at"), Some("desc"), "name", "asc").unwrap(),
+            sort_parts(Some("updated_at"), Some("desc"), "name", "asc", true).unwrap(),
             ("e.updated_at", "DESC")
         );
         assert_eq!(
-            sort_parts(None, None, "deleted_at", "desc").unwrap(),
+            sort_parts(None, None, "deleted_at", "desc", false).unwrap(),
             ("e.deleted_at", "DESC")
         );
-        assert!(sort_parts(Some("name; DROP TABLE users"), None, "name", "asc").is_err());
+        assert!(sort_parts(Some("name; DROP TABLE users"), None, "name", "asc", true).is_err());
     }
 }

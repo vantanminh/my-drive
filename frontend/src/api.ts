@@ -1,11 +1,17 @@
 import type {
+  AccountStorage,
+  Album,
   CreatedShare,
   CreatedManagedAccount,
   Entry,
+  EntryDetails,
   EntryPage,
   FaceClusterPage,
   ManagedAccountPage,
+  MediaPage,
   PublicShareView,
+  SearchFilters,
+  ServerStorage,
   ShareList,
   UploadCreated,
   User
@@ -295,17 +301,88 @@ export const api = {
     await request<void>('/api/auth/logout', { method: 'POST', csrf: true });
     rememberCsrf(null);
   },
-  listDrive: (parentId: string | null, signal?: AbortSignal, offset = 0) => {
+  listDrive: (
+    parentId: string | null,
+    signal?: AbortSignal,
+    offset = 0,
+    options?: { sort_by?: string; order?: string; include_stats?: boolean }
+  ) => {
     const query = new URLSearchParams();
     if (parentId) query.set('parent_id', parentId);
     if (offset) query.set('offset', String(offset));
+    if (options?.sort_by) query.set('sort_by', options.sort_by);
+    if (options?.order) query.set('order', options.order);
+    if (options?.include_stats) query.set('include_stats', 'true');
     return request<EntryPage>('/api/drive' + (query.size ? '?' + query.toString() : ''), { signal });
   },
-  search: (term: string, signal?: AbortSignal, offset = 0) => {
-    const query = new URLSearchParams({ q: term });
-    if (offset) query.set('offset', String(offset));
+  search: (term: string, signal?: AbortSignal, offset = 0, filters?: SearchFilters) => {
+    const query = new URLSearchParams();
+    const merged: SearchFilters = { ...filters, q: filters?.q ?? term };
+    if (merged.q) query.set('q', merged.q);
+    if (merged.category) query.set('category', merged.category);
+    if (merged.mime) query.set('mime', merged.mime);
+    if (merged.min_size != null) query.set('min_size', String(merged.min_size));
+    if (merged.max_size != null) query.set('max_size', String(merged.max_size));
+    if (merged.created_from) query.set('created_from', merged.created_from);
+    if (merged.created_to) query.set('created_to', merged.created_to);
+    if (merged.modified_from) query.set('modified_from', merged.modified_from);
+    if (merged.modified_to) query.set('modified_to', merged.modified_to);
+    if (merged.folder_id) query.set('folder_id', merged.folder_id);
+    if (merged.sort_by) query.set('sort_by', merged.sort_by);
+    if (merged.order) query.set('order', merged.order);
+    const pageOffset = offset || merged.offset || 0;
+    if (pageOffset) query.set('offset', String(pageOffset));
     return request<EntryPage>('/api/drive/search?' + query.toString(), { signal });
   },
+  entryDetails: (id: string, signal?: AbortSignal) =>
+    request<EntryDetails>('/api/entries/' + encodeURIComponent(id) + '/details', { signal }),
+  listPhotos: (cursor?: string | null, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: '80' });
+    if (cursor) query.set('cursor', cursor);
+    return request<MediaPage>('/api/photos?' + query.toString(), { signal });
+  },
+  faceMedia: (id: string, offset = 0, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: '80' });
+    if (offset) query.set('offset', String(offset));
+    return request<MediaPage>('/api/faces/' + encodeURIComponent(id) + '/media?' + query.toString(), { signal });
+  },
+  listAlbums: (signal?: AbortSignal) => request<{ albums: Album[] }>('/api/albums', { signal }),
+  createAlbum: (name: string) =>
+    request<Album>('/api/albums', { method: 'POST', json: { name }, csrf: true }),
+  renameAlbum: (id: string, name: string) =>
+    request<Album>('/api/albums/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      json: { name },
+      csrf: true
+    }),
+  deleteAlbum: (id: string) =>
+    request<void>('/api/albums/' + encodeURIComponent(id), { method: 'DELETE', csrf: true }),
+  albumItems: (id: string, offset = 0, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: '80' });
+    if (offset) query.set('offset', String(offset));
+    return request<MediaPage>('/api/albums/' + encodeURIComponent(id) + '/items?' + query.toString(), { signal });
+  },
+  addAlbumItems: (id: string, fileIds: string[]) =>
+    request<{ album_id: string; count: number }>('/api/albums/' + encodeURIComponent(id) + '/items', {
+      method: 'POST',
+      json: { file_ids: fileIds },
+      csrf: true
+    }),
+  removeAlbumItems: (id: string, fileIds: string[]) =>
+    request<{ album_id: string; count: number }>(
+      '/api/albums/' + encodeURIComponent(id) + '/items/remove',
+      { method: 'POST', json: { file_ids: fileIds }, csrf: true }
+    ),
+  accountStorage: (signal?: AbortSignal) =>
+    request<AccountStorage>('/api/storage', { signal, cache: 'no-store' }),
+  serverStorage: (signal?: AbortSignal) =>
+    request<ServerStorage>('/api/admin/storage', { signal, cache: 'no-store' }),
+  purgeTrash: (payload: { ids?: string[]; all?: boolean }) =>
+    request<{ roots: number; entries: number }>('/api/drive/trash/purge', {
+      method: 'POST',
+      json: payload,
+      csrf: true
+    }),
   listTrash: (signal?: AbortSignal, offset = 0) =>
     request<EntryPage>('/api/drive/trash' + (offset ? '?offset=' + offset : ''), { signal }),
   createFolder: (name: string, parentId: string | null) =>
@@ -336,7 +413,7 @@ export const api = {
   getEntry: (id: string) => request<Entry>('/api/entries/' + encodeURIComponent(id)),
   listShares: (offset = 0) => request<ShareList>('/api/shares' + (offset ? '?offset=' + offset : '')),
   createShare: (payload: {
-    resource_type: 'file' | 'folder';
+    resource_type: 'file' | 'folder' | 'album';
     resource_id: string;
     expires_at: string | null;
     password: string | null;

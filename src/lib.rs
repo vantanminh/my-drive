@@ -8,6 +8,7 @@ mod face_indexer;
 mod faces;
 mod google_drive;
 mod health;
+mod library;
 mod maintenance;
 mod media_admin;
 mod media_indexer;

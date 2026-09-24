@@ -35,6 +35,7 @@ pub(crate) fn router(state: AppState) -> Router {
             post(crate::auth::change_password).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(crate::drive::router())
+        .merge(crate::library::router())
         .merge(crate::faces::router())
         .merge(crate::transfers::router())
         .merge(crate::shares::router())
@@ -52,6 +53,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/accounts", get(serve_frontend_index))
         .route("/faces", get(serve_frontend_index))
         .route("/indexing", get(serve_frontend_index))
+        .route("/photos", get(serve_frontend_index))
+        .route("/photos/{*path}", get(serve_frontend_index))
+        .route("/storage", get(serve_frontend_index))
         .route("/google-drive", get(serve_frontend_index))
         .fallback_service(static_files)
         .layer(middleware::from_fn(request_id_and_trace))
