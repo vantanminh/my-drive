@@ -6,13 +6,28 @@ file contents and upload staging belong on a separately mounted HDD.
 
 ## Automatic Ubuntu VPS setup
 
-Run `sudo bash scripts/install.sh` from a reviewed checkout for an interactive
-installer, or pass `--config /path/to/private-config.json` for unattended setup.
-The installer builds your own images by default, generates private credentials,
-configures HTTPS and systemd, and provides `my-drive` lifecycle commands.
+On an Ubuntu **amd64** VPS, run this single command. No manual clone or build is
+needed; it downloads deployment files and pulls images built by GitHub CI/CD:
+
+```bash
+sudo bash -c 'set -e; apt-get update; apt-get install -y ca-certificates curl; curl -fsSL https://raw.githubusercontent.com/vantanminh/my-drive/master/scripts/bootstrap.sh | bash'
+```
+
+The wizard asks for your domain/IP, owner email/password and storage settings.
+It installs Docker, generates private credentials, configures HTTPS and systemd,
+and starts the drive. For public HTTPS, point your domain at the VPS and allow
+TCP 80/443 first. Use internal TLS for IP-only access. Allow at least 2 GiB RAM.
+Published GHCR packages must be public for anonymous installation; no GitHub
+login is required once they are public. The pulled image digests are pinned.
+
+For unattended setup, pass `--config /path/to/private-config.json` to the
+bootstrap script. From an existing checkout, the equivalent is
+`sudo bash scripts/install.sh --prebuilt`. Building locally remains an explicit
+alternative using `sudo bash scripts/install.sh` without `--prebuilt`.
 It supports a single-volume VPS with media indexing disabled, or separate
 storage/preview filesystems with indexing enabled. No author-owned cloud account
-or registry is required. See the complete [Ubuntu installation and operations guide](docs/DEPLOY_UBUNTU.md)
+or cloud account is required at runtime. You can also publish images from your
+own fork/registry. See the complete [Ubuntu installation and operations guide](docs/DEPLOY_UBUNTU.md)
 (Vietnamese), including backups, recovery and upgrades.
 
 ## Current implementation

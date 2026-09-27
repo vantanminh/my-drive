@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run from a reviewed checkout; never execute a remote script as root.
+# Run from a checkout or the deployment-only bundle fetched by bootstrap.sh.
 set -Eeuo pipefail
 [[ ${EUID} -eq 0 ]] || { echo 'Run with sudo bash scripts/install.sh' >&2; exit 1; }
 source /etc/os-release

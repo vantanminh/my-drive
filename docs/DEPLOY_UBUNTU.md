@@ -1,7 +1,8 @@
 # Cài My Drive lên Ubuntu VPS
 
 Mỗi bản cài có tài khoản chủ sở hữu, mật khẩu database, dữ liệu và cấu hình riêng.
-Chế độ mặc định build ứng dụng từ source của checkout đang dùng. Không cần tài
+Lệnh cài nhanh tải image đã build bởi GitHub CI/CD; không clone hoặc build
+Rust/frontend trên VPS. Có thể dùng image từ CI của fork/registry riêng. Không cần tài
 khoản của tác giả, GHCR, Cloudflare, Firebase hoặc Google để chạy drive.
 Google Drive import chỉ hoạt động khi bạn chủ động cấu hình OAuth của mình.
 
@@ -22,7 +23,42 @@ Google Drive import chỉ hoạt động khi bạn chủ động cấu hình OAu
 - Kết nối Internet để tải package, base image, Rust/npm dependencies. Có thể
   dùng mirror/registry do bạn quản lý; chạy thường ngày không gọi dịch vụ của tác giả.
 
-Lấy một release/commit mà bạn đã kiểm tra. Có thể clone fork của chính bạn:
+## Cài nhanh: một lệnh, không clone và không build
+
+Trên Ubuntu **amd64**, chạy:
+
+```bash
+sudo bash -c 'set -e; apt-get update; apt-get install -y ca-certificates curl; curl -fsSL https://raw.githubusercontent.com/vantanminh/my-drive/master/scripts/bootstrap.sh | bash'
+```
+
+Bootstrap tải Compose và scripts triển khai vào thư mục tạm, cài Docker,
+chạy wizard và pull app/document-preview/indexer từ GHCR. Không tải source
+Rust, frontend hoặc Dockerfile. Thư mục tạm được xóa khi kết thúc; file runtime
+được giữ trong `/opt/my-drive`. Image sau pull được ghim theo digest.
+Wizard đọc trực tiếp terminal nên vẫn dùng được dù bootstrap chạy qua pipe.
+
+GitHub CI cần publish đủ các image và package phải là **Public** để người cài
+không cần tài khoản GitHub. Repository public không tự làm package public.
+Chủ repo đặt visibility của từng package ở GitHub Packages sau lần publish đầu;
+nếu GHCR trả 403/denied, kiểm tra bước này và trạng thái workflow `Docker images`.
+Bootstrap chỉ hỗ trợ amd64 theo kiến trúc image mà CI hiện publish, và không
+fallback sang build tại VPS nếu pull thất bại.
+
+Để dùng fork hoặc release cụ thể, tải bootstrap thành file và truyền cấu hình:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vantanminh/my-drive/master/scripts/bootstrap.sh -o /tmp/my-drive-bootstrap.sh
+sudo env MY_DRIVE_REPOSITORY=your-name/my-drive MY_DRIVE_REF=v1.2.3 \
+  MY_DRIVE_IMAGE_PREFIX=ghcr.io/your-name/my-drive MY_DRIVE_IMAGE_TAG=v1.2.3 \
+  bash /tmp/my-drive-bootstrap.sh
+```
+
+Chọn cùng release cho ref scripts và tag images. Với nhánh `master`, mặc định
+image tag là `latest`; đợi CI publish xong trước khi cài. Ref chấp nhận branch
+không chứa `/`, tag hoặc commit. `MY_DRIVE_IMAGE_PREFIX` cho phép registry riêng.
+Private registry vẫn cần `sudo docker login` như hướng dẫn bên dưới.
+
+Nếu muốn tự kiểm tra source rồi **chủ động build tại VPS**, dùng cách thay thế:
 
 ```bash
 sudo apt-get update
@@ -30,7 +66,7 @@ sudo apt-get install -y git
 git clone https://github.com/vantanminh/my-drive.git
 cd my-drive
 # Nếu đã có release mong muốn: git checkout <tag-hoặc-commit>
-sudo bash scripts/install.sh
+sudo bash scripts/install.sh  # local build; không phải cách cài nhanh phía trên
 ```
 
 Script sử dụng repository APT có khóa ký của Docker để cài Engine/Compose khi
@@ -99,9 +135,11 @@ bằng public root certificate trên VPS. Cookie phiên luôn dùng `Secure`.
 Copy mẫu ra ngoài repo và đặt quyền riêng tư **trước khi** thêm mật khẩu:
 
 ```bash
-install -m 600 deploy/vps.example.json /tmp/my-drive-setup.json
+umask 077
+curl -fsSL https://raw.githubusercontent.com/vantanminh/my-drive/master/deploy/vps.example.json -o /tmp/my-drive-setup.json
 nano /tmp/my-drive-setup.json
-sudo bash scripts/install.sh --config /tmp/my-drive-setup.json
+curl -fsSL https://raw.githubusercontent.com/vantanminh/my-drive/master/scripts/bootstrap.sh -o /tmp/my-drive-bootstrap.sh
+sudo bash /tmp/my-drive-bootstrap.sh --config /tmp/my-drive-setup.json
 rm /tmp/my-drive-setup.json
 ```
 
@@ -110,7 +148,10 @@ rm /tmp/my-drive-setup.json
 repo, shell history hoặc biến CI công khai. Các giá trị dung lượng tính theo GiB.
 Field lạ, boolean sai kiểu, path nguy hiểm và cấu hình TLS sai đều bị từ chối.
 
-`images: {}` nghĩa là build source. Để dùng image của riêng bạn, cung cấp:
+Với bootstrap hoặc `scripts/install.sh --prebuilt`, `images: {}` nghĩa là tải
+image CI đã publish, không build. Nếu chạy `scripts/install.sh` từ checkout
+không có `--prebuilt`, mapping trống mới có nghĩa là build source.
+Để dùng image của riêng bạn, cung cấp:
 
 ```json
 "images": {
@@ -283,7 +324,7 @@ Chạy `python3 -B -m unittest discover -s tests -p test_vps_installer.py -v` v�
 `bash -n scripts/install.sh`. CI Ubuntu chạy cùng checks, gồm phân giải bằng
 Docker Compose thật, secrets có ký tự đặc biệt, kiểm tra mất mount và thứ tự
 gỡ bootstrap trước proxy. Workflow `VPS installer checks` có job smoke Ubuntu
-24.04 chạy khi chọn `Run workflow`: build từ source, cài stack thật với CA nội bộ,
+24.04 chạy khi chọn `Run workflow`: pull image CI, cài stack thật với CA nội bộ,
 restart systemd và kiểm tra bootstrap đã gỡ. Các checks này chưa thay thế một lần cài/reboot/restore
 trên VPS thật; hãy dùng staging trước khi đưa dữ liệu quan trọng vào.
 

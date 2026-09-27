@@ -133,7 +133,7 @@ def validate(config):
     return result
 
 
-def ask():
+def ask(prebuilt=False):
     print('My Drive Ubuntu VPS setup. Configuration stays on this server.')
     host = input('Domain or IPv4 address: ').strip().lower()
     tls = input('TLS: acme (public domain) / internal (own CA) [acme]: ').strip() or 'acme'
@@ -148,8 +148,18 @@ def ask():
     config['media_indexing'] = input('Enable image/video/face indexing on a separate preview filesystem? [y/N]: ').lower() == 'y'
     for field, default in [('quota_gib', 100), ('max_file_gib', 5), ('min_free_gib', 5), ('trash_days', 30)]:
         config[field] = int(input(f'{field} [{default}]: ') or default)
-    print('Images will be built from this checkout. Use --config for your own registry images.')
+    print('CI-published images will be downloaded; nothing is built on this VPS.' if prebuilt else
+          'Images will be built from this checkout. Use --config for your own registry images.')
     return validate(config)
+
+
+def prebuilt_images(config, prefix, tag):
+    if '://' in prefix or not re.fullmatch(r'[a-z0-9][a-z0-9._:/-]+', prefix) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', tag):
+        raise ValueError('invalid prebuilt image prefix or tag')
+    images = {'app': f'{prefix}:{tag}', 'document-preview': f'{prefix}-document-preview:{tag}'}
+    if config['media_indexing']:
+        images['media-indexer'] = f'{prefix}-indexer:{tag}'
+    return images
 
 
 def filesystem(path):
@@ -236,9 +246,15 @@ def caddyfile(config):
 
 def build_images(config, source):
     if config['images']:
+        images = {}
         for image in config['images'].values():
             run('docker', 'pull', image)
-        return config['images']
+        for service, image in config['images'].items():
+            # Keep the exact pulled artifact even when the remote tag moves later.
+            images[service] = run('docker', 'image', 'inspect', '--format', '{{index .RepoDigests 0}}', image, capture=True).strip()
+            if not images[service] or not IMAGE_RE.fullmatch(images[service]):
+                raise ValueError('pulled image has no usable registry digest')
+        return images
     tag = secrets.token_hex(6)
     targets = {'app': 'runtime', 'document-preview': 'document-preview-runtime'}
     if config['media_indexing']:
@@ -328,7 +344,11 @@ def install(args):
     else:
         if INSTALL.exists() and any(INSTALL.iterdir()):
             raise ValueError(f'{INSTALL} is nonempty without installer state; refusing to overwrite')
-        config = validate(json.loads(Path(args.config).read_text())) if args.config else ask()
+        config = validate(json.loads(Path(args.config).read_text())) if args.config else ask(args.prebuilt)
+        if args.prebuilt:
+            if not config['images']:
+                config['images'] = prebuilt_images(config, args.image_prefix, args.image_tag)
+            config = validate(config)
         memory_kib = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
                               if line.startswith('MemTotal:')))
         minimum = 2 if config['images'] else 4
@@ -445,6 +465,9 @@ def main():
     setup = sub.add_parser('install')
     setup.add_argument('--config', help='private JSON configuration; omit for wizard')
     setup.add_argument('--prepare-only', action='store_true', help='prepare files/images without starting or enabling service (recovery)')
+    setup.add_argument('--prebuilt', action='store_true', help='download CI-published images; never build locally')
+    setup.add_argument('--image-prefix', default='ghcr.io/vantanminh/my-drive')
+    setup.add_argument('--image-tag', default='latest')
     for command in ('start', 'stop', 'status', 'check'):
         sub.add_parser(command)
     logs = sub.add_parser('logs')

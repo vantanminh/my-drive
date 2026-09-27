@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell syntax
-        run: bash -n scripts/install.sh
+        run: bash -n scripts/install.sh scripts/bootstrap.sh
       - name: Test installer and real Compose resolution
         run: python3 -B -m unittest discover -s tests -p test_vps_installer.py -v
   ubuntu-install-smoke:
@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Build and install the real single-volume stack
+      - name: Pull and install the CI-published single-volume stack
         run: |
           python3 - <<'PY'
           import json
@@ -28,7 +28,7 @@ jobs:
           config.update(host='127.0.0.1', tls='internal', min_free_gib=1)
           Path('/tmp/vps-smoke.json').write_text(json.dumps(config))
           PY
-          sudo bash scripts/install.sh --config /tmp/vps-smoke.json
+          sudo bash scripts/install.sh --prebuilt --config /tmp/vps-smoke.json
       - name: Verify restart, UUID guard and bootstrap cleanup
         run: |
           sudo systemctl restart my-drive

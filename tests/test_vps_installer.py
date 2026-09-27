@@ -96,6 +96,27 @@ class InstallerTests(unittest.TestCase):
             self.assertNotIn('MY_DRIVE_IMAGE', env)
             self.assertNotIn('COMPOSE_FILE', env)
 
+    def test_prebuilt_install_pulls_and_pins_without_building(self):
+        for indexing in (False, True):
+            config = self.config(media_indexing=indexing)
+            config['images'] = vps.prebuilt_images(config, 'ghcr.io/example/drive', 'v1.2.3')
+            calls = []
+            def command(*args, **kwargs):
+                calls.append(args)
+                return 'ghcr.io/example/artifact@sha256:' + 'a' * 64 if kwargs.get('capture') else None
+            with patch.object(vps, 'run', side_effect=command):
+                images = vps.build_images(config, Path('/no-source-required'))
+            self.assertEqual(len(images), 3 if indexing else 2)
+            self.assertTrue(all('@sha256:' in image for image in images.values()))
+            self.assertFalse(any('build' in args for args in calls))
+            self.assertEqual(sum(args[:2] == ('docker', 'pull') for args in calls), len(images))
+            self.assertEqual(config['images']['document-preview'], 'ghcr.io/example/drive-document-preview:v1.2.3')
+
+    def test_prebuilt_reference_validation(self):
+        for prefix, tag in [('https://registry/drive', 'latest'), ('ghcr.io/example/drive', 'tag;command')]:
+            with self.assertRaises(ValueError):
+                vps.prebuilt_images(self.config(), prefix, tag)
+
     @unittest.skipUnless(compose_available(), 'Docker Compose CLI is not available')
     def test_password_edge_cases_round_trip(self):
         with tempfile.TemporaryDirectory() as temporary:
