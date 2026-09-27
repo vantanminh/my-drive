@@ -81,6 +81,7 @@ pub(crate) fn router() -> Router<AppState> {
             get(list_album_items).post(add_album_items),
         )
         .route("/api/albums/{id}/items/remove", post(remove_album_items))
+        .route("/api/library/photos-folder", post(photos_folder))
         .route("/api/storage", get(account_storage))
         .route("/api/admin/storage", get(server_storage))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -120,6 +121,7 @@ struct IndexedEntry {
     folder_bytes: Option<i64>,
     folder_file_count: Option<i64>,
     folder_subfolder_count: Option<i64>,
+    system_role: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -312,7 +314,7 @@ async fn search_drive(
         "SELECT e.id, e.parent_id, e.kind, e.name, e.created_at, e.updated_at, e.deleted_at, \
                 idx.size_bytes, idx.mime_type AS mime_detected, idx.category, \
                 stats.total_bytes AS folder_bytes, stats.file_count AS folder_file_count, \
-                stats.subfolder_count AS folder_subfolder_count \
+                stats.subfolder_count AS folder_subfolder_count, e.system_role \
            FROM entry_index AS idx \
            JOIN drive_entries AS e ON e.id = idx.entry_id \
            LEFT JOIN folder_stats AS stats ON stats.folder_id = e.id \
@@ -987,6 +989,16 @@ struct AccountStorage {
     percent_used: Option<f64>,
     unlimited: bool,
     by_category: Vec<CategoryUsage>,
+    largest_files: Vec<LargestFile>,
+}
+
+#[derive(Serialize, FromRow)]
+struct LargestFile {
+    id: Uuid,
+    name: String,
+    size_bytes: i64,
+    category: String,
+    mime_type: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -1014,11 +1026,13 @@ async fn account_storage(
         i64::try_from(state.transfer_settings.owner_quota_bytes).ok()
     };
     let categories = categories_for(&state, Some(user.id)).await?;
+    let largest_files = largest_files_for(&state, Some(user.id)).await?;
     Ok(no_store(Json(storage_summary(
         quota_bytes,
         usage.used_bytes,
         usage.reserved_bytes,
         categories,
+        largest_files,
     ))))
 }
 
@@ -1027,6 +1041,7 @@ fn storage_summary(
     used_bytes: i64,
     reserved_bytes: i64,
     by_category: Vec<CategoryUsage>,
+    largest_files: Vec<LargestFile>,
 ) -> AccountStorage {
     let committed = used_bytes.saturating_add(reserved_bytes);
     let (available_bytes, percent_used, unlimited) = match quota_bytes {
@@ -1045,7 +1060,43 @@ fn storage_summary(
         percent_used,
         unlimited,
         by_category,
+        largest_files,
     }
+}
+
+async fn photos_folder(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Result<Response, LibraryError> {
+    require_csrf(&headers, &user, &state)?;
+    let id = drive::ensure_photos_folder(&state.pool, user.id)
+        .await
+        .map_err(library_from_drive)?;
+    Ok(no_store(Json(json!({
+        "id": id,
+        "name": "Photos",
+        "system_role": "photos"
+    }))))
+}
+
+async fn largest_files_for(
+    state: &AppState,
+    owner_id: Option<Uuid>,
+) -> Result<Vec<LargestFile>, LibraryError> {
+    sqlx::query_as::<_, LargestFile>(
+        "SELECT entry.id, entry.name, idx.size_bytes, idx.category, idx.mime_type \
+           FROM entry_index AS idx \
+           JOIN drive_entries AS entry ON entry.id = idx.entry_id \
+          WHERE idx.kind = 'file' AND idx.deleted_at IS NULL AND NOT idx.buried \
+            AND ($1::uuid IS NULL OR idx.owner_id = $1) \
+          ORDER BY idx.size_bytes DESC, entry.name ASC, entry.id ASC \
+          LIMIT 8",
+    )
+    .bind(owner_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(LibraryError::Database)
 }
 
 async fn usage_for(state: &AppState, owner_id: Uuid) -> Result<UsageRow, LibraryError> {
@@ -1099,6 +1150,7 @@ struct ServerStorage {
     system_used_bytes: u64,
     library_bytes: i64,
     by_category: Vec<CategoryUsage>,
+    largest_files: Vec<LargestFile>,
     users: Vec<UserStorage>,
 }
 
@@ -1193,6 +1245,7 @@ async fn server_storage(
         system_used_bytes,
         library_bytes,
         by_category: categories_for(&state, None).await?,
+        largest_files: largest_files_for(&state, None).await?,
         users,
     })))
 }
@@ -1238,7 +1291,7 @@ fn library_from_drive(error: DriveError) -> LibraryError {
     match error {
         DriveError::NotFound => LibraryError::NotFound,
         DriveError::BadRequest => LibraryError::BadRequest,
-        DriveError::Conflict => LibraryError::Conflict,
+        DriveError::Conflict | DriveError::Protected => LibraryError::Conflict,
         DriveError::Csrf => LibraryError::Csrf,
         DriveError::Database(error) => LibraryError::Database(error),
     }

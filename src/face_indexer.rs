@@ -6,8 +6,11 @@ use thiserror::Error;
 pub(crate) const DEFAULT_MODEL_PATH: &str = "/usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin";
 pub(crate) const MAX_FRAME_SIDE: u32 = 1280;
 pub(crate) const MAX_FRAME_BYTES: usize = (MAX_FRAME_SIDE as usize) * (MAX_FRAME_SIDE as usize);
-pub(crate) const DESCRIPTOR_SIDE: u32 = 16;
-pub(crate) const DESCRIPTOR_LEN: usize = (DESCRIPTOR_SIDE as usize) * (DESCRIPTOR_SIDE as usize);
+pub(crate) const DESCRIPTOR_LEN: usize = 256;
+pub(crate) const FACE_INDEX_RECIPE_VERSION: i16 = 3;
+const PATCH_SIDE: usize = 32;
+const HOG_CELLS: usize = 8;
+const HOG_BINS: usize = 4;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DetectedFace {
@@ -102,13 +105,16 @@ pub(crate) fn detect_frames(
     })?;
     let mut detector =
         rustface::create_detector(model_path).map_err(FaceDetectionError::ModelInvalid)?;
-    detector.set_min_face_size(40);
-    detector.set_score_thresh(2.8);
-    detector.set_pyramid_scale_factor(0.8);
+    // A lower minimum size and score catch smaller and dimmer faces. Overlap
+    // suppression below drops the duplicate boxes this more sensitive pass creates.
+    detector.set_min_face_size(20);
+    detector.set_score_thresh(2.0);
+    detector.set_pyramid_scale_factor(0.75);
     detector.set_slide_window_step(4, 4);
     let mut detected = Vec::new();
     for frame in frames {
-        let image = ImageData::new(&frame.pixels, frame.width, frame.height);
+        let enhanced = contrast_stretch(frame);
+        let image = ImageData::new(&enhanced.pixels, frame.width, frame.height);
         let mut faces = detector.detect(&image);
         faces.sort_by(|left, right| right.score().total_cmp(&left.score()));
         detected.extend(faces.into_iter().take(32).filter_map(|face| {
@@ -139,75 +145,220 @@ pub(crate) fn detect_frames(
             })
         }));
     }
-    Ok(detected)
+    Ok(suppress_overlaps(detected))
 }
 
-/// Build a small contrast-normalized face descriptor without a neural
-/// embedding model. Sampling only 16x16 grayscale pixels keeps CPU and storage
-/// bounded on the low-power indexer while still giving repeated photographs a
-/// stable appearance signature. The descriptor is an implementation detail;
-/// callers must not expose it through an API.
+/// Build a 256-byte histogram-of-gradients descriptor. Gradients survive
+/// brightness changes better than raw pixels, so the same person is less likely
+/// to split across lighting, while a different face still lands far away.
+/// The descriptor is an implementation detail and is never returned by the API.
 fn sample_descriptor(frame: &GrayFrame, left: f32, top: f32, width: f32, height: f32) -> Vec<u8> {
-    let x0 = ((left.clamp(0.0, 1.0) * frame.width as f32).floor() as u32)
-        .min(frame.width.saturating_sub(1));
-    let y0 = ((top.clamp(0.0, 1.0) * frame.height as f32).floor() as u32)
-        .min(frame.height.saturating_sub(1));
-    let x1 = (((left + width).clamp(0.0, 1.0) * frame.width as f32).ceil() as u32)
-        .max(x0.saturating_add(1))
-        .min(frame.width);
-    let y1 = (((top + height).clamp(0.0, 1.0) * frame.height as f32).ceil() as u32)
-        .max(y0.saturating_add(1))
-        .min(frame.height);
-    let sample_width = x1.saturating_sub(x0).max(1);
-    let sample_height = y1.saturating_sub(y0).max(1);
-    let mut samples = [0_u8; DESCRIPTOR_LEN];
-    let mut sum = 0_u64;
-    for row in 0..DESCRIPTOR_SIDE {
-        for column in 0..DESCRIPTOR_SIDE {
-            let x = x0.saturating_add(
-                ((u64::from(column) * 2 + 1) * u64::from(sample_width)
-                    / u64::from(DESCRIPTOR_SIDE * 2))
-                .min(u64::from(sample_width.saturating_sub(1))) as u32,
-            );
-            let y = y0.saturating_add(
-                ((u64::from(row) * 2 + 1) * u64::from(sample_height)
-                    / u64::from(DESCRIPTOR_SIDE * 2))
-                .min(u64::from(sample_height.saturating_sub(1))) as u32,
-            );
-            let index = usize::try_from(y)
-                .ok()
-                .and_then(|y| {
-                    usize::try_from(x)
-                        .ok()
-                        .and_then(|x| y.checked_mul(frame.width as usize)?.checked_add(x))
-                })
-                .unwrap_or(0)
-                .min(frame.pixels.len().saturating_sub(1));
-            let offset = usize::try_from(row * DESCRIPTOR_SIDE + column).unwrap_or(0);
-            samples[offset] = frame.pixels[index];
-            sum = sum.saturating_add(u64::from(samples[offset]));
+    // Keep a margin inside the detector box so background pixels do not
+    // dominate the signature, but never shrink a tiny face to nothing.
+    let inset_x = width * 0.08;
+    let inset_y = height * 0.08;
+    let crop_left = (left + inset_x).clamp(0.0, 0.98);
+    let crop_top = (top + inset_y).clamp(0.0, 0.98);
+    let crop_width = (width - inset_x * 2.0)
+        .max(width * 0.64)
+        .min(1.0 - crop_left);
+    let crop_height = (height - inset_y * 2.0)
+        .max(height * 0.64)
+        .min(1.0 - crop_top);
+    let mut patch = sample_patch(frame, crop_left, crop_top, crop_width, crop_height);
+    stretch_bytes(&mut patch);
+    histogram_of_gradients(&patch).to_vec()
+}
+
+fn sample_patch(
+    frame: &GrayFrame,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+) -> [u8; PATCH_SIDE * PATCH_SIDE] {
+    let mut patch = [0_u8; PATCH_SIDE * PATCH_SIDE];
+    let origin_x = left.clamp(0.0, 1.0) * frame.width.max(1) as f32;
+    let origin_y = top.clamp(0.0, 1.0) * frame.height.max(1) as f32;
+    let span_x = ((left + width).clamp(0.0, 1.0) * frame.width.max(1) as f32 - origin_x).max(1.0);
+    let span_y = ((top + height).clamp(0.0, 1.0) * frame.height.max(1) as f32 - origin_y).max(1.0);
+    for row in 0..PATCH_SIDE {
+        for column in 0..PATCH_SIDE {
+            let x = origin_x + (column as f32 + 0.5) * span_x / PATCH_SIDE as f32;
+            let y = origin_y + (row as f32 + 0.5) * span_y / PATCH_SIDE as f32;
+            patch[row * PATCH_SIDE + column] = bilinear(frame, x, y);
+        }
+    }
+    patch
+}
+
+fn bilinear(frame: &GrayFrame, x: f32, y: f32) -> u8 {
+    if frame.width == 0 || frame.height == 0 || frame.pixels.is_empty() {
+        return 0;
+    }
+    let max_x = frame.width.saturating_sub(1) as f32;
+    let max_y = frame.height.saturating_sub(1) as f32;
+    let x = x.clamp(0.0, max_x);
+    let y = y.clamp(0.0, max_y);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(frame.width.saturating_sub(1));
+    let y1 = (y0 + 1).min(frame.height.saturating_sub(1));
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let sample = |px: u32, py: u32| -> f32 {
+        let index = py as usize * frame.width as usize + px as usize;
+        f32::from(frame.pixels.get(index).copied().unwrap_or(0))
+    };
+    let top = sample(x0, y0) * (1.0 - tx) + sample(x1, y0) * tx;
+    let bottom = sample(x0, y1) * (1.0 - tx) + sample(x1, y1) * tx;
+    (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8
+}
+
+fn stretch_bytes(samples: &mut [u8]) {
+    let Some(min) = samples.iter().copied().min() else {
+        return;
+    };
+    let Some(max) = samples.iter().copied().max() else {
+        return;
+    };
+    let span = u16::from(max.saturating_sub(min)).max(1);
+    if span > 220 {
+        return;
+    }
+    for sample in samples {
+        *sample = ((u16::from(sample.saturating_sub(min)) * 255) / span).min(255) as u8;
+    }
+}
+
+fn contrast_stretch(frame: &GrayFrame) -> GrayFrame {
+    let mut pixels = frame.pixels.clone();
+    stretch_bytes(&mut pixels);
+    GrayFrame {
+        width: frame.width,
+        height: frame.height,
+        pixels,
+    }
+}
+
+fn histogram_of_gradients(patch: &[u8; PATCH_SIDE * PATCH_SIDE]) -> [u8; DESCRIPTOR_LEN] {
+    let mut histogram = [0_f32; DESCRIPTOR_LEN];
+    let cell = PATCH_SIDE / HOG_CELLS;
+    for cell_y in 0..HOG_CELLS {
+        for cell_x in 0..HOG_CELLS {
+            for py in 0..cell {
+                for px in 0..cell {
+                    let x = cell_x * cell + px;
+                    let y = cell_y * cell + py;
+                    let left = patch_at(patch, x.saturating_sub(1), y);
+                    let right = patch_at(patch, (x + 1).min(PATCH_SIDE - 1), y);
+                    let up = patch_at(patch, x, y.saturating_sub(1));
+                    let down = patch_at(patch, x, (y + 1).min(PATCH_SIDE - 1));
+                    let gx = f32::from(right) - f32::from(left);
+                    let gy = f32::from(down) - f32::from(up);
+                    let magnitude = gx.hypot(gy);
+                    if magnitude < 1.0 {
+                        continue;
+                    }
+                    let mut angle = gy.atan2(gx);
+                    if angle < 0.0 {
+                        angle += std::f32::consts::PI;
+                    }
+                    let bin = ((angle / std::f32::consts::PI) * HOG_BINS as f32).floor() as usize
+                        % HOG_BINS;
+                    histogram[(cell_y * HOG_CELLS + cell_x) * HOG_BINS + bin] += magnitude;
+                }
+            }
         }
     }
 
-    let count = DESCRIPTOR_LEN as f64;
-    let mean = sum as f64 / count;
-    let variance = samples
-        .iter()
-        .map(|sample| {
-            let delta = f64::from(*sample) - mean;
-            delta * delta
-        })
-        .sum::<f64>()
-        / count;
-    let standard_deviation = variance.sqrt().max(1.0);
-    samples
-        .iter()
-        .map(|sample| {
-            ((f64::from(*sample) - mean) * 48.0 / standard_deviation + 128.0)
-                .round()
-                .clamp(0.0, 255.0) as u8
-        })
-        .collect()
+    let mut accumulated = [0_f32; DESCRIPTOR_LEN];
+    let mut counts = [0_u8; DESCRIPTOR_LEN];
+    for block_y in 0..HOG_CELLS.saturating_sub(1) {
+        for block_x in 0..HOG_CELLS.saturating_sub(1) {
+            let mut energy = 1e-4_f32;
+            for offset_y in 0..2 {
+                for offset_x in 0..2 {
+                    for bin in 0..HOG_BINS {
+                        let index = ((block_y + offset_y) * HOG_CELLS + block_x + offset_x)
+                            * HOG_BINS
+                            + bin;
+                        energy += histogram[index] * histogram[index];
+                    }
+                }
+            }
+            let norm = energy.sqrt();
+            for offset_y in 0..2 {
+                for offset_x in 0..2 {
+                    for bin in 0..HOG_BINS {
+                        let index = ((block_y + offset_y) * HOG_CELLS + block_x + offset_x)
+                            * HOG_BINS
+                            + bin;
+                        accumulated[index] += (histogram[index] / norm).min(0.2);
+                        counts[index] = counts[index].saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut values = [0_f32; DESCRIPTOR_LEN];
+    let mut peak = 1e-6_f32;
+    for index in 0..DESCRIPTOR_LEN {
+        values[index] = if counts[index] == 0 {
+            0.0
+        } else {
+            accumulated[index] / f32::from(counts[index])
+        };
+        peak = peak.max(values[index]);
+    }
+    let mut descriptor = [0_u8; DESCRIPTOR_LEN];
+    for index in 0..DESCRIPTOR_LEN {
+        descriptor[index] = ((values[index] / peak) * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    descriptor
+}
+
+fn patch_at(patch: &[u8; PATCH_SIDE * PATCH_SIDE], x: usize, y: usize) -> u8 {
+    patch[y * PATCH_SIDE + x]
+}
+
+pub(crate) fn suppress_overlaps(mut faces: Vec<DetectedFace>) -> Vec<DetectedFace> {
+    faces.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.left.total_cmp(&right.left))
+            .then_with(|| left.top.total_cmp(&right.top))
+    });
+    let mut kept = Vec::with_capacity(faces.len());
+    for face in faces {
+        if kept
+            .iter()
+            .any(|existing: &DetectedFace| iou(existing, &face) > 0.5)
+        {
+            continue;
+        }
+        kept.push(face);
+    }
+    kept
+}
+
+fn iou(left: &DetectedFace, right: &DetectedFace) -> f32 {
+    let overlap_width =
+        (left.left + left.width).min(right.left + right.width) - left.left.max(right.left);
+    let overlap_height =
+        (left.top + left.height).min(right.top + right.height) - left.top.max(right.top);
+    if overlap_width <= 0.0 || overlap_height <= 0.0 {
+        return 0.0;
+    }
+    let intersection = overlap_width * overlap_height;
+    let union = left.width * left.height + right.width * right.height - intersection;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 fn parse_dimension(token: Option<&[u8]>) -> Result<u32, FaceDetectionError> {
@@ -243,7 +394,10 @@ fn next_token<'a>(bytes: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DESCRIPTOR_LEN, GrayFrame, MAX_FRAME_SIDE, parse_pgm, sample_descriptor};
+    use super::{
+        DESCRIPTOR_LEN, DetectedFace, GrayFrame, MAX_FRAME_SIDE, parse_pgm, sample_descriptor,
+        suppress_overlaps,
+    };
 
     #[test]
     fn parses_bounded_binary_pgm_with_comments() {
@@ -293,5 +447,87 @@ mod tests {
         let other = sample_descriptor(&frame, 0.6, 0.6, 0.3, 0.3);
         assert_eq!(first, same);
         assert_ne!(first, other);
+    }
+
+    fn mean_distance(left: &[u8], right: &[u8]) -> u32 {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| u32::from(left.abs_diff(*right)))
+            .sum::<u32>()
+            / left.len() as u32
+    }
+
+    #[test]
+    fn similar_faces_are_closer_than_a_different_pattern() {
+        let mut face = vec![40_u8; 96 * 96];
+        for y in 20..76 {
+            for x in 24..72 {
+                let dx = x as i32 - 48;
+                let dy = y as i32 - 48;
+                if dx * dx + dy * dy < 28 * 28 {
+                    face[y * 96 + x] = 180;
+                }
+            }
+        }
+        let frame = GrayFrame {
+            width: 96,
+            height: 96,
+            pixels: face,
+        };
+        let shifted = sample_descriptor(&frame, 0.18, 0.16, 0.52, 0.58);
+        let again = sample_descriptor(&frame, 0.2, 0.18, 0.5, 0.56);
+        let mut stripes = vec![20_u8; 96 * 96];
+        for y in 0..96 {
+            for x in 0..96 {
+                stripes[y * 96 + x] = if y % 8 < 4 { 30 } else { 210 };
+            }
+        }
+        let other = sample_descriptor(
+            &GrayFrame {
+                width: 96,
+                height: 96,
+                pixels: stripes,
+            },
+            0.2,
+            0.18,
+            0.5,
+            0.56,
+        );
+        let close = mean_distance(&shifted, &again);
+        let far = mean_distance(&shifted, &other);
+        assert!(close < far, "close {close} should be below far {far}");
+        assert!(close < 48, "similar crops drifted by {close}");
+    }
+
+    #[test]
+    fn overlapping_detections_keep_the_stronger_face() {
+        let strong = DetectedFace {
+            left: 0.2,
+            top: 0.2,
+            width: 0.3,
+            height: 0.3,
+            confidence: 0.9,
+            descriptor: vec![1, 2, 3],
+        };
+        let duplicate = DetectedFace {
+            left: 0.22,
+            top: 0.21,
+            width: 0.3,
+            height: 0.3,
+            confidence: 0.4,
+            descriptor: vec![4, 5, 6],
+        };
+        let other = DetectedFace {
+            left: 0.7,
+            top: 0.6,
+            width: 0.2,
+            height: 0.2,
+            confidence: 0.5,
+            descriptor: vec![7, 8, 9],
+        };
+        let kept = suppress_overlaps(vec![duplicate, other, strong]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].confidence, 0.9);
+        assert_eq!(kept[1].confidence, 0.5);
     }
 }

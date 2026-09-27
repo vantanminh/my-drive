@@ -67,6 +67,7 @@ export type Entry = {
   folder_bytes?: number | null;
   folder_file_count?: number | null;
   folder_subfolder_count?: number | null;
+  system_role?: 'photos' | null;
 };
 
 export type EntryPage = {
@@ -192,6 +193,14 @@ export type CategoryUsage = {
   size_bytes: number;
 };
 
+export type LargestFile = {
+  id: string;
+  name: string;
+  size_bytes: number;
+  category: string;
+  mime_type: string | null;
+};
+
 export type AccountStorage = {
   quota_bytes: number | null;
   used_bytes: number;
@@ -200,6 +209,7 @@ export type AccountStorage = {
   percent_used: number | null;
   unlimited: boolean;
   by_category: CategoryUsage[];
+  largest_files?: LargestFile[];
 };
 
 export type VolumeStatus = {
@@ -226,6 +236,7 @@ export type ServerStorage = {
   system_used_bytes: number;
   library_bytes: number;
   by_category: CategoryUsage[];
+  largest_files?: LargestFile[];
   users: UserStorage[];
 };
 

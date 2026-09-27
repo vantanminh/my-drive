@@ -818,41 +818,9 @@ async fn finalize_upload(
                 .await
                 .map_err(map_database_error)?;
         let version_id = version_id.ok_or(TransferError::Inconsistent)?;
-        if let Some((task, recipe_version)) = media_index_task(detected_media_type) {
-            sqlx::query(
-                "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-                 VALUES ($1, $2, $3) \
-                 ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
-            )
-            .bind(version_id)
-            .bind(task)
-            .bind(recipe_version)
-            .execute(&mut *transaction)
+        enqueue_media_index_jobs(&mut transaction, version_id, detected_media_type)
             .await
             .map_err(map_database_error)?;
-        }
-        if is_indexable_video_mime(detected_media_type) {
-            sqlx::query(
-                "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-                 VALUES ($1, 'video_preview', 1) \
-                 ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
-            )
-            .bind(version_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_database_error)?;
-        }
-        if is_face_indexable_media(detected_media_type) {
-            sqlx::query(
-                "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-                 VALUES ($1, 'face_index', 2) \
-                 ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
-            )
-            .bind(version_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_database_error)?;
-        }
     }
     sqlx::query(
         "INSERT INTO audit_events (event_type, actor_id, resource_id) \
@@ -1962,6 +1930,47 @@ fn is_indexable_video_mime(mime_type: Option<&str>) -> bool {
                 | "video/3gpp"
         )
     )
+}
+
+pub(crate) async fn enqueue_media_index_jobs(
+    transaction: &mut Transaction<'_, Postgres>,
+    version_id: Uuid,
+    mime: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    if let Some((task, recipe_version)) = media_index_task(mime) {
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+        )
+        .bind(version_id)
+        .bind(task)
+        .bind(recipe_version)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    if is_indexable_video_mime(mime) {
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+             VALUES ($1, 'video_preview', 1) \
+             ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+        )
+        .bind(version_id)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    if is_face_indexable_media(mime) {
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
+             VALUES ($1, 'face_index', $2) \
+             ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
+        )
+        .bind(version_id)
+        .bind(crate::face_indexer::FACE_INDEX_RECIPE_VERSION)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
 }
 
 fn media_index_task(mime_type: Option<&str>) -> Option<(&'static str, i16)> {

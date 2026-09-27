@@ -307,6 +307,11 @@ export const api = {
       csrf: true,
       cache: 'no-store'
     }),
+  separateFace: (clusterId: string, fileIds: string[]) =>
+    request<{ clusterId: string; movedFaces: number }>(
+      '/api/faces/' + encodeURIComponent(clusterId) + '/separate',
+      { method: 'POST', json: { fileIds }, csrf: true, cache: 'no-store' }
+    ),
   resetManagedAccountPassword: (id: string) =>
     request<{ temporaryPassword: string }>(
       '/api/admin/accounts/' + encodeURIComponent(id) + '/reset-password',
@@ -488,6 +493,17 @@ export const api = {
     }),
   trashEntry: (id: string) =>
     request<void>('/api/entries/' + encodeURIComponent(id), { method: 'DELETE', csrf: true }),
+  batchEntries: (payload: { action: 'move' | 'copy' | 'trash'; ids: string[]; parent_id?: string | null }) =>
+    request<{ action: string; count: number; entry_ids: string[] }>('/api/drive/batch', {
+      method: 'POST',
+      json: payload,
+      csrf: true
+    }),
+  ensurePhotosFolder: () =>
+    request<{ id: string; name: string; system_role: 'photos' }>('/api/library/photos-folder', {
+      method: 'POST',
+      csrf: true
+    }),
   restoreEntry: (id: string) =>
     request<Entry>('/api/entries/' + encodeURIComponent(id) + '/restore', {
       method: 'POST',

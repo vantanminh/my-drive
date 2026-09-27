@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, ArrowRight, Download, File, FileImage, FileSpreadsheet, FileText, Film, Folder, LockKeyhole, Presentation, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Download, File, FileImage, FileSpreadsheet, FileText, Film, Folder, LayoutGrid, List, LockKeyhole, Presentation, ShieldCheck } from 'lucide-react';
 import { ApiError, api, publicDownloadUrl, publicPreviewUrl, publicThumbnailUrl } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import { buildPublicPath, navigateTo, parsePublicRoute, useBrowserHref } from '../route';
 import type { Breadcrumb, PublicEntry, PublicShareView } from '../types';
 import FilePreviewer from './FilePreviewer';
-import { isFilePreviewable } from './MediaViewer';
+import { isFilePreviewable, mediaKindFor } from './MediaViewer';
+import PhotoMosaic from './PhotoMosaic';
 
 type Props = {
   token: string;
@@ -41,7 +42,9 @@ export default function PublicSharePage({ token }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [viewer, setViewer] = useState<PublicEntry | null>(null);
+  const [viewMode, setViewMode] = useState<'gallery' | 'list'>('gallery');
   const loadRequest = useRef(0);
+  const autoOpened = useRef(false);
 
   async function load(nextFolderId?: string) {
     const requestId = ++loadRequest.current;
@@ -97,6 +100,13 @@ export default function PublicSharePage({ token }: Props) {
     setViewer(match ?? null);
   }, [route?.fileId, view]);
 
+  useEffect(() => {
+    if (autoOpened.current || !view || view.resource.kind !== 'file') return;
+    if (!isPreviewable(view.resource) || route?.fileId) return;
+    autoOpened.current = true;
+    navigateTo(buildPublicPath(token, [], view.resource.id), 'replace');
+  }, [route?.fileId, token, view]);
+
   function openFolder(entry: PublicEntry) {
     const nested = view?.breadcrumbs.slice(1) ?? [];
     navigateTo(buildPublicPath(token, [...nested, { id: entry.id, name: entry.name }], null));
@@ -123,6 +133,8 @@ export default function PublicSharePage({ token }: Props) {
 
   const isFileShare = view?.resource.kind === 'file';
   const rows = isFileShare ? [view!.resource] : view?.entries || [];
+  const mediaRows = rows.filter((entry) => entry.kind === 'file' && mediaKindFor({ name: entry.name, mime_detected: null }));
+  const otherRows = rows.filter((entry) => !mediaRows.some((item) => item.id === entry.id));
   const title = view
     ? isFileShare
       ? view.resource.name
@@ -182,11 +194,19 @@ export default function PublicSharePage({ token }: Props) {
                     {view.expires_at && <span> · Expires {formatDate(view.expires_at)}</span>}
                   </p>
                 </div>
-                {view.allow_download && isFileShare && (
-                  <a className="button button-primary" href={publicDownloadUrl(token, view.resource.id)}>
-                    <Download size={17} /> Download file
-                  </a>
-                )}
+                <div className="heading-actions">
+                  {!isFileShare && rows.length > 0 && (
+                    <div className="view-toggle" role="group" aria-label="Shared view">
+                      <button className={viewMode === 'gallery' ? 'active' : ''} type="button" aria-pressed={viewMode === 'gallery'} onClick={() => setViewMode('gallery')} aria-label="Gallery view"><LayoutGrid size={16} /></button>
+                      <button className={viewMode === 'list' ? 'active' : ''} type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')} aria-label="List view"><List size={16} /></button>
+                    </div>
+                  )}
+                  {view.allow_download && isFileShare && (
+                    <a className="button button-primary" href={publicDownloadUrl(token, view.resource.id)}>
+                      <Download size={17} /> Download file
+                    </a>
+                  )}
+                </div>
               </div>
               {!isFileShare && view.breadcrumbs.length > 1 && (
                 <nav className="breadcrumb-nav" aria-label="Shared folder path">
@@ -198,14 +218,32 @@ export default function PublicSharePage({ token }: Props) {
                   ))}
                 </nav>
               )}
+              {viewMode === 'gallery' && mediaRows.length > 0 && (
+                <PhotoMosaic
+                  items={mediaRows.map((entry) => ({
+                    id: entry.id,
+                    name: entry.name,
+                    src: publicThumbnailUrl(token, entry.id),
+                    video: mediaKindFor({ name: entry.name, mime_detected: null }) === 'video'
+                  }))}
+                  onOpen={(id) => {
+                    const nested = view.resource.kind === 'folder' ? view.breadcrumbs.slice(1) : [];
+                    navigateTo(buildPublicPath(token, nested, id), 'replace');
+                  }}
+                />
+              )}
+              {(viewMode === 'list' ? rows : otherRows).length > 0 && (
               <div className="public-table">
+                {viewMode === 'gallery' && otherRows.length > 0 && <h2 className="public-section-label">Folders and files</h2>}
                 <div className="table-head public-grid">
                   <span>Name</span><span>Size</span><span>Modified</span><span />
                 </div>
-                {rows.map((entry) => (
+                {(viewMode === 'list' ? rows : otherRows).map((entry) => (
                   <div className="table-row public-grid" key={entry.id}>
                     <div className="entry-main">
-                      <PublicFileIcon entry={entry} />
+                      {entry.kind === 'file' && mediaKindFor({ name: entry.name, mime_detected: null }) ? (
+                        <img className="public-row-thumb" src={publicThumbnailUrl(token, entry.id)} alt="" />
+                      ) : <PublicFileIcon entry={entry} />}
                       {entry.kind === 'folder' ? (
                         <button className="entry-name" onClick={() => openFolder(entry)}>{entry.name}</button>
                         ) : isPreviewable(entry) ? (
@@ -225,14 +263,15 @@ export default function PublicSharePage({ token }: Props) {
                     </span>
                   </div>
                 ))}
-                {rows.length === 0 && !loading && (
-                  <div className="empty-state compact-empty">
-                    <span className="empty-icon"><Folder size={22} /></span>
-                    <h2>This folder is empty</h2>
-                    <p>There are no shared items in this folder yet.</p>
-                  </div>
-                )}
               </div>
+              )}
+              {rows.length === 0 && !loading && (
+                <div className="empty-state compact-empty">
+                  <span className="empty-icon"><Folder size={22} /></span>
+                  <h2>This folder is empty</h2>
+                  <p>There are no shared items in this folder yet.</p>
+                </div>
+              )}
               {!view.allow_download && <p className="download-note"><LockKeyhole size={14} /> Downloads are disabled for this link.</p>}
             </>
           )}
