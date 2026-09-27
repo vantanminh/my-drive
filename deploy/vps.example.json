@@ -1,0 +1,14 @@
+{
+  "host": "drive.example.com",
+  "tls": "acme",
+  "email": "owner@example.com",
+  "storage": "/srv/my-drive/data",
+  "database": "/var/lib/my-drive/postgres",
+  "previews": "/var/lib/my-drive/previews",
+  "media_indexing": false,
+  "quota_gib": 100,
+  "max_file_gib": 5,
+  "min_free_gib": 5,
+  "trash_days": 30,
+  "images": {}
+}

@@ -4,6 +4,17 @@ A private, single-server personal cloud. The service is a Rust/Axum modular
 monolith backed by PostgreSQL. PostgreSQL stores file and security metadata;
 file contents and upload staging belong on a separately mounted HDD.
 
+## Automatic Ubuntu VPS setup
+
+Run `sudo bash scripts/install.sh` from a reviewed checkout for an interactive
+installer, or pass `--config /path/to/private-config.json` for unattended setup.
+The installer builds your own images by default, generates private credentials,
+configures HTTPS and systemd, and provides `my-drive` lifecycle commands.
+It supports a single-volume VPS with media indexing disabled, or separate
+storage/preview filesystems with indexing enabled. No author-owned cloud account
+or registry is required. See the complete [Ubuntu installation and operations guide](docs/DEPLOY_UBUNTU.md)
+(Vietnamese), including backups, recovery and upgrades.
+
 ## Current implementation
 
 The service now includes validated configuration, PostgreSQL migrations,

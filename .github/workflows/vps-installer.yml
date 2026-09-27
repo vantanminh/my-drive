@@ -1,0 +1,47 @@
+name: VPS installer checks
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [master]
+jobs:
+  installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        run: bash -n scripts/install.sh
+      - name: Test installer and real Compose resolution
+        run: python3 -B -m unittest discover -s tests -p test_vps_installer.py -v
+  ubuntu-install-smoke:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and install the real single-volume stack
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          config = json.loads(Path('deploy/vps.example.json').read_text())
+          config.update(host='127.0.0.1', tls='internal', min_free_gib=1)
+          Path('/tmp/vps-smoke.json').write_text(json.dumps(config))
+          PY
+          sudo bash scripts/install.sh --config /tmp/vps-smoke.json
+      - name: Verify restart, UUID guard and bootstrap cleanup
+        run: |
+          sudo systemctl restart my-drive
+          sudo my-drive check
+          sudo my-drive status
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          state = json.loads(Path('/opt/my-drive/state.json').read_text())
+          assert state['env']['BOOTSTRAP_OWNER_PASSWORD'] == ''
+          assert state['env']['BOOTSTRAP_OWNER_EMAIL'] == ''
+          assert 'owner_password' not in state['config']
+          PY
+      - name: Stop service
+        if: always()
+        run: sudo systemctl disable --now my-drive || true
