@@ -169,7 +169,7 @@ jobs:
           cargo test --lib --locked storage::tests::physical_media_mount_fixture_fails_closed_when_preview_mount_is_missing -- --ignored --exact --nocapture
 
   publish:
-    needs: validate
+    needs: [validate, database-fixture, physical-mount-fixture]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
