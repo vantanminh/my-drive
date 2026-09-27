@@ -50,13 +50,30 @@ pub(crate) async fn documentation(Path(path): Path<String>) -> Response {
     };
     ([("content-type", "text/markdown; charset=utf-8")], text).into_response()
 }
-type ApiResult = Result<Response, Response>;
+type ApiResult = Result<Response, ApiError>;
+
+struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, code: &'static str) -> Self {
+        Self { status, code }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        error(self.status, self.code)
+    }
+}
 fn error(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({"error":code}))).into_response()
 }
-fn db(error_value: sqlx::Error) -> Response {
+fn db(error_value: sqlx::Error) -> ApiError {
     tracing::error!(error = %error_value, "developer API database operation failed");
-    error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
+    ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
 }
 fn output(value: Value) -> Response {
     let mut response = Json(value).into_response();
@@ -144,7 +161,7 @@ pub(crate) async fn authenticate(
         return error(StatusCode::UNAUTHORIZED, "invalid_api_key");
     }
     let key = match sqlx::query_as::<_, KeyAuth>("SELECT k.id, k.owner_id, u.email, u.role, k.scopes FROM api_keys k JOIN users u ON u.id=k.owner_id WHERE k.token_digest=$1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>now()) AND u.disabled_at IS NULL AND NOT u.must_change_password")
-        .bind(Sha256::digest(token.as_bytes()).to_vec()).fetch_optional(&state.pool).await { Ok(Some(k)) => k, Ok(None) => return error(StatusCode::UNAUTHORIZED, "invalid_api_key"), Err(e) => return db(e) };
+        .bind(Sha256::digest(token.as_bytes()).to_vec()).fetch_optional(&state.pool).await { Ok(Some(k)) => k, Ok(None) => return error(StatusCode::UNAUTHORIZED, "invalid_api_key"), Err(e) => return db(e).into_response() };
     let started = std::time::Instant::now();
     let method = request.method().to_string();
     let route = request
@@ -162,7 +179,7 @@ pub(crate) async fn authenticate(
             frame
         }))
     });
-    let count: Option<i32> = match sqlx::query_scalar("UPDATE api_keys SET last_used_at=now(), rate_count=CASE WHEN rate_window < now()-interval '1 minute' THEN 1 ELSE rate_count+1 END, rate_window=CASE WHEN rate_window < now()-interval '1 minute' THEN now() ELSE rate_window END WHERE id=$1 AND revoked_at IS NULL RETURNING rate_count").bind(key.id).fetch_optional(&state.pool).await { Ok(c)=>c, Err(e)=>return db(e) };
+    let count: Option<i32> = match sqlx::query_scalar("UPDATE api_keys SET last_used_at=now(), rate_count=CASE WHEN rate_window < now()-interval '1 minute' THEN 1 ELSE rate_count+1 END, rate_window=CASE WHEN rate_window < now()-interval '1 minute' THEN now() ELSE rate_window END WHERE id=$1 AND revoked_at IS NULL RETURNING rate_count").bind(key.id).fetch_optional(&state.pool).await { Ok(c)=>c, Err(e)=>return db(e).into_response() };
     let mut response = if count.is_none() {
         error(StatusCode::UNAUTHORIZED, "invalid_api_key")
     } else if count.is_some_and(|c| c > 120) {
@@ -201,7 +218,7 @@ async fn keys(
 ) -> ApiResult {
     let offset = page.offset.unwrap_or(0);
     if !(0..=1_000_000).contains(&offset) {
-        return Err(error(StatusCode::BAD_REQUEST, "invalid_request"));
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_request"));
     }
     let mut rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(k)-'token_digest'-'rate_window'-'rate_count' FROM api_keys k WHERE owner_id=$1 ORDER BY created_at DESC,id LIMIT 101 OFFSET $2").bind(user.id).bind(offset).fetch_all(&state.pool).await.map_err(db)?;
     let more = rows.len() > 100;
@@ -226,7 +243,7 @@ async fn create_key(
     Json(input): Json<NewKey>,
 ) -> ApiResult {
     if !require_csrf(&headers, &user, state.auth_settings) {
-        return Err(error(StatusCode::FORBIDDEN, "csrf_failed"));
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "csrf_failed"));
     }
     let name = input.name.trim();
     if name.is_empty()
@@ -236,12 +253,12 @@ async fn create_key(
         || input.scopes.iter().any(|s| !SCOPES.contains(&s.as_str()))
         || input.expires_at.is_some_and(|d| d <= Utc::now())
     {
-        return Err(error(StatusCode::BAD_REQUEST, "invalid_request"));
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_request"));
     }
     let mut raw = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut raw)
-        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"))?;
+        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"))?;
     let token = format!("mdk_{}", URL_SAFE_NO_PAD.encode(raw));
     let id = Uuid::new_v4();
     let mut tx = state.pool.begin().await.map_err(db)?;
@@ -252,7 +269,7 @@ async fn create_key(
         .map_err(db)?;
     let count:i64=sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE owner_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())").bind(user.id).fetch_one(&mut *tx).await.map_err(db)?;
     if count >= 50 {
-        return Err(error(StatusCode::CONFLICT, "key_limit_reached"));
+        return Err(ApiError::new(StatusCode::CONFLICT, "key_limit_reached"));
     }
     sqlx::query("INSERT INTO api_keys(id,owner_id,name,token_digest,prefix,scopes,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(id).bind(user.id).bind(name).bind(Sha256::digest(token.as_bytes()).to_vec()).bind(&token[..12]).bind(input.scopes).bind(input.expires_at).execute(&mut *tx).await.map_err(db)?;
     sqlx::query(
@@ -299,7 +316,7 @@ async fn revoke(
     revoke_shares: bool,
 ) -> ApiResult {
     if !require_csrf(headers, user, state.auth_settings) {
-        return Err(error(StatusCode::FORBIDDEN, "csrf_failed"));
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "csrf_failed"));
     }
     let mut tx = state.pool.begin().await.map_err(db)?;
     let exists: Option<Uuid> =
@@ -310,7 +327,7 @@ async fn revoke(
             .await
             .map_err(db)?;
     if exists.is_none() {
-        return Err(error(StatusCode::NOT_FOUND, "not_found"));
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found"));
     }
     if revoke_key {
         sqlx::query("UPDATE api_keys SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1")
@@ -353,10 +370,10 @@ async fn usage(
     user: AuthenticatedUser,
     Query(q): Query<UsageQuery>,
 ) -> ApiResult {
-    let owner = visibility(&user, &q).map_err(|s| error(s, "forbidden"))?;
+    let owner = visibility(&user, &q).map_err(|s| ApiError::new(s, "forbidden"))?;
     let days = q.days.unwrap_or(30);
     if !(1..=90).contains(&days) {
-        return Err(error(StatusCode::BAD_REQUEST, "invalid_request"));
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_request"));
     }
     let daily:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('day',to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD'),'requests',count(*),'errors',count(*) FILTER(WHERE status>=400),'request_bytes',sum(request_bytes),'avg_duration_ms',round(avg(duration_ms))) FROM api_request_logs WHERE ($1::uuid IS NULL OR owner_id=$1) AND ($2::uuid IS NULL OR api_key_id=$2) AND created_at >= now()-make_interval(days=>$3) GROUP BY to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') ORDER BY to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD')")
         .bind(owner).bind(q.key_id).bind(days).fetch_all(&state.pool).await.map_err(db)?;
@@ -368,7 +385,7 @@ async fn logs(
     user: AuthenticatedUser,
     Query(q): Query<UsageQuery>,
 ) -> ApiResult {
-    let owner = visibility(&user, &q).map_err(|s| error(s, "forbidden"))?;
+    let owner = visibility(&user, &q).map_err(|s| ApiError::new(s, "forbidden"))?;
     let mut rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(l) FROM api_request_logs l WHERE ($1::uuid IS NULL OR owner_id=$1) AND ($2::uuid IS NULL OR api_key_id=$2) AND ($3::bigint IS NULL OR id<$3) ORDER BY id DESC LIMIT 101").bind(owner).bind(q.key_id).bind(q.before_id).fetch_all(&state.pool).await.map_err(db)?;
     let more = rows.len() > 100;
     if more {
@@ -385,6 +402,30 @@ async fn logs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compact_errors_preserve_status_and_hide_database_details() {
+        assert!(std::mem::size_of::<ApiError>() < 128);
+        for (failure, expected_status, expected_code) in [
+            (
+                ApiError::new(StatusCode::FORBIDDEN, "csrf_failed"),
+                StatusCode::FORBIDDEN,
+                "csrf_failed",
+            ),
+            (
+                db(sqlx::Error::Protocol("private database details".into())),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+            ),
+        ] {
+            let response = failure.into_response();
+            assert_eq!(response.status(), expected_status);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value, json!({"error": expected_code}));
+        }
+    }
+
     #[test]
     fn scopes_do_not_expose_browser_or_admin_surfaces() {
         assert_eq!(
