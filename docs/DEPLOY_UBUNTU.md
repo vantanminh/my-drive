@@ -17,9 +17,10 @@ Google Drive import chỉ hoạt động khi bạn chủ động cấu hình OAu
   trước khi chạy bộ cài. Chọn thư mục con trống trên ổ đó.
 - Với HTTPS công khai: có tên miền trỏ A record về IP VPS; nếu có AAAA record,
   IPv6 phải truy cập được VPS. Cho phép TCP 80/443 trong firewall nhà cung cấp
-  và firewall máy; giữ cổng SSH đang dùng. Hai cổng phải chưa có dịch vụ khác chiếm.
+  và firewall máy. HTTPS nội bộ cũng cần hai cổng này; HTTP-only chỉ cần TCP 80.
+  Giữ cổng SSH đang dùng; các cổng cần thiết phải chưa có dịch vụ khác chiếm.
 - Bộ cài không tự bật UFW hoặc thay SSH để tránh làm mất quyền truy cập. Chỉ
-  reverse proxy mở 80/443; database, app và converter không mở cổng public.
+  reverse proxy mở cổng theo chế độ TLS; database, app và converter không mở cổng public.
 - Kết nối Internet để tải package, base image, Rust/npm dependencies. Có thể
   dùng mirror/registry do bạn quản lý; chạy thường ngày không gọi dịch vụ của tác giả.
 
@@ -76,7 +77,7 @@ plugin tương ứng rồi chạy lại. Không cần Node/Rust trên host vì b
 
 ## 2. Trả lời wizard
 
-Wizard hỏi tên miền hoặc IPv4, chế độ TLS, email chủ sở hữu, mật khẩu, thư mục
+Wizard hỏi tên miền hoặc IPv4, chế độ HTTPS/HTTP, email chủ sở hữu, mật khẩu, thư mục
 dữ liệu, indexing và giới hạn lưu trữ. Mật khẩu không hiện khi nhập; bỏ trống
 để tạo ngẫu nhiên. Email chủ sở hữu không bắt buộc có SMTP để đăng nhập; khi
 dùng ACME nó cũng là email liên hệ CA.
@@ -87,6 +88,7 @@ dùng ACME nó cũng là email liên hệ CA.
 | `media_indexing=true` | Cache preview phải nằm trên filesystem khác với dữ liệu gốc. PostgreSQL có thể cùng filesystem với cache. Bộ cài kiểm tra UUID và ứng dụng kiểm tra device của bind mount. |
 | `tls=acme` | Tên miền công khai; Caddy xin và gia hạn chứng chỉ tự động qua CA công khai. |
 | `tls=internal` | IP hoặc tên miền nội bộ; Caddy tạo CA trên VPS. Bạn tự cài public root certificate vào thiết bị truy cập. Không cần CA bên ngoài. |
+| `tls=http` | Chỉ mở HTTP trên cổng 80; không xin chứng chỉ hoặc chuyển hướng sang HTTPS. Cookie phiên không có thuộc tính `Secure` để đăng nhập hoạt động qua HTTP. Mật khẩu, cookie và dữ liệu truyền qua mạng không được mã hóa; chỉ dùng trong mạng tin cậy hoặc qua VPN/SSH tunnel. |
 
 Với một ổ đĩa, thư mục preview trống vẫn được mount read-only vào app để dùng
 chung định dạng backup/restore; app không được cấu hình dùng cache này.
@@ -202,8 +204,10 @@ Google Drive import là tùy chọn sau khi cài: tạo OAuth client của riên
 đặt cả bốn biến `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
 `GOOGLE_OAUTH_REDIRECT_URI`, `GOOGLE_DRIVE_TOKEN_KEY` trong mapping `env` của
 `/opt/my-drive/state.json` bằng editor root. Redirect dùng
-`https://<host>/api/google-drive/callback`; token key là 64 ký tự hex ngẫu nhiên
-(`openssl rand -hex 32`). Restart dịch vụ để bộ cài ghi `.env` từ state. Đừng
+`https://<host>/api/google-drive/callback`, hoặc `http://<host>/api/google-drive/callback`
+ở chế độ HTTP nếu OAuth provider chấp nhận callback không mã hóa. Token key là
+64 ký tự hex ngẫu nhiên (`openssl rand -hex 32`). Restart dịch vụ để bộ cài ghi
+`.env` từ state. Đừng
 chỉ sửa `.env` vì lần start tiếp sẽ ghi lại nó. Phần quản lý giới hạn/tài khoản
 thành viên thực hiện trong giao diện chủ sở hữu.
 

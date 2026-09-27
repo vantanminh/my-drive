@@ -33,7 +33,7 @@ class InstallerTests(unittest.TestCase):
                        {'storage': '/srv/../etc'}, {'storage': '/'}, {'storage': '/opt/my-drive/data'},
                        {'storage': '/srv/my-drive', 'database': '/srv/my-drive/postgres'},
                        {'quota_gib': True}, {'media_indexing': 'false'}, {'owner_password': 'short'},
-                       {'unknown': True}, {'tls': 'http'}, {'host': '192.0.2.1', 'tls': 'acme'},
+                       {'unknown': True}, {'host': '192.0.2.1', 'tls': 'acme'},
                        {'images': {'app': 'foo:bar'}}]:
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 self.config(**fields)

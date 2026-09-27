@@ -13,10 +13,13 @@ needed; it downloads deployment files and pulls images built by GitHub CI/CD:
 sudo bash -c 'set -e; apt-get update; apt-get install -y ca-certificates curl; curl -fsSL https://raw.githubusercontent.com/vantanminh/my-drive/master/scripts/bootstrap.sh | bash'
 ```
 
-The wizard asks for your domain/IP, owner email/password and storage settings.
-It installs Docker, generates private credentials, configures HTTPS and systemd,
-and starts the drive. For public HTTPS, point your domain at the VPS and allow
-TCP 80/443 first. Use internal TLS for IP-only access. Allow at least 2 GiB RAM.
+The wizard asks for your domain/IP, access mode, owner email/password and storage
+settings. It installs Docker, generates private credentials, configures the
+reverse proxy and systemd, and starts the drive. For public HTTPS, point your
+domain at the VPS and allow TCP 80/443. Use internal TLS for IP-only access.
+Choose HTTP-only mode to expose port 80 without TLS; traffic and login cookies
+will be unencrypted, so use it only on a trusted network or through a secure
+tunnel. Allow at least 2 GiB RAM.
 Published GHCR packages must be public for anonymous installation; no GitHub
 login is required once they are public. The pulled image digests are pinned.
 

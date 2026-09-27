@@ -88,8 +88,8 @@ def validate(config):
         raise ValueError(f'unknown configuration fields: {sorted(set(config) - allowed)}')
     result = dict(config)
     result['host'] = valid_host(str(config['host']))
-    if config.get('tls', 'acme') not in {'acme', 'internal'}:
-        raise ValueError('tls must be acme or internal')
+    if config.get('tls', 'acme') not in {'acme', 'internal', 'http'}:
+        raise ValueError('tls must be acme, internal, or http')
     result.setdefault('tls', 'acme')
     if result['tls'] == 'acme':
         try:
@@ -136,7 +136,9 @@ def validate(config):
 def ask(prebuilt=False):
     print('My Drive Ubuntu VPS setup. Configuration stays on this server.')
     host = input('Domain or IPv4 address: ').strip().lower()
-    tls = input('TLS: acme (public domain) / internal (own CA) [acme]: ').strip() or 'acme'
+    tls = input('Access: acme HTTPS / internal HTTPS / http only (unencrypted) [acme]: ').strip().lower() or 'acme'
+    if tls == 'http':
+        print('HTTP does not encrypt traffic. Use only on a trusted network or through a secure tunnel.')
     email = input('Owner email (also ACME contact when enabled): ').strip()
     password = getpass.getpass('Owner password (>=16 bytes; empty = generate): ')
     if password and getpass.getpass('Repeat password: ') != password:
@@ -218,12 +220,16 @@ def make_compose(model, config):
             if key.startswith('MEDIA_PREVIEW_'):
                 del env[key]
         # Keep the unused, empty preview bind for compatibility with backup/restore.
-    services['app']['ports'] = []  # Only the TLS proxy is published.
+    services['app']['ports'] = []  # Only the reverse proxy is published.
+    services['app']['environment']['COOKIE_SECURE'] = 'false' if config['tls'] == 'http' else 'true'
     for service in services.values():
         service['logging'] = {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}
+    proxy_ports = ['80:80']
+    if config['tls'] != 'http':
+        proxy_ports.append('443:443')
     services['proxy'] = {
         'image': 'caddy:2-alpine', 'restart': 'unless-stopped',
-        'ports': ['80:80', '443:443'],
+        'ports': proxy_ports,
         'volumes': [{'type': 'bind', 'source': str(INSTALL / 'Caddyfile'), 'target': '/etc/caddy/Caddyfile',
                      'read_only': True, 'bind': {'create_host_path': False}},
                     {'type': 'bind', 'source': str(INSTALL / 'caddy-data'), 'target': '/data',
@@ -238,7 +244,8 @@ def make_compose(model, config):
 def caddyfile(config):
     global_options = '{\n    admin off\n' + (f"    email {config['email']}\n" if config['tls'] == 'acme' else '') + '}\n'
     tls = '    tls internal\n' if config['tls'] == 'internal' else ''
-    return global_options + f"https://{config['host']} {{\n" + tls + '''    reverse_proxy app:3000
+    scheme = 'http' if config['tls'] == 'http' else 'https'
+    return global_options + f"{scheme}://{config['host']} {{\n" + tls + '''    reverse_proxy app:3000
     header X-Content-Type-Options nosniff
 }
 '''
@@ -322,9 +329,9 @@ def start(state):
         indexer_id = compose('ps', '-q', 'media-indexer', capture=True).strip()
         if not indexer_id or run('docker', 'inspect', '-f', '{{.State.Running}}', indexer_id, capture=True).strip() != 'true':
             raise ValueError('media indexer is not running')
-    # Validate HTTPS and readiness through the actual proxy, including TLS identity.
+    # Validate readiness through the actual proxy, including TLS identity when enabled.
     args = ['curl', '--fail', '--silent', '--show-error', '--retry', '12', '--retry-delay', '5',
-            '--retry-all-errors', '--max-time', '10', '--resolve', f"{state['config']['host']}:443:127.0.0.1"]
+            '--retry-all-errors', '--max-time', '10']
     if state['config']['tls'] == 'internal':
         root = INSTALL / 'caddy-data/caddy/pki/authorities/local/root.crt'
         for _ in range(30):
@@ -332,7 +339,10 @@ def start(state):
                 break
             time.sleep(1)
         args += ['--cacert', str(root)]
-    run(*args, f"https://{state['config']['host']}/health/ready")
+    scheme = 'http' if state['config']['tls'] == 'http' else 'https'
+    port = 80 if scheme == 'http' else 443
+    args += ['--resolve', f"{state['config']['host']}:{port}:127.0.0.1"]
+    run(*args, f"{scheme}://{state['config']['host']}/health/ready")
 
 
 def install(args):
@@ -354,7 +364,8 @@ def install(args):
         minimum = 2 if config['images'] else 4
         if memory_kib < minimum * 1024**2 * 0.95:
             raise ValueError(f'at least {minimum} GiB RAM required for this installation mode')
-        for port in (80, 443):
+        required_ports = (80,) if config['tls'] == 'http' else (80, 443)
+        for port in required_ports:
             with socket.socket() as sock:
                 sock.bind(('0.0.0.0', port))
         mounts = prepare(config)
@@ -374,7 +385,8 @@ def install(args):
             'MIN_FREE_BYTES': config['min_free_gib'] * 1024**3, 'TRASH_RETENTION_DAYS': config['trash_days'],
         }
         write_env(INSTALL / '.env', values)
-        atomic(INSTALL / 'owner-credentials.txt', f"URL: https://{config['host']}\nEmail: {config['email']}\nPassword: {config['owner_password']}\n")
+        scheme = 'http' if config['tls'] == 'http' else 'https'
+        atomic(INSTALL / 'owner-credentials.txt', f"URL: {scheme}://{config['host']}\nEmail: {config['email']}\nPassword: {config['owner_password']}\n")
         del config['owner_password']
         state = {'config': config, 'mounts': mounts, 'env': values}
         save(state)
@@ -522,7 +534,8 @@ def main():
             # systemd starts a separate process, which must acquire this same lock.
             fcntl.flock(lock, fcntl.LOCK_UN)
             run('systemctl', 'restart', 'my-drive.service')
-            print(f"Installed: https://{state['config']['host']}\nCredentials: /opt/my-drive/owner-credentials.txt (root only). Copy securely, then delete this file.")
+            scheme = 'http' if state['config']['tls'] == 'http' else 'https'
+            print(f"Installed: {scheme}://{state['config']['host']}\nCredentials: /opt/my-drive/owner-credentials.txt (root only). Copy securely, then delete this file.")
             return
         state = json.loads((INSTALL / 'state.json').read_text())
         if args.command == 'check':
