@@ -27,8 +27,11 @@ alternative using `sudo bash scripts/install.sh` without `--prebuilt`.
 It supports a single-volume VPS with media indexing disabled, or separate
 storage/preview filesystems with indexing enabled. No author-owned cloud account
 or cloud account is required at runtime. You can also publish images from your
-own fork/registry. See the complete [Ubuntu installation and operations guide](docs/DEPLOY_UBUNTU.md)
-(Vietnamese), including backups, recovery and upgrades.
+own fork/registry. Run `sudo my-drive update` to pull the configured images,
+make an encrypted backup and verify the updated service; the first update asks
+where to store backups and for an age public recipient. See the complete
+[Ubuntu installation and operations guide](docs/DEPLOY_UBUNTU.md) (Vietnamese),
+including backups, recovery and upgrades.
 
 ## Current implementation
 

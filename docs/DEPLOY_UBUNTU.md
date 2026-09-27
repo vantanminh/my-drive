@@ -277,7 +277,30 @@ PostgreSQL/file gốc; chúng nằm trong bundle.
 
 ## 6. Cập nhật và rollback
 
-Review checkout mới rồi chạy:
+Với bản cài dùng image registry (bao gồm bootstrap một lệnh), chạy:
+
+```bash
+sudo my-drive update
+```
+
+VPS cài trước khi có chế độ một lệnh cần tải và chạy lại bootstrap từ release
+mới một lần để làm mới script quản trị trong `/opt/my-drive`; dùng cùng
+repository/ref tùy chỉnh nếu có và không truyền `--config`. Trạng thái cài đặt,
+database và file không bị tạo lại.
+
+Lệnh pull lại các image reference đã cấu hình khi cài, ghim digest mới, tạo
+backup ứng dụng và cấu hình được mã hóa, áp dụng image rồi kiểm tra readiness
+và HTTPS. Lần đầu có bản mới, lệnh hỏi thư mục backup trên filesystem riêng và
+age public recipient; sau backup thành công hai giá trị được lưu trong
+`/opt/my-drive/state.json` để những lần sau không cần nhập lại. Chỉ lưu public
+recipient trên VPS; giữ private identity ở nơi an toàn ngoài VPS. Nếu image
+digest chưa đổi, lệnh báo đã mới nhất và không restart dịch vụ hay tạo backup.
+
+Lệnh theo đúng tag/digest đang cấu hình. Tag di động như mặc định `latest` sẽ
+nhận image mới sau khi CI publish; tag phiên bản cố định hoặc digest sẽ giữ
+phiên bản đó. Để chuyển release hoặc registry, dùng lệnh có tham số bên dưới.
+
+Để build từ checkout đã review:
 
 ```bash
 sudo my-drive update --source /path/to/reviewed-checkout \
@@ -285,9 +308,11 @@ sudo my-drive update --source /path/to/reviewed-checkout \
 ```
 
 Hoặc ghi JSON mapping `app`/`document-preview`/`media-indexer` vào file riêng và dùng
-`--images /path/to/release-images.json` thay `--source`. Cập nhật build/pull
-trước khi dừng app, tạo backup mã hóa đầy đủ, lưu image references cũ trong
-`state.previous.json`, áp dụng image mới rồi kiểm tra readiness và HTTPS.
+`--images /path/to/release-images.json` thay `--source`. Có thể truyền
+`--backup-root` và `--recipient` để đổi nơi backup hoặc recipient; cấu hình mới
+được lưu sau khi backup thành công. Cập nhật build/pull image trước khi dừng app,
+tạo backup mã hóa đầy đủ, lưu image references cũ trong `state.previous.json`,
+áp dụng image mới rồi kiểm tra readiness và HTTPS.
 Không tự `git pull`, không tự nâng database major version, không tự cập nhật
 mã installer/Compose layout sang schema mới. Thay đổi topology ở release sau
 cần đọc migration guide và chạy bộ cài tương ứng có hỗ trợ migration.

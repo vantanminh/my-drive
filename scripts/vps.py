@@ -459,6 +459,30 @@ def backup(state, args):
     print(f'Encrypted deployment configuration and TLS keys: {companion}')
 
 
+def update_backup_options(state, args):
+    """Resolve one-time backup settings for the no-argument update command."""
+    saved = state.get('update_backup', {})
+    if not isinstance(saved, dict):
+        raise ValueError('saved update backup settings are invalid')
+    root = args.backup_root or saved.get('root')
+    recipient = args.recipient or saved.get('recipient')
+    if not root or not recipient:
+        if not sys.stdin.isatty():
+            raise ValueError('first update needs --backup-root and --recipient, or an interactive terminal')
+        print('Updates require an encrypted backup on a separate filesystem.')
+        if not root:
+            root = input('Backup destination (for example /mnt/backup/my-drive): ').strip()
+        if not recipient:
+            recipient = input('Age public recipient (age1...): ').strip()
+    if not root or not recipient:
+        raise ValueError('backup destination and age public recipient are required')
+    if not isinstance(root, str) or any(char in root for char in '\r\n\x00') or not Path(root).is_absolute():
+        raise ValueError('backup destination must be an absolute path without control characters')
+    if not isinstance(recipient, str) or any(char in recipient for char in '\r\n\x00'):
+        raise ValueError('age public recipient contains a control character')
+    return argparse.Namespace(backup_root=root, recipient=recipient)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -472,14 +496,15 @@ def main():
         sub.add_parser(command)
     logs = sub.add_parser('logs')
     logs.add_argument('service', nargs='?', choices=['app', 'db', 'proxy', 'document-preview', 'media-indexer', 'media-indexer-db-setup'])
-    for command in ('backup', 'update'):
-        item = sub.add_parser(command)
-        item.add_argument('--backup-root', required=True)
-        item.add_argument('--recipient', required=True, help='age PUBLIC recipient (keep private identity offline)')
-        if command == 'update':
-            mode = item.add_mutually_exclusive_group(required=True)
-            mode.add_argument('--source', help='reviewed checkout of the release to build; no automatic git pull')
-            mode.add_argument('--images', help='JSON map of own registry image references for this release')
+    backup_parser = sub.add_parser('backup')
+    backup_parser.add_argument('--backup-root', required=True)
+    backup_parser.add_argument('--recipient', required=True, help='age PUBLIC recipient (keep private identity offline)')
+    update_parser = sub.add_parser('update', help='pull configured registry images and verify the deployment')
+    update_parser.add_argument('--backup-root', help='encrypted backup destination; saved after a successful backup')
+    update_parser.add_argument('--recipient', help='age PUBLIC recipient; saved after a successful backup')
+    mode = update_parser.add_mutually_exclusive_group()
+    mode.add_argument('--source', help='reviewed checkout of the release to build; no automatic git pull')
+    mode.add_argument('--images', help='JSON map of own registry image references for this release')
     args = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         parser.error('run as root on Linux')
@@ -521,18 +546,31 @@ def main():
                 if not (source / 'Dockerfile').is_file():
                     raise ValueError('--source must contain a reviewed My Drive checkout')
                 candidate['images'] = {}
-            else:
+            elif args.images:
                 candidate['images'] = json.loads(Path(args.images).read_text())
                 if not candidate['images']:
                     raise ValueError('--images must contain release image references')
+            elif state['config'].get('images'):
+                # Re-pull the same configured registry tags (for example :latest).
+                # build_images resolves each moving tag to an immutable digest.
+                candidate['images'] = state['config']['images']
+            else:
+                raise ValueError('this installation has no registry update track; use --source or --images')
             candidate = validate(candidate)
             images = build_images(candidate, source)  # Build/pull while old app remains available.
-            backup(state, args)  # Mandatory complete encrypted backup before applying migrations.
+            image_env = {'app': 'MY_DRIVE_IMAGE', 'document-preview': 'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE',
+                         'media-indexer': 'MY_DRIVE_INDEXER_IMAGE'}
+            if all(state['env'].get(image_env[service]) == image for service, image in images.items()):
+                print('Already up to date; no services were restarted.')
+                return
+            backup_args = update_backup_options(state, args)
+            backup(state, backup_args)  # Mandatory complete encrypted backup before applying migrations.
+            state['update_backup'] = {'root': backup_args.backup_root, 'recipient': backup_args.recipient}
+            save(state)
             atomic(INSTALL / 'state.previous.json', json.dumps(state, indent=2) + '\n')
             state['config']['images'] = candidate['images']
             for service, image in images.items():
-                key = {'app': 'MY_DRIVE_IMAGE', 'document-preview': 'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE', 'media-indexer': 'MY_DRIVE_INDEXER_IMAGE'}[service]
-                state['env'][key] = image
+                state['env'][image_env[service]] = image
             save(state)
             start(state)
             print('Updated and verified. Previous image references: /opt/my-drive/state.previous.json. Database rollback requires restoring the backup.')
@@ -541,7 +579,7 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ValueError, OSError, KeyError, StopIteration, subprocess.CalledProcessError) as error:
+    except (ValueError, OSError, KeyError, StopIteration, EOFError, subprocess.CalledProcessError) as error:
         # Never print command arguments or configuration: they may contain secrets.
         print(f'Setup/operation failed ({type(error).__name__}).' + (f' {error}' if isinstance(error, ValueError) else ' Inspect my-drive status/logs and the deployment guide.'), file=sys.stderr)
         sys.exit(1)
