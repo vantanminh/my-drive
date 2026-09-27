@@ -266,6 +266,44 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border-radius: 12px;
   box-shadow: 0 5px 20px rgb(24 36 50 / 3%);
 }
+.account-security-panel {
+  margin: -8px 0 27px;
+  padding: 20px 21px 18px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 5px 20px rgb(24 36 50 / 3%);
+}
+.account-security-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.account-security-header h2 { margin: 7px 0 4px; color: #1b2b34; font-family: 'Aptos Display', 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 18px; font-weight: 650; letter-spacing: -.025em; }
+.account-security-header p { margin: 0; color: #7d8a94; font-size: 11px; }
+.account-security-grid { display: grid; grid-template-columns: minmax(265px, .85fr) minmax(330px, 1.15fr); align-items: start; gap: 12px; margin-top: 17px; }
+.security-card { min-width: 0; padding: 15px; background: #fff; border: 1px solid #e7ecea; border-radius: 10px; }
+.security-card-heading { display: flex; align-items: flex-start; gap: 10px; }
+.security-card-icon { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; color: #3c795b; background: #eaf3ed; border-radius: 8px; }
+.security-card-heading h3 { margin: 1px 0 4px; color: #30413f; font-size: 12px; font-weight: 650; }
+.security-card-heading p { margin: 0; color: #84908e; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.security-password-form { margin-top: 15px; }
+.security-password-form .button { justify-self: start; margin-top: 3px; }
+.security-message { margin-top: 11px; padding: 9px 10px; border-radius: 7px; font-size: 10px; line-height: 1.45; }
+.security-message-success { color: #356b50; background: #f0f7f2; border: 1px solid #e1eee5; }
+.security-message-error { color: #985050; background: #fff5f4; border: 1px solid #f1dedb; }
+.security-session-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 9px; margin-top: 16px; color: #84908e; font-size: 9px; }
+.security-session-toolbar > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.security-session-toolbar .button { min-height: 31px; padding: 0 9px; font-size: 9px; }
+.security-session-toolbar .button svg, .security-session-revoke svg { width: 13px; height: 13px; }
+.security-session-list { display: grid; gap: 8px; margin-top: 10px; }
+.security-session { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 11px; background: #fbfcfb; border: 1px solid #e9efeb; border-radius: 8px; }
+.security-session-main { min-width: 0; }
+.security-session-name { display: flex; min-width: 0; align-items: center; gap: 7px; color: #334640; }
+.security-session-name strong { overflow: hidden; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.security-session-device { display: grid; width: 25px; height: 25px; flex: 0 0 25px; place-items: center; color: #5a8069; background: #edf4ef; border-radius: 6px; }
+.security-current-badge { flex: 0 0 auto; padding: 3px 6px; color: #347250; background: #e8f3eb; border-radius: 20px; font-size: 8px; font-weight: 650; }
+.security-session-details { display: grid; gap: 4px; margin: 8px 0 0 32px; color: #84908e; font-size: 8px; line-height: 1.4; }
+.security-session-details span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.security-session-revoke { min-height: 31px; padding: 0 9px; font-size: 9px; white-space: nowrap; }
+.security-session-empty { display: flex; min-height: 80px; align-items: center; justify-content: center; gap: 8px; margin-top: 10px; padding: 14px; color: #84918d; background: #f8faf9; border: 1px dashed #dfe8e3; border-radius: 8px; font-size: 10px; text-align: center; }
+.security-session-empty .spinner { width: 15px; height: 15px; }
 .account-admin-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .account-admin-header h2 { margin: 7px 0 4px; color: #1b2b34; font-family: 'Aptos Display', 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 18px; font-weight: 650; letter-spacing: -.025em; }
 .account-admin-header p { margin: 0; color: #7d8a94; font-size: 11px; }
@@ -1090,6 +1128,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .face-admin-trigger span { display: none; }
   .media-index-panel { margin: -7px 0 21px; padding: 16px 13px 14px; }
   .account-admin-panel { margin: -7px 0 21px; padding: 16px 13px 14px; }
+  .account-security-panel { margin: -7px 0 21px; padding: 16px 13px 14px; }
+  .account-security-header h2 { font-size: 16px; }
+  .account-security-header p { max-width: 250px; font-size: 10px; line-height: 1.45; }
+  .account-security-grid { grid-template-columns: minmax(0, 1fr); gap: 9px; margin-top: 14px; }
+  .security-card { padding: 12px; }
+  .security-session-toolbar { align-items: flex-start; flex-direction: column; }
+  .security-session-toolbar > div { width: 100%; justify-content: stretch; }
+  .security-session-toolbar .button { flex: 1; justify-content: center; }
+  .security-session { grid-template-columns: minmax(0, 1fr); gap: 9px; }
+  .security-session-revoke { width: 100%; justify-content: center; }
   .account-admin-header h2 { font-size: 16px; }
   .account-admin-header p { max-width: 250px; font-size: 10px; line-height: 1.45; }
   .account-create-form { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 11px; }

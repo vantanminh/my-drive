@@ -7,7 +7,7 @@ use std::{
 use argon2::{Argon2, PasswordVerifier, password_hash::PasswordHash};
 use axum::{
     Json,
-    extract::{FromRequestParts, State},
+    extract::{FromRequestParts, Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, COOKIE, RETRY_AFTER, SET_COOKIE},
@@ -166,6 +166,7 @@ struct SessionUser {
     role: String,
     must_change_password: bool,
     csrf_token_digest: Vec<u8>,
+    last_seen_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +181,15 @@ pub struct LoginRequest {
 pub struct PasswordChangeRequest {
     current_password: String,
     new_password: String,
+}
+
+#[derive(FromRow, Serialize)]
+struct BrowserSessionResponse {
+    id: Uuid,
+    created_at: chrono::DateTime<Utc>,
+    last_seen_at: Option<chrono::DateTime<Utc>>,
+    expires_at: chrono::DateTime<Utc>,
+    is_current: bool,
 }
 
 #[derive(Serialize)]
@@ -375,6 +385,129 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
 
 pub async fn me(State(_state): State<AppState>, user: AuthenticatedUser) -> Response {
     let mut response = (StatusCode::OK, Json(public_user_from_auth(&user))).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+pub async fn list_sessions(State(state): State<AppState>, user: AuthenticatedUser) -> Response {
+    let sessions = sqlx::query_as::<_, BrowserSessionResponse>(
+        "SELECT id, created_at, last_seen_at, expires_at, (id = $2) AS is_current \
+           FROM sessions \
+          WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now() \
+          ORDER BY (id = $2) DESC, COALESCE(last_seen_at, created_at) DESC, created_at DESC",
+    )
+    .bind(user.id)
+    .bind(user.session_id)
+    .fetch_all(&state.pool)
+    .await;
+
+    let sessions = match sessions {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::error!(error = %error, "could not list browser sessions");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+
+    let mut response = (StatusCode::OK, Json(sessions)).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+pub async fn revoke_session(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+) -> Response {
+    if !require_csrf(&headers, &user, state.auth_settings) {
+        return api_error(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if session_id == user.session_id {
+        return api_error(StatusCode::CONFLICT, "cannot_revoke_current_session");
+    }
+
+    let revoked = sqlx::query(
+        "UPDATE sessions SET revoked_at = now() \
+          WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(session_id)
+    .bind(user.id)
+    .execute(&state.pool)
+    .await;
+
+    let revoked = match revoked {
+        Ok(result) => result.rows_affected() == 1,
+        Err(error) => {
+            tracing::error!(error = %error, "could not revoke browser session");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+    if !revoked {
+        return api_error(StatusCode::NOT_FOUND, "session_not_found");
+    }
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id) \
+         VALUES ('session_revoked', $1, $2)",
+    )
+    .bind(user.id)
+    .bind(session_id)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(error = %error, "could not record browser session revocation");
+    }
+
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+pub async fn revoke_other_sessions(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Response {
+    if !require_csrf(&headers, &user, state.auth_settings) {
+        return api_error(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+
+    let revoked = sqlx::query(
+        "UPDATE sessions SET revoked_at = now() \
+          WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(user.id)
+    .bind(user.session_id)
+    .execute(&state.pool)
+    .await;
+    let revoked_count = match revoked {
+        Ok(result) => result.rows_affected(),
+        Err(error) => {
+            tracing::error!(error = %error, "could not revoke other browser sessions");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    };
+
+    if revoked_count > 0 {
+        if let Err(error) = sqlx::query(
+            "INSERT INTO audit_events (event_type, actor_id) VALUES ('sessions_revoked', $1)",
+        )
+        .bind(user.id)
+        .execute(&state.pool)
+        .await
+        {
+            tracing::warn!(error = %error, "could not record browser session revocation");
+        }
+    }
+
+    let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -624,7 +757,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         let token_digest = Sha256::digest(raw_token).to_vec();
         let session = sqlx::query_as::<_, SessionUser>(
             "SELECT sessions.id AS session_id, users.id, users.email, users.role, \
-                    users.must_change_password, sessions.csrf_token_digest \
+                    users.must_change_password, sessions.csrf_token_digest, sessions.last_seen_at \
                FROM sessions JOIN users ON users.id = sessions.user_id \
               WHERE sessions.token_digest = $1 AND sessions.revoked_at IS NULL \
                 AND sessions.expires_at > now() AND users.disabled_at IS NULL",
@@ -635,6 +768,10 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
 
         match session {
             Ok(Some(session)) => {
+                let should_update_last_seen = session
+                    .last_seen_at
+                    .as_ref()
+                    .is_none_or(|seen_at| *seen_at < Utc::now() - ChronoDuration::minutes(5));
                 let user = Self {
                     id: session.id,
                     session_id: session.session_id,
@@ -643,6 +780,18 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     must_change_password: session.must_change_password,
                     csrf_token_digest: session.csrf_token_digest,
                 };
+                if should_update_last_seen {
+                    if let Err(error) = sqlx::query(
+                        "UPDATE sessions SET last_seen_at = now() \
+                          WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')",
+                    )
+                    .bind(user.session_id)
+                    .execute(&state.pool)
+                    .await
+                    {
+                        tracing::warn!(error = %error, "could not update browser session activity");
+                    }
+                }
                 let allowed_while_changing_password = matches!(
                     parts.uri.path(),
                     "/api/auth/me" | "/api/auth/password" | "/api/auth/logout"

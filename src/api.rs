@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderValue, Request, StatusCode, header::HeaderName},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 use std::path::PathBuf;
 use tower_http::services::{ServeDir, ServeFile};
@@ -30,6 +30,15 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/api/auth/me", get(crate::auth::me))
         .route("/api/auth/logout", post(crate::auth::logout))
+        .route("/api/auth/sessions", get(crate::auth::list_sessions))
+        .route(
+            "/api/auth/sessions/revoke-others",
+            post(crate::auth::revoke_other_sessions),
+        )
+        .route(
+            "/api/auth/sessions/{session_id}",
+            delete(crate::auth::revoke_session),
+        )
         .route(
             "/api/auth/password",
             post(crate::auth::change_password).layer(DefaultBodyLimit::max(16 * 1024)),
@@ -56,6 +65,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/photos", get(serve_frontend_index))
         .route("/photos/{*path}", get(serve_frontend_index))
         .route("/storage", get(serve_frontend_index))
+        .route("/security", get(serve_frontend_index))
         .route("/google-drive", get(serve_frontend_index))
         .fallback_service(static_files)
         .layer(middleware::from_fn(request_id_and_trace))

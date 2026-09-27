@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent,
 import {
   Activity, Check, ChevronDown, ChevronRight, CircleUserRound, Cloud, CloudUpload, Download, Eye, File, FileImage, Film,
   FileSpreadsheet, FileText, Folder, FolderPlus, Gauge, HardDrive, Images, Info, LayoutGrid, List, LockKeyhole, LogOut, MoreHorizontal,
-  Pause, Play, Presentation, RotateCcw, ScanFace, Search, Share2, SlidersHorizontal, Trash2, Upload, Users, X
+  Pause, Play, Presentation, RotateCcw, ScanFace, Search, Share2, ShieldCheck, SlidersHorizontal, Trash2, Upload, Users, X
 } from 'lucide-react';
 import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
@@ -16,6 +16,7 @@ import FaceManagementPanel from './FaceManagementPanel';
 import PhotosPage from './PhotosPage';
 import StoragePage, { QuotaCard } from './StoragePage';
 import GoogleDrivePanel from './GoogleDrivePanel';
+import AccountSecurityPanel from './AccountSecurityPanel';
 
 type Props = {
   user: User;
@@ -575,7 +576,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const section = route.section;
   const panel: DrivePanel = section !== 'drive' || route.panel == null
     ? null
-    : route.panel === 'google-drive' || user.role === 'owner'
+    : route.panel === 'google-drive' || route.panel === 'security' || user.role === 'owner'
       ? route.panel
       : null;
   const query = section === 'drive' ? route.query : '';
@@ -605,6 +606,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const faceAdminOpen = panel === 'faces';
   const mediaIndexOpen = panel === 'indexing';
   const googleDriveOpen = panel === 'google-drive';
+  const securityOpen = panel === 'security';
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
     readSavedUploads().map((saved) => ({
@@ -695,11 +697,13 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       ? 'Accounts'
       : panel === 'faces'
         ? 'Face groups'
-        : panel === 'indexing'
-          ? 'Media indexing'
-          : panel === 'google-drive'
-            ? 'Google Drive'
-            : activeSectionLabel) + ' · My Drive';
+          : panel === 'indexing'
+            ? 'Media indexing'
+            : panel === 'google-drive'
+              ? 'Google Drive'
+              : panel === 'security'
+                ? 'Account security'
+                : activeSectionLabel) + ' · My Drive';
     document.title = !panel && activeSectionLabel === 'My Drive' ? 'My Drive' : title;
   }, [activeSectionLabel, panel]);
 
@@ -1548,6 +1552,11 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             )}
             <button onClick={(event) => {
               event.currentTarget.closest('details')?.removeAttribute('open');
+              showDrive({ folders: [], panel: 'security', query: '', fileId: null });
+            }}><ShieldCheck size={15} /> Account security</button>
+            <div className="menu-divider" />
+            <button onClick={(event) => {
+              event.currentTarget.closest('details')?.removeAttribute('open');
               navigate('storage');
             }}><Gauge size={15} /> Storage</button>
             <div className="menu-divider" />
@@ -1677,6 +1686,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             </nav>
           )}
 
+          {section === 'drive' && securityOpen ? <AccountSecurityPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' && googleDriveOpen ? <GoogleDrivePanel onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' ? (
             user.role === 'owner' ? (

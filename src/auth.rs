@@ -9,7 +9,10 @@ use uuid::Uuid;
 use crate::BootstrapOwner;
 
 mod session;
-pub use session::{AuthSettings, LoginRateLimiter, change_password, login, logout, me};
+pub use session::{
+    AuthSettings, LoginRateLimiter, change_password, list_sessions, login, logout, me,
+    revoke_other_sessions, revoke_session,
+};
 pub(crate) use session::{AuthenticatedUser, new_temporary_password, require_csrf};
 
 pub(crate) const MAX_PASSWORD_BYTES: usize = 1024;

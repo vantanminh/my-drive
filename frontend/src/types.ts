@@ -5,6 +5,14 @@ export type User = {
   must_change_password: boolean;
 };
 
+export type BrowserSession = {
+  id: string;
+  created_at: string;
+  last_seen_at: string | null;
+  expires_at: string;
+  is_current: boolean;
+};
+
 export type ManagedAccount = {
   id: string;
   email: string;

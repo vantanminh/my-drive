@@ -1,6 +1,7 @@
 import type {
   AccountStorage,
   Album,
+  BrowserSession,
   CreatedShare,
   CreatedManagedAccount,
   Entry,
@@ -244,6 +245,20 @@ function uploadChunkWithProgress(
 
 export const api = {
   me: (signal?: AbortSignal) => request<User>('/api/auth/me', { signal }),
+  listSessions: (signal?: AbortSignal) =>
+    request<BrowserSession[]>('/api/auth/sessions', { signal, cache: 'no-store' }),
+  revokeSession: (id: string) =>
+    request<void>('/api/auth/sessions/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  revokeOtherSessions: () =>
+    request<void>('/api/auth/sessions/revoke-others', {
+      method: 'POST',
+      csrf: true,
+      cache: 'no-store'
+    }),
   changePassword: (currentPassword: string, newPassword: string) =>
     request<void>('/api/auth/password', {
       method: 'POST',
