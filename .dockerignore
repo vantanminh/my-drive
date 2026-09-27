@@ -3,6 +3,8 @@
 .agents
 target
 docs
+!frontend/public/docs
+!frontend/public/docs/**
 tests
 frontend/node_modules
 frontend/dist

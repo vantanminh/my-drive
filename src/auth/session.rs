@@ -147,6 +147,7 @@ pub struct AuthenticatedUser {
     pub role: String,
     pub must_change_password: bool,
     csrf_token_digest: Vec<u8>,
+    pub api_key_id: Option<Uuid>,
 }
 
 #[derive(FromRow)]
@@ -688,6 +689,9 @@ pub async fn logout(
 }
 
 pub fn require_csrf(headers: &HeaderMap, user: &AuthenticatedUser, settings: AuthSettings) -> bool {
+    if user.api_key_id.is_some() {
+        return true;
+    }
     let Some(cookie_token) = cookie_value(headers, settings.csrf_cookie_name()) else {
         return false;
     };
@@ -721,6 +725,20 @@ pub fn require_csrf(headers: &HeaderMap, user: &AuthenticatedUser, settings: Aut
         == 1
 }
 
+impl AuthenticatedUser {
+    pub(crate) fn from_api(id: Uuid, key_id: Uuid, email: String, role: String) -> Self {
+        Self {
+            id,
+            session_id: key_id,
+            email,
+            role,
+            must_change_password: false,
+            csrf_token_digest: vec![],
+            api_key_id: Some(key_id),
+        }
+    }
+}
+
 impl FromRequestParts<AppState> for AuthenticatedUser {
     type Rejection = Response;
 
@@ -728,6 +746,9 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if let Some(user) = parts.extensions.get::<AuthenticatedUser>() {
+            return Ok(user.clone());
+        }
         let Some(token) = cookie_value(&parts.headers, state.auth_settings.session_cookie_name())
         else {
             return Err(api_error(
@@ -778,6 +799,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     role: session.role,
                     must_change_password: session.must_change_password,
                     csrf_token_digest: session.csrf_token_digest,
+                    api_key_id: None,
                 };
                 if should_update_last_seen
                     && let Err(error) = sqlx::query(
@@ -996,6 +1018,7 @@ mod tests {
             email: "owner@example.test".to_owned(),
             role: "owner".to_owned(),
             must_change_password: false,
+            api_key_id: None,
             csrf_token_digest: Sha256::digest(raw_token).to_vec(),
         };
         let settings = AuthSettings {

@@ -129,16 +129,21 @@ struct MoveEntry {
 }
 
 pub(crate) fn router() -> Router<AppState> {
+    router_at("/api")
+}
+
+pub(crate) fn router_at(prefix: &str) -> Router<AppState> {
+    let p = |path: &str| format!("{prefix}{}", path.strip_prefix("/api").unwrap());
     Router::new()
-        .route("/api/drive", get(list_folder))
-        .route("/api/drive/trash", get(list_trash))
-        .route("/api/drive/trash/purge", post(purge_trash))
-        .route("/api/drive/batch", post(batch_entries))
-        .route("/api/folders", post(create_folder))
-        .route("/api/entries/{id}", get(get_entry).delete(trash_entry))
-        .route("/api/entries/{id}/rename", patch(rename_entry))
-        .route("/api/entries/{id}/move", post(move_entry))
-        .route("/api/entries/{id}/restore", post(restore_entry))
+        .route(&p("/api/drive"), get(list_folder))
+        .route(&p("/api/drive/trash"), get(list_trash))
+        .route(&p("/api/drive/trash/purge"), post(purge_trash))
+        .route(&p("/api/drive/batch"), post(batch_entries))
+        .route(&p("/api/folders"), post(create_folder))
+        .route(&p("/api/entries/{id}"), get(get_entry).delete(trash_entry))
+        .route(&p("/api/entries/{id}/rename"), patch(rename_entry))
+        .route(&p("/api/entries/{id}/move"), post(move_entry))
+        .route(&p("/api/entries/{id}/restore"), post(restore_entry))
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 

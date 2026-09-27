@@ -43,6 +43,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/auth/password",
             post(crate::auth::change_password).layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .merge(crate::developer::router())
         .merge(crate::drive::router())
         .merge(crate::library::router())
         .merge(crate::faces::router())
@@ -65,9 +66,15 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/photos", get(serve_frontend_index))
         .route("/photos/{*path}", get(serve_frontend_index))
         .route("/storage", get(serve_frontend_index))
+        .route("/settings/developer", get(serve_frontend_index))
+        .route("/docs/{*path}", get(crate::developer::documentation))
         .route("/security", get(serve_frontend_index))
         .route("/google-drive", get(serve_frontend_index))
         .fallback_service(static_files)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::developer::authenticate,
+        ))
         .layer(middleware::from_fn(request_id_and_trace))
         .with_state(state)
 }
@@ -79,7 +86,7 @@ async fn api_not_found() -> (StatusCode, axum::Json<serde_json::Value>) {
     )
 }
 
-async fn serve_frontend_index() -> Response {
+pub(crate) async fn serve_frontend_index() -> Response {
     let index_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/dist/index.html");
     match tokio::fs::read(index_path).await {
         Ok(contents) => {

@@ -167,6 +167,7 @@ struct PageQuery {
 
 #[derive(Serialize, FromRow)]
 struct ShareSummary {
+    created_by_api_key_id: Option<Uuid>,
     id: Uuid,
     resource_type: String,
     resource_id: Uuid,
@@ -269,21 +270,26 @@ struct FailedPasswordUpdate {
 }
 
 pub(crate) fn router() -> Router<AppState> {
+    router_at("/api")
+}
+
+pub(crate) fn router_at(prefix: &str) -> Router<AppState> {
+    let p = |path: &str| format!("{prefix}{}", path.strip_prefix("/api").unwrap());
     Router::new()
-        .route("/api/shares", get(list_shares).post(create_share))
-        .route("/api/shares/{id}/revoke", post(revoke_share))
-        .route("/api/public/shares/{token}", get(public_share))
-        .route("/api/public/shares/{token}/unlock", post(unlock_share))
+        .route(&p("/api/shares"), get(list_shares).post(create_share))
+        .route(&p("/api/shares/{id}/revoke"), post(revoke_share))
+        .route(&p("/api/public/shares/{token}"), get(public_share))
+        .route(&p("/api/public/shares/{token}/unlock"), post(unlock_share))
         .route(
-            "/api/public/shares/{token}/download/{entry_id}",
+            &p("/api/public/shares/{token}/download/{entry_id}"),
             get(download_shared),
         )
         .route(
-            "/api/public/shares/{token}/preview/{entry_id}",
+            &p("/api/public/shares/{token}/preview/{entry_id}"),
             get(preview_shared),
         )
         .route(
-            "/api/public/shares/{token}/thumbnail/{entry_id}",
+            &p("/api/public/shares/{token}/thumbnail/{entry_id}"),
             get(thumbnail_shared),
         )
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -362,10 +368,18 @@ async fn create_share(
     let allow_download = request.allow_download.unwrap_or(true);
 
     let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
+    if let Some(key_id) = user.api_key_id {
+        let valid: Option<Uuid> = sqlx::query_scalar("SELECT id FROM api_keys WHERE id=$1 AND owner_id=$2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now()) FOR SHARE")
+            .bind(key_id).bind(user.id).fetch_optional(&mut *transaction).await.map_err(map_database_error)?;
+        if valid.is_none() {
+            return Err(ShareError::Forbidden);
+        }
+    }
+
     sqlx::query(
         "INSERT INTO shares \
-            (id, owner_id, resource_type, resource_id, album_id, token_digest, password_hash, expires_at, allow_download, max_downloads) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            (id, owner_id, resource_type, resource_id, album_id, token_digest, password_hash, expires_at, allow_download, max_downloads, created_by_api_key_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(share_id)
     .bind(user.id)
@@ -377,6 +391,7 @@ async fn create_share(
     .bind(request.expires_at)
     .bind(allow_download)
     .bind(max_downloads)
+    .bind(user.api_key_id)
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
@@ -416,7 +431,7 @@ async fn list_shares(
 ) -> Result<Response, ShareError> {
     let (limit, offset) = page_values(query.limit, query.offset)?;
     let rows: Vec<ShareSummary> = sqlx::query_as(
-        "SELECT share.id, share.resource_type, \
+        "SELECT share.created_by_api_key_id, share.id, share.resource_type, \
                 COALESCE(share.resource_id, share.album_id) AS resource_id, \
                 COALESCE(entry.name, album.name) AS resource_name, \
                 share.expires_at, share.revoked_at, (share.password_hash IS NOT NULL) AS password_protected, \

@@ -2038,3 +2038,38 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .photos-heading { align-items: stretch; }
   .public-title-line h1 { display: block; white-space: nowrap; text-overflow: ellipsis; }
 }
+
+.developer-panel { margin: 20px; padding: 24px; background: var(--surface, #fff); border: 1px solid #dde3ea; border-radius: 12px; }
+.developer-heading, .developer-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+.developer-controls { justify-content: flex-start; margin: 12px 0; }
+.developer-controls label { display: flex; flex-direction: column; gap: 6px; }
+.developer-controls > label { min-width: 0; max-width: 100%; }
+.developer-controls input, .developer-controls select { max-width: 100%; }
+.developer-panel input:not([type=checkbox]), .developer-panel select { padding: 10px; border: 1px solid #ccd4de; border-radius: 6px; }
+.developer-panel button { padding: 8px 12px; margin: 4px; border: 1px solid #ccd4de; border-radius: 6px; cursor: pointer; }
+.developer-panel h3 { margin: 24px 0 12px; }
+.developer-panel fieldset { border: 1px solid #dde3ea; padding: 12px; margin: 12px 0; }
+.developer-scope { display: inline-flex; gap: 6px; margin: 8px; }
+.developer-secret, .developer-confirm { padding: 20px; background: #eff6ff; border: 1px solid #8bb5ea; border-radius: 8px; margin-top: 16px; }
+.developer-secret pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.developer-table-wrap { overflow-x: auto; }
+.developer-panel table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.developer-panel th, .developer-panel td { text-align: left; padding: 12px 8px; border-bottom: 1px solid #dde3ea; }
+.developer-chart { display: flex; align-items: flex-end; gap: 6px; min-height: 180px; overflow-x: auto; padding: 12px 0; }
+.developer-chart > div { flex: 1; min-width: 32px; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 8px; }
+.developer-chart span { display: block; width: 80%; background: #397bd4; border-radius: 4px 4px 0 0; }
+.developer-chart small { font-size: 10px; }
+.api-docs { max-width: 1000px; margin: auto; padding: 32px 24px; line-height: 1.7; background: white; }
+.api-docs nav { display: flex; gap: 24px; border-bottom: 1px solid #dde3ea; padding-bottom: 16px; }
+.api-docs h1, .api-docs h2, .api-docs h3 { margin: 24px 0 12px; }
+.api-docs pre { padding: 16px; background: #f2f5f9; overflow-x: auto; border-radius: 8px; }
+.api-docs table { display: block; overflow-x: auto; border-collapse: collapse; }
+.api-docs td, .api-docs th { padding: 8px 12px; border: 1px solid #dde3ea; }
+.api-docs ul, .api-docs ol { padding-left: 24px; }
+@media (max-width: 600px) {
+  .developer-panel { margin: 0; padding: 16px; }
+  .developer-controls > label { width: 100%; }
+  .developer-controls input:not([type=checkbox]), .developer-controls select { width: 100%; }
+  .api-docs { padding: 20px 16px; }
+  .api-docs nav { flex-wrap: wrap; gap: 12px; }
+}

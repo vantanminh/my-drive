@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from './api';
+const ApiDocsPage = lazy(() => import('./components/ApiDocsPage'));
 import LoginPage from './components/LoginPage';
 import PublicSharePage from './components/PublicSharePage';
 import DriveApp from './components/DriveApp';
@@ -18,7 +19,7 @@ export default function App() {
   const [checkingSession, setCheckingSession] = useState(!publicRoute);
 
   useEffect(() => {
-    if (publicRoute) return;
+    if (publicRoute || href.startsWith('/docs/')) return;
     if (user) return;
     const controller = new AbortController();
     setCheckingSession(true);
@@ -31,8 +32,9 @@ export default function App() {
       })
       .finally(() => setCheckingSession(false));
     return () => controller.abort();
-  }, [publicRoute, user]);
+  }, [publicRoute, user, href]);
 
+  if (href.startsWith('/docs/')) return <Suspense fallback={<main className="api-docs">Loading documentation…</main>}><ApiDocsPage href={href} /></Suspense>;
   if (publicRoute) return <PublicSharePage token={publicRoute.token} />;
   if (checkingSession) {
     return <main className="app-loading"><span className="spinner" />Opening your drive…</main>;

@@ -10,6 +10,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
 COPY src ./src
+COPY frontend/public/docs ./frontend/public/docs
 RUN cargo build --release --locked --bins
 
 FROM debian:bookworm-slim AS media-thumbnailer-builder

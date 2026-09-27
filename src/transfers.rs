@@ -274,26 +274,79 @@ struct QuotaUsage {
 }
 
 pub(crate) fn router() -> Router<AppState> {
+    router_at("/api")
+}
+
+pub(crate) fn router_at(prefix: &str) -> Router<AppState> {
+    let p = |path: &str| format!("{prefix}{}", path.strip_prefix("/api").unwrap());
     Router::new()
-        .route("/api/uploads", post(create_upload))
+        .route(&p("/api/uploads"), post(create_upload))
+        .route(&p("/api/photos/uploads"), post(create_photo_upload))
         .route(
-            "/api/uploads/{id}",
+            &p("/api/uploads/{id}"),
             head(head_upload).patch(patch_upload).delete(cancel_upload),
         )
-        .route("/api/uploads/{id}/finalize", post(finalize_upload))
+        .route(&p("/api/uploads/{id}/finalize"), post(finalize_upload))
         .route(
-            "/api/files/{id}/download",
+            &p("/api/files/{id}/download"),
             get(download_file).head(download_head),
         )
         .route(
-            "/api/files/{id}/preview",
+            &p("/api/files/{id}/preview"),
             get(preview_file).head(preview_head),
         )
         .route(
-            "/api/files/{id}/thumbnail",
+            &p("/api/files/{id}/thumbnail"),
             get(thumbnail_file).head(thumbnail_head),
         )
         .layer(DefaultBodyLimit::max(16 * 1024))
+}
+
+async fn create_photo_upload(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(mut request): Json<CreateUpload>,
+) -> Result<Response, TransferError> {
+    drive::require_request_csrf(&headers, &user, state.auth_settings)?;
+    if request.parent_id.is_some() {
+        return Err(TransferError::BadRequest);
+    }
+    let extension = request
+        .filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "bmp"
+            | "tif"
+            | "tiff"
+            | "heic"
+            | "heif"
+            | "mp4"
+            | "mov"
+            | "webm"
+            | "mkv"
+            | "avi"
+            | "m4v"
+            | "mpeg"
+            | "mpg"
+            | "3gp"
+            | "mts"
+            | "m2ts"
+    ) {
+        return Err(TransferError::BadRequest);
+    }
+    request.parent_id = Some(drive::ensure_photos_folder(&state.pool, user.id).await?);
+    create_upload(State(state), user, headers, Json(request)).await
 }
 
 async fn create_upload(

@@ -3,6 +3,7 @@ mod api;
 mod auth;
 mod config;
 mod db;
+mod developer;
 mod drive;
 mod face_indexer;
 mod faces;

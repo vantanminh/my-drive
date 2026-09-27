@@ -94,6 +94,7 @@ pub(crate) async fn run_once(
     let upload_session_ttl_seconds = i64::try_from(settings.upload_session_ttl_seconds)
         .map_err(|_| MaintenanceError::RetentionOutOfRange)?;
 
+    sqlx::query("DELETE FROM api_request_logs WHERE id IN (SELECT id FROM api_request_logs WHERE created_at < now()-interval '90 days' LIMIT 10000)").execute(pool).await?;
     let mut summary = RunSummary::default();
     let (cleaned, failures) = clean_expired_uploads(pool, storage).await?;
     summary.expired_uploads_cleaned = cleaned;

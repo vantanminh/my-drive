@@ -66,24 +66,32 @@ fn no_store<T: IntoResponse>(response: T) -> Response {
 }
 
 pub(crate) fn router() -> Router<AppState> {
+    router_at("/api")
+}
+
+pub(crate) fn router_at(prefix: &str) -> Router<AppState> {
+    let p = |path: &str| format!("{prefix}{}", path.strip_prefix("/api").unwrap());
     Router::new()
-        .route("/api/drive/search", get(search_drive))
-        .route("/api/entries/{id}/details", get(entry_details))
-        .route("/api/photos", get(list_photos))
-        .route("/api/faces/{cluster_id}/media", get(face_media))
-        .route("/api/albums", get(list_albums).post(create_album))
+        .route(&p("/api/drive/search"), get(search_drive))
+        .route(&p("/api/entries/{id}/details"), get(entry_details))
+        .route(&p("/api/photos"), get(list_photos))
+        .route(&p("/api/faces/{cluster_id}/media"), get(face_media))
+        .route(&p("/api/albums"), get(list_albums).post(create_album))
         .route(
-            "/api/albums/{id}",
+            &p("/api/albums/{id}"),
             get(get_album).patch(rename_album).delete(delete_album),
         )
         .route(
-            "/api/albums/{id}/items",
+            &p("/api/albums/{id}/items"),
             get(list_album_items).post(add_album_items),
         )
-        .route("/api/albums/{id}/items/remove", post(remove_album_items))
-        .route("/api/library/photos-folder", post(photos_folder))
-        .route("/api/storage", get(account_storage))
-        .route("/api/admin/storage", get(server_storage))
+        .route(
+            &p("/api/albums/{id}/items/remove"),
+            post(remove_album_items),
+        )
+        .route(&p("/api/library/photos-folder"), post(photos_folder))
+        .route(&p("/api/storage"), get(account_storage))
+        .route(&p("/api/admin/storage"), get(server_storage))
         .layer(DefaultBodyLimit::max(64 * 1024))
 }
 

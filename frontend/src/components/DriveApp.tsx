@@ -19,6 +19,7 @@ import FaceManagementPanel from './FaceManagementPanel';
 import PhotosPage from './PhotosPage';
 import StoragePage, { QuotaCard } from './StoragePage';
 import GoogleDrivePanel from './GoogleDrivePanel';
+import DeveloperPanel from './DeveloperPanel';
 import AccountSecurityPanel from './AccountSecurityPanel';
 
 type Props = {
@@ -543,7 +544,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const section = route.section;
   const panel: DrivePanel = section !== 'drive' || route.panel == null
     ? null
-    : route.panel === 'google-drive' || route.panel === 'security' || user.role === 'owner'
+    : route.panel === 'google-drive' || route.panel === 'security' || route.panel === 'developer' || user.role === 'owner'
       ? route.panel
       : null;
   const query = section === 'drive' ? route.query : '';
@@ -573,6 +574,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const faceAdminOpen = panel === 'faces';
   const mediaIndexOpen = panel === 'indexing';
   const googleDriveOpen = panel === 'google-drive';
+  const developerOpen = panel === 'developer';
   const securityOpen = panel === 'security';
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
@@ -1629,6 +1631,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               event.currentTarget.closest('details')?.removeAttribute('open');
               showDrive({ folders: [], panel: 'security', query: '', fileId: null });
             }}><ShieldCheck size={15} /> Account security</button>
+            <button onClick={(event) => { event.currentTarget.closest('details')?.removeAttribute('open'); showDrive({ folders: [], panel: 'developer', query: '', fileId: null }); }}><FileText size={15} /> Settings · Developer</button>
             <div className="menu-divider" />
             <button onClick={(event) => {
               event.currentTarget.closest('details')?.removeAttribute('open');
@@ -1761,6 +1764,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             </nav>
           )}
 
+          {section === 'drive' && developerOpen ? <DeveloperPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' && securityOpen ? <AccountSecurityPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' && googleDriveOpen ? <GoogleDrivePanel onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' ? (

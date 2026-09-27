@@ -515,3 +515,550 @@ async fn response_json(response: Response) -> Value {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).expect("JSON response body")
 }
+
+async fn api_send(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    key: &str,
+    body: Option<Value>,
+) -> Response {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {key}"));
+    if body.is_some() {
+        request = request.header(CONTENT_TYPE, "application/json");
+    }
+    app.clone()
+        .oneshot(
+            request
+                .body(body.map_or_else(Body::empty, |v| Body::from(v.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn developer_key(app: &Router, session: &TestSession, scopes: &[&str]) -> Value {
+    let response = send(
+        app,
+        Method::POST,
+        "/api/developer/keys",
+        Some(session),
+        Some(&session.csrf_token),
+        Some(json!({"name":"lesson integration","scopes":scopes})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response_json(response).await
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+async fn developer_api_keys_scope_upload_logs_and_independent_share_lifecycle() {
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&std::env::var("TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let owner = insert_owner(&pool).await;
+    let session = insert_session(&pool, owner).await;
+    let other = insert_owner(&pool).await;
+    let other_session = insert_session(&pool, other).await;
+    let foreign = insert_folder(&pool, other, None, "foreign", false).await;
+    let (app, _storage) = make_app(pool.clone());
+
+    let denied = send(
+        &app,
+        Method::POST,
+        "/api/developer/keys",
+        Some(&session),
+        None,
+        Some(json!({"name":"bad","scopes":["drive:write"]})),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let key = developer_key(
+        &app,
+        &session,
+        &[
+            "drive:read",
+            "drive:write",
+            "shares:read",
+            "shares:write",
+            "photos:write",
+            "photos:read",
+        ],
+    )
+    .await;
+    let token = key["key"].as_str().unwrap();
+    let key_id: Uuid = key["id"].as_str().unwrap().parse().unwrap();
+    let listing = response_json(
+        send(
+            &app,
+            Method::GET,
+            "/api/developer/keys",
+            Some(&session),
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(!listing.to_string().contains(token));
+    assert!(!listing.to_string().contains("token_digest"));
+    let digest: Vec<u8> = sqlx::query_scalar("SELECT token_digest FROM api_keys WHERE id=$1")
+        .bind(key_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(digest, Sha256::digest(token.as_bytes()).to_vec());
+    assert_eq!(
+        send(
+            &app,
+            Method::GET,
+            "/api/v1/drive",
+            Some(&session),
+            None,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED,
+        "v1 cannot fall back to browser cookies"
+    );
+    assert_eq!(
+        api_send(&app, Method::GET, "/api/v1/admin/storage", token, None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api_send(&app, Method::GET, "/api/developer/keys", token, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        api_send(
+            &app,
+            Method::GET,
+            &format!("/api/v1/entries/{foreign}"),
+            token,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let read_only = developer_key(&app, &session, &["drive:read"]).await;
+    assert_eq!(
+        api_send(
+            &app,
+            Method::POST,
+            "/api/v1/folders",
+            read_only["key"].as_str().unwrap(),
+            Some(json!({"name":"denied"}))
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let folder_response = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/folders",
+        token,
+        Some(json!({"name":"Lessons"})),
+    )
+    .await;
+    assert_eq!(folder_response.status(), StatusCode::CREATED);
+    let folder = response_json(folder_response).await;
+    let folder_id = folder["id"].as_str().unwrap();
+    assert_eq!(
+        api_send(&app, Method::GET, "/api/v1/storage", token, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let upload_response = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/uploads",
+        token,
+        Some(json!({"filename":"lesson.pdf","expected_size":8,"parent_id":folder_id})),
+    )
+    .await;
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
+    let upload = response_json(upload_response).await;
+    let upload_id = upload["id"].as_str().unwrap();
+    let chunk = Request::builder()
+        .method(Method::PATCH)
+        .uri(format!("/api/v1/uploads/{upload_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/offset+octet-stream")
+        .header("upload-offset", "0")
+        .body(Body::from("%PDF-1.7"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(chunk).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    let head = api_send(
+        &app,
+        Method::HEAD,
+        &format!("/api/v1/uploads/{upload_id}"),
+        token,
+        None,
+    )
+    .await;
+    assert_eq!(head.headers()["upload-offset"], "8");
+    let finalized = api_send(
+        &app,
+        Method::POST,
+        &format!("/api/v1/uploads/{upload_id}/finalize"),
+        token,
+        None,
+    )
+    .await;
+    assert_eq!(finalized.status(), StatusCode::OK);
+    let file = response_json(finalized).await;
+    assert!(file["file_id"].as_str().is_some());
+
+    let photo = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/photos/uploads",
+        token,
+        Some(json!({"filename":"photo.png","expected_size":68})),
+    )
+    .await;
+    assert_eq!(photo.status(), StatusCode::CREATED);
+    let photo_id = response_json(photo).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=").unwrap();
+    assert_eq!(png.len(), 68);
+    let chunk = Request::builder()
+        .method(Method::PATCH)
+        .uri(format!("/api/v1/uploads/{photo_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/offset+octet-stream")
+        .header("upload-offset", "0")
+        .body(Body::from(png))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(chunk).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    let photo_file = response_json(
+        api_send(
+            &app,
+            Method::POST,
+            &format!("/api/v1/uploads/{photo_id}/finalize"),
+            token,
+            None,
+        )
+        .await,
+    )
+    .await;
+    let jobs:i64=sqlx::query_scalar("SELECT count(*) FROM media_index_jobs j JOIN file_versions v ON v.id=j.file_version_id WHERE v.file_id=$1").bind(photo_file["file_id"].as_str().unwrap().parse::<Uuid>().unwrap()).fetch_one(&pool).await.unwrap();
+    assert!(jobs > 0, "API uploads must enqueue media indexing");
+    let timeline =
+        response_json(api_send(&app, Method::GET, "/api/v1/photos", token, None).await).await;
+    assert!(
+        timeline["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == photo_file["file_id"])
+    );
+    let photos_parent: Uuid =
+        sqlx::query_scalar("SELECT target_parent_id FROM upload_sessions WHERE id=$1")
+            .bind(photo_id.parse::<Uuid>().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let role: String = sqlx::query_scalar("SELECT system_role FROM drive_entries WHERE id=$1")
+        .bind(photos_parent)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(role, "photos");
+    assert_eq!(
+        api_send(
+            &app,
+            Method::POST,
+            "/api/v1/photos/uploads",
+            token,
+            Some(json!({"filename":"not-photo.pdf","expected_size":1}))
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let shared = response_json(
+        api_send(
+            &app,
+            Method::POST,
+            "/api/v1/shares",
+            token,
+            Some(json!({"resource_type":"folder","resource_id":folder_id})),
+        )
+        .await,
+    )
+    .await;
+    let share_id: Uuid = shared["id"].as_str().unwrap().parse().unwrap();
+    let share_token = shared["share_url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("/s/")
+        .unwrap();
+    let public_uri = format!("/api/public/shares/{share_token}");
+    assert_eq!(
+        send(&app, Method::GET, &public_uri, None, None, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(
+            &app,
+            Method::POST,
+            &format!("/api/developer/keys/{key_id}/revoke"),
+            Some(&other_session),
+            Some(&other_session.csrf_token),
+            Some(json!({"revoke_shares":true}))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = send(
+        &app,
+        Method::POST,
+        &format!("/api/developer/keys/{key_id}/revoke"),
+        Some(&session),
+        Some(&session.csrf_token),
+        Some(json!({"revoke_shares":false})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        api_send(&app, Method::GET, "/api/v1/drive", token, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&app, Method::GET, &public_uri, None, None, None)
+            .await
+            .status(),
+        StatusCode::OK,
+        "revoking key must keep existing links"
+    );
+    let response = send(
+        &app,
+        Method::POST,
+        &format!("/api/developer/keys/{key_id}/shares/revoke"),
+        Some(&session),
+        Some(&session.csrf_token),
+        None,
+    )
+    .await;
+    assert_eq!(response_json(response).await["shares_revoked"], 1);
+    assert_eq!(
+        send(&app, Method::GET, &public_uri, None, None, None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let provenance: Uuid =
+        sqlx::query_scalar("SELECT created_by_api_key_id FROM shares WHERE id=$1")
+            .bind(share_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(provenance, key_id);
+
+    let key2 = developer_key(&app, &session, &["shares:write", "drive:read"]).await;
+    let token2 = key2["key"].as_str().unwrap();
+    let shared2 = response_json(
+        api_send(
+            &app,
+            Method::POST,
+            "/api/v1/shares",
+            token2,
+            Some(json!({"resource_type":"folder","resource_id":folder_id})),
+        )
+        .await,
+    )
+    .await;
+    let response = send(
+        &app,
+        Method::POST,
+        &format!(
+            "/api/developer/keys/{}/revoke",
+            key2["id"].as_str().unwrap()
+        ),
+        Some(&session),
+        Some(&session.csrf_token),
+        Some(json!({"revoke_shares":true})),
+    )
+    .await;
+    assert_eq!(response_json(response).await["shares_revoked"], 1);
+    assert_eq!(
+        send(
+            &app,
+            Method::GET,
+            &format!(
+                "/api/public/shares/{}",
+                shared2["share_url"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("/s/")
+                    .unwrap()
+            ),
+            None,
+            None,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let usage = send(
+        &app,
+        Method::GET,
+        "/api/developer/usage?all=true&days=30",
+        Some(&session),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(usage.status(), StatusCode::OK);
+    assert!(
+        !response_json(usage).await["daily"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let logged = response_json(
+        send(
+            &app,
+            Method::GET,
+            "/api/developer/logs",
+            Some(&session),
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(!logged.to_string().contains(token));
+    assert!(
+        logged["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["route"] == "/api/v1/uploads/{id}"
+                && l["method"] == "PATCH"
+                && l["request_bytes"] == 68),
+        "streamed payload traffic is measured even without Content-Length"
+    );
+
+    let read_id = read_only["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+    sqlx::query("UPDATE api_keys SET rate_window=now(),rate_count=120 WHERE id=$1")
+        .bind(read_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let limited = api_send(
+        &app,
+        Method::GET,
+        "/api/v1/drive",
+        read_only["key"].as_str().unwrap(),
+        None,
+    )
+    .await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers()["retry-after"], "60");
+    sqlx::query("UPDATE api_keys SET expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(read_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        api_send(
+            &app,
+            Method::GET,
+            "/api/v1/drive",
+            read_only["key"].as_str().unwrap(),
+            None
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    sqlx::query("UPDATE users SET role='member',managed_by=$2,quota_bytes=4096 WHERE id=$1")
+        .bind(other)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        send(
+            &app,
+            Method::GET,
+            "/api/developer/usage?all=true",
+            Some(&other_session),
+            None,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("INSERT INTO api_keys(id,owner_id,name,token_digest,prefix,scopes,revoked_at) SELECT gen_random_uuid(),$1,'historical key',decode(md5($1::text||n::text)||md5(n::text||$1::text),'hex'),'mdk_history',ARRAY['drive:read'],now() FROM generate_series(1,105) n").bind(owner).execute(&pool).await.unwrap();
+    let history = response_json(
+        send(
+            &app,
+            Method::GET,
+            "/api/developer/keys",
+            Some(&session),
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(history["keys"].as_array().unwrap().len(), 100);
+    assert_eq!(history["next_offset"], 100);
+    let older = response_json(
+        send(
+            &app,
+            Method::GET,
+            "/api/developer/keys?offset=100",
+            Some(&session),
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(!older["keys"].as_array().unwrap().is_empty());
+    assert!(older["next_offset"].is_null());
+    let docs = send(&app, Method::GET, "/docs/index.md", None, None, None).await;
+    assert_eq!(docs.status(), StatusCode::OK);
+    assert_eq!(
+        docs.headers()["content-type"],
+        "text/markdown; charset=utf-8"
+    );
+}

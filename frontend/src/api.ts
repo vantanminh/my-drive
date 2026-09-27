@@ -140,7 +140,7 @@ type RequestOptions = {
   cache?: RequestCache;
 };
 
-async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
+export async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
   let body = options.body;
   if (options.json !== undefined) {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 export type WorkspaceSection = 'drive' | 'shared' | 'trash' | 'photos' | 'storage';
-export type DrivePanel = 'accounts' | 'faces' | 'indexing' | 'google-drive' | 'security' | null;
+export type DrivePanel = 'accounts' | 'faces' | 'indexing' | 'google-drive' | 'security' | 'developer' | null;
 export type PhotosTab = 'timeline' | 'people' | 'albums';
 export type DriveSort = 'name' | 'updated_at' | 'created_at' | 'size';
 export type DriveOrder = 'asc' | 'desc';
@@ -124,7 +124,7 @@ function fileIdFromSearch(params: URLSearchParams): string | null {
 
 function panelFromSearch(params: URLSearchParams): DrivePanel {
   const panel = params.get('panel');
-  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive' || panel === 'security') return panel;
+  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive' || panel === 'security' || panel === 'developer') return panel;
   return null;
 }
 
@@ -184,6 +184,7 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
     return photos;
   }
   if (parts[0] === 'storage' && parts.length === 1) return blankRoute({ section: 'storage' });
+  if (parts[0] === 'settings' && parts[1] === 'developer') return blankRoute({ panel: 'developer' });
   if (parts[0] === 'security' && parts.length === 1) return blankRoute({ panel: 'security' });
 
   if (parts.length === 0 || parts[0] === 'drive') {
@@ -256,6 +257,7 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
     if (route.panel === 'faces') return '/faces';
     if (route.panel === 'indexing') return '/indexing';
     if (route.panel === 'google-drive') return '/google-drive';
+    if (route.panel === 'developer') return '/settings/developer';
     if (route.panel === 'security') return '/security';
     return '/drive';
   }
