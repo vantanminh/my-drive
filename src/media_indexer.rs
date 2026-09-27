@@ -623,7 +623,34 @@ async fn process_face_job(
     set_stage(pool, job, "extracting_face_frame", actual_size)
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
-    let frame_bytes = extract_face_frames(input_path.path(), mime, job.id).await?;
+    let face_input = if supports_video_mime(mime) {
+        None
+    } else {
+        let thumbnail = TempPath::create("png").map_err(|_| retryable("face_index_unavailable"))?;
+        thumbnail_to_png(
+            input_path.path(),
+            thumbnail.path(),
+            face_indexer::MAX_FRAME_SIDE,
+            mime,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(job_id = job.id, error = ?error, "face source thumbnailing failed");
+            map_decode_tool_error(error)
+        })?;
+        let thumbnail_size = tokio_fs::metadata(thumbnail.path())
+            .await
+            .map_err(|_| retryable("face_index_unavailable"))?
+            .len();
+        if thumbnail_size == 0 || thumbnail_size > MAX_THUMBNAIL_BYTES {
+            return Err(unsupported("resource_limit"));
+        }
+        Some(thumbnail)
+    };
+    let frame_input = face_input
+        .as_ref()
+        .map_or(input_path.path(), TempPath::path);
+    let frame_bytes = extract_face_frames(frame_input, mime, job.id).await?;
     let model_path = std::env::var_os("FACE_DETECTOR_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_PATH));
