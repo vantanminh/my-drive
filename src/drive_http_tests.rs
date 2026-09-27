@@ -1063,6 +1063,11 @@ async fn developer_api_keys_scope_upload_logs_and_independent_share_lifecycle() 
     );
 
     let photo_file_id: Uuid = photo_file["file_id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = $1")
+        .bind(photo_file_id)
+        .execute(&pool)
+        .await
+        .expect("deactivate photo created by developer API test");
     sqlx::query(
         "DELETE FROM media_index_jobs WHERE file_version_id IN \
          (SELECT id FROM file_versions WHERE file_id = $1)",
