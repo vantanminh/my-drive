@@ -465,7 +465,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
         let storage = LocalStorage::initialize(&config(root.clone(), false)).unwrap();
-        let id = Uuid::new_v4();
+        let id = Uuid::parse_str("00112233-4455-4677-8899-aabbccddeeff").unwrap();
         let key = LocalStorage::storage_key(id);
         let path = storage.object_path(&key).unwrap();
         assert!(path.starts_with(storage.root.join("objects")));
