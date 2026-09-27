@@ -1061,4 +1061,14 @@ async fn developer_api_keys_scope_upload_logs_and_independent_share_lifecycle() 
         docs.headers()["content-type"],
         "text/markdown; charset=utf-8"
     );
+
+    let photo_file_id: Uuid = photo_file["file_id"].as_str().unwrap().parse().unwrap();
+    sqlx::query(
+        "DELETE FROM media_index_jobs WHERE file_version_id IN \
+         (SELECT id FROM file_versions WHERE file_id = $1)",
+    )
+    .bind(photo_file_id)
+    .execute(&pool)
+    .await
+    .expect("remove media jobs created by developer API test");
 }
