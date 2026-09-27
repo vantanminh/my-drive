@@ -495,16 +495,15 @@ pub async fn revoke_other_sessions(
         }
     };
 
-    if revoked_count > 0 {
-        if let Err(error) = sqlx::query(
+    if revoked_count > 0
+        && let Err(error) = sqlx::query(
             "INSERT INTO audit_events (event_type, actor_id) VALUES ('sessions_revoked', $1)",
         )
         .bind(user.id)
         .execute(&state.pool)
         .await
-        {
-            tracing::warn!(error = %error, "could not record browser session revocation");
-        }
+    {
+        tracing::warn!(error = %error, "could not record browser session revocation");
     }
 
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -780,8 +779,8 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     must_change_password: session.must_change_password,
                     csrf_token_digest: session.csrf_token_digest,
                 };
-                if should_update_last_seen {
-                    if let Err(error) = sqlx::query(
+                if should_update_last_seen
+                    && let Err(error) = sqlx::query(
                         "UPDATE sessions SET last_seen_at = now() \
                           WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')",
                     )
@@ -791,7 +790,6 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     {
                         tracing::warn!(error = %error, "could not update browser session activity");
                     }
-                }
                 let allowed_while_changing_password = matches!(
                     parts.uri.path(),
                     "/api/auth/me" | "/api/auth/password" | "/api/auth/logout"
