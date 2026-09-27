@@ -36,6 +36,17 @@ where to store backups and for an age public recipient. See the complete
 [Ubuntu installation and operations guide](docs/DEPLOY_UBUNTU.md) (Vietnamese),
 including backups, recovery and upgrades.
 
+### Faster access from home
+
+When My Drive runs on a home server, a local DNS override can point the same
+domain to the server's reserved LAN IP. Browsers then reach Caddy over the LAN
+automatically, while public DNS continues to serve access from outside. Keep
+the domain and HTTPS configuration unchanged; handle its local AAAA record too
+so IPv6 does not route clients over the Internet. The app stays behind Caddy on
+ports 80/443; do not expose its internal port 3000. See the
+[split-DNS setup guide](docs/DEPLOY_UBUNTU.md#truy-cập-nhanh-trong-mạng-nhà-bằng-dns-nội-bộ)
+for router, Pi-hole, and AdGuard Home steps.
+
 ## Current implementation
 
 The service now includes validated configuration, PostgreSQL migrations,

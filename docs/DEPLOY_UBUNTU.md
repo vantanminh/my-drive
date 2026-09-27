@@ -211,6 +211,38 @@ Google Drive import là tùy chọn sau khi cài: tạo OAuth client của riên
 chỉ sửa `.env` vì lần start tiếp sẽ ghi lại nó. Phần quản lý giới hạn/tài khoản
 thành viên thực hiện trong giao diện chủ sở hữu.
 
+## Truy cập nhanh trong mạng nhà bằng DNS nội bộ
+
+Nếu cài My Drive trên home server và đã truy cập được từ Internet bằng domain,
+có thể để các thiết bị ở nhà kết nối thẳng đến IP LAN của server. Cấu hình này
+dùng cùng domain nên HTTPS, cookie đăng nhập và các request API của trình duyệt
+vẫn cùng origin. DNS công khai giữ nguyên để truy cập từ bên ngoài.
+
+1. Tạo DHCP reservation trên router để home server luôn nhận cùng một IP LAN,
+   ví dụ `192.168.1.20`. Đảm bảo firewall của server cho phép thiết bị trong
+   LAN truy cập reverse proxy ở TCP 80 và 443 theo chế độ TLS đang dùng.
+2. Trong router, Pi-hole hoặc AdGuard Home, tạo local DNS rewrite/host override
+   cho **domain My Drive hiện tại** về IP LAN đó, ví dụ
+   `drive.example.com -> 192.168.1.20`. Cho các thiết bị trong nhà dùng resolver
+   nội bộ này qua DHCP; nếu thiết bị dùng DNS công khai trực tiếp, nó sẽ không
+   nhận được bản ghi LAN.
+3. Xử lý cả DNS IPv6 (AAAA). Nếu home server có IPv6 ổn định và truy cập được
+   trong LAN, tạo bản ghi AAAA nội bộ trỏ đến địa chỉ đó. Nếu không, cấu hình
+   resolver nội bộ trả lời không có AAAA cho domain này thay vì chuyển tiếp
+   AAAA công khai; nếu giữ AAAA công khai, một số thiết bị có thể tiếp tục kết
+   nối qua Internet bằng IPv6.
+4. Kiểm tra trên thiết bị trong nhà bằng `nslookup drive.example.com` hoặc
+   `dig drive.example.com`. Kết quả phải có IP LAN của server. Mở My Drive và
+   thử đăng nhập, tải lên và tải xuống; kiểm tra kết nối HTTPS của trình duyệt
+   đến IP LAN. Nếu thiết bị còn giữ DNS cũ, làm mới DHCP hoặc xóa DNS cache.
+5. Tắt Wi-Fi trên điện thoại hoặc dùng một mạng bên ngoài rồi kiểm tra lại
+   domain. DNS công khai vẫn phải trả về địa chỉ truy cập Internet hiện tại.
+
+Bộ cài Ubuntu đưa Caddy ra các cổng 80/443; app vẫn chỉ truy cập qua reverse
+proxy và cổng nội bộ 3000 không cần mở cho LAN. Giữ nguyên host/domain trong
+Caddy để chứng chỉ HTTPS hiện tại tiếp tục khớp. Với `tls=internal`, các thiết
+bị vẫn cần tin cậy CA nội bộ như phần cài đặt TLS đã hướng dẫn.
+
 ## 5. Backup mã hóa
 
 Chuẩn bị disk/NAS mount backup trên filesystem **khác** với tất cả data root.
