@@ -38,6 +38,7 @@ type SavedUpload = {
   lastModified: number;
   parentId: string | null;
   createdAt: number;
+  uploadedBytes?: number;
 };
 
 type UploadStatus = 'queued' | 'uploading' | 'paused' | 'done' | 'error';
@@ -46,14 +47,43 @@ type UploadJob = {
   uploadId: string | null;
   name: string;
   size: number;
+  uploadedBytes: number;
   progress: number;
+  speed: number;
   status: UploadStatus;
   detail: string;
   saved?: SavedUpload;
 };
 
+type UploadTask = {
+  key: string;
+  file: File | null;
+  parentId: string | null;
+  session: SavedUpload | null;
+  action: 'pause' | 'cancel' | null;
+  controller: AbortController | null;
+  finalizing: boolean;
+  uploadedBytes: number;
+  speed: number;
+  sampleAt: number;
+  sampleBytes: number;
+  lastProgressAt: number;
+};
+
 const RESUME_KEY = 'my-drive.upload-sessions.v1';
 const CHUNK_SIZE = 8 * 1024 * 1024;
+const MAX_CONCURRENT_UPLOADS = 3;
+
+function formatUploadEta(seconds: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
+  const total = Math.ceil(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainingSeconds = total % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${remainingSeconds}s`;
+}
 
 function readSavedUploads(): SavedUpload[] {
   try {
@@ -582,15 +612,40 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       uploadId: saved.id,
       name: saved.name,
       size: saved.size,
-      progress: 0,
+      uploadedBytes: Math.min(saved.size, Math.max(0, saved.uploadedBytes || 0)),
+      progress: saved.size ? (Math.min(saved.size, Math.max(0, saved.uploadedBytes || 0)) / saved.size) * 100 : 100,
+      speed: 0,
       status: 'paused',
       detail: 'Choose this file again to resume.',
       saved
     }))
   );
+  const uploadQueueRef = useRef<UploadTask[]>([]);
+  const activeUploadsRef = useRef<Map<string, UploadTask>>(new Map());
+  const uploadTasksRef = useRef<Map<string, UploadTask>>(new Map());
+  const [uploadManagerOpen, setUploadManagerOpen] = useState(false);
   const [resumeTargetId, setResumeTargetId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      setJobs((items) => {
+        let changed = false;
+        const next = items.map((job) => {
+          const task = activeUploadsRef.current.get(job.key);
+          if (!task) return job;
+          const speed = now - task.lastProgressAt > 1200 ? 0 : task.speed;
+          task.speed = speed;
+          if (job.speed === speed) return job;
+          changed = true;
+          return { ...job, speed };
+        });
+        return changed ? next : items;
+      });
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, []);
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘ K' : 'Ctrl K';
   const activeSectionLabel = section === 'drive'
     ? (!pathReady ? 'Opening folder…' : currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : 'My Drive')
@@ -915,7 +970,9 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         uploadId: null,
         name: '',
         size: 0,
+        uploadedBytes: 0,
         progress: 0,
+        speed: 0,
         status: 'queued',
         detail: '',
         ...update
@@ -946,79 +1003,290 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     }
   }
 
-  async function runUpload(file: File, saved?: SavedUpload, existingKey?: string) {
-    const key = existingKey || saved?.id || 'pending-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
-    setError('');
-    updateJob(key, { key, uploadId: saved?.id || null, name: file.name, size: file.size, progress: 0, status: 'queued', detail: 'Waiting to upload…' });
-    let session = saved;
+  function setUploadProgress(task: UploadTask, bytes: number) {
+    const fileSize = task.file?.size ?? 0;
+    const uploadedBytes = fileSize ? Math.min(fileSize, Math.max(0, bytes)) : 0;
+    const now = performance.now();
+    const elapsed = (now - task.sampleAt) / 1000;
+    const delta = uploadedBytes - task.sampleBytes;
+    if (delta > 0 && elapsed >= 0.025) {
+      const sampleSpeed = delta / elapsed;
+      task.speed = task.speed > 0 ? task.speed * 0.65 + sampleSpeed * 0.35 : sampleSpeed;
+      task.sampleAt = now;
+      task.sampleBytes = uploadedBytes;
+    }
+    task.uploadedBytes = uploadedBytes;
+    task.lastProgressAt = now;
+    updateJob(task.key, {
+      uploadedBytes,
+      progress: fileSize ? (uploadedBytes / fileSize) * 100 : 100,
+      speed: task.speed,
+      detail: 'Uploading…'
+    });
+  }
+
+  function resetUploadProgress(task: UploadTask, bytes: number) {
+    const fileSize = task.file?.size ?? 0;
+    const uploadedBytes = fileSize ? Math.min(fileSize, Math.max(0, bytes)) : 0;
+    const now = performance.now();
+    task.uploadedBytes = uploadedBytes;
+    task.speed = 0;
+    task.sampleAt = now;
+    task.sampleBytes = uploadedBytes;
+    task.lastProgressAt = now;
+    updateJob(task.key, {
+      uploadedBytes,
+      progress: fileSize ? (uploadedBytes / fileSize) * 100 : 100,
+      speed: 0
+    });
+  }
+
+  function removeSavedUpload(id: string | null | undefined) {
+    if (!id) return;
+    writeSavedUploads(readSavedUploads().filter((item) => item.id !== id));
+  }
+
+  function persistUploadOffset(session: SavedUpload, offset: number) {
+    const savedUploads = readSavedUploads().filter((item) => item.id !== session.id);
+    savedUploads.push({ ...session, uploadedBytes: Math.max(0, Math.min(session.size, offset)) });
+    writeSavedUploads(savedUploads);
+  }
+
+  async function handleUploadAction(task: UploadTask, session: SavedUpload | null, fallbackOffset: number): Promise<boolean> {
+    if (!task.action) return false;
+    const action = task.action;
+    task.controller = null;
+    if (action === 'pause') {
+      let offset = fallbackOffset;
+      if (session) {
+        try {
+          const server = await api.uploadHead(session.id);
+          offset = server.offset;
+          persistUploadOffset(session, offset);
+        } catch (cause) {
+          if (cause instanceof ApiError && cause.status === 401) onLoggedOut();
+        }
+      }
+      task.session = session;
+      task.action = null;
+      resetUploadProgress(task, offset);
+      updateJob(task.key, {
+        uploadId: session?.id || null,
+        saved: session || undefined,
+        status: 'paused',
+        speed: 0,
+        detail: `Paused at ${formatSize(task.uploadedBytes)}.`
+      });
+      return true;
+    }
+
     try {
+      if (session) {
+        try {
+          await api.cancelUpload(session.id);
+        } catch (cause) {
+          if (!(cause instanceof ApiError) || !['upload_closed', 'not_found'].includes(cause.code)) throw cause;
+        }
+      }
+      removeSavedUpload(session?.id);
+      uploadTasksRef.current.delete(task.key);
+      setJobs((items) => items.filter((job) => job.key !== task.key));
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) onLoggedOut();
+      task.action = null;
+      updateJob(task.key, { status: session ? 'paused' : 'error', speed: 0, detail: friendlyError(cause) });
+    }
+    return true;
+  }
+
+  async function runUpload(task: UploadTask) {
+    const file = task.file;
+    let session = task.session;
+    let offset = task.uploadedBytes;
+    if (!file) {
+      updateJob(task.key, { status: 'paused', detail: 'Choose this file again to resume.' });
+      return;
+    }
+    try {
+      if (task.action && await handleUploadAction(task, session, offset)) return;
       if (!session) {
-        const created = await api.createUpload(file.name, file.size, currentFolderId);
+        const created = await api.createUpload(file.name, file.size, task.parentId);
         session = {
           schema: 1,
           id: created.id,
           name: file.name,
           size: file.size,
           lastModified: file.lastModified,
-          parentId: currentFolderId,
-          createdAt: Date.now()
+          parentId: task.parentId,
+          createdAt: Date.now(),
+          uploadedBytes: 0
         };
-        const savedUploads = readSavedUploads().filter((item) => item.id !== session!.id);
-        savedUploads.push(session);
-        writeSavedUploads(savedUploads);
-        updateJob(key, { uploadId: session.id, saved: session });
+        task.session = session;
+        persistUploadOffset(session, 0);
+        updateJob(task.key, { uploadId: session.id, saved: session });
       }
-      updateJob(key, { status: 'uploading', detail: 'Preparing transfer…' });
+      if (task.action && await handleUploadAction(task, session, offset)) return;
+
+      updateJob(task.key, { detail: 'Preparing transfer…' });
       let server = await api.uploadHead(session.id);
-      let offset = Math.min(server.offset, file.size);
-      updateJob(key, { progress: file.size ? (offset / file.size) * 100 : 100 });
+      offset = Math.min(server.offset, file.size);
+      persistUploadOffset(session, offset);
+      resetUploadProgress(task, offset);
+      if (task.action && await handleUploadAction(task, session, offset)) return;
+
       while (offset < file.size) {
+        if (task.action && await handleUploadAction(task, session, offset)) return;
         const end = Math.min(offset + CHUNK_SIZE, file.size);
-        const chunk = file.slice(offset, end);
+        const controller = new AbortController();
+        task.controller = controller;
         try {
-          await api.uploadChunk(session.id, offset, chunk);
+          await api.uploadChunk(
+            session.id,
+            offset,
+            file.slice(offset, end),
+            (loadedBytes) => setUploadProgress(task, offset + loadedBytes),
+            controller.signal
+          );
+          task.controller = null;
           offset = end;
+          persistUploadOffset(session, offset);
+          setUploadProgress(task, offset);
         } catch (cause) {
+          task.controller = null;
+          if (task.action && await handleUploadAction(task, session, offset)) return;
           if (cause instanceof ApiError && cause.status === 409 && cause.code === 'offset_mismatch') {
             server = await api.uploadHead(session.id);
             if (server.offset === offset) throw cause;
             offset = Math.min(server.offset, file.size);
+            persistUploadOffset(session, offset);
+            resetUploadProgress(task, offset);
             continue;
           }
           throw cause;
         }
-        updateJob(key, {
-          progress: file.size ? (offset / file.size) * 100 : 100,
-          detail: 'Uploading…'
-        });
+        if (task.action && await handleUploadAction(task, session, offset)) return;
       }
-      updateJob(key, { detail: 'Finishing upload…' });
+
+      if (task.action && await handleUploadAction(task, session, offset)) return;
+      task.finalizing = true;
+      task.speed = 0;
+      updateJob(task.key, { detail: 'Finishing upload…', speed: 0 });
       await api.finalizeUpload(session.id);
-      writeSavedUploads(readSavedUploads().filter((item) => item.id !== session!.id));
-      updateJob(key, { status: 'done', progress: 100, detail: 'Uploaded' });
-      setError('');
+      task.session = null;
+      task.finalizing = false;
+      task.speed = 0;
+      removeSavedUpload(session.id);
+      uploadTasksRef.current.delete(task.key);
+      updateJob(task.key, { status: 'done', uploadedBytes: file.size, progress: 100, speed: 0, detail: 'Uploaded' });
       setNotice(file.name + ' uploaded');
       setRefresh((value) => value + 1);
     } catch (cause) {
+      task.controller = null;
+      task.finalizing = false;
+      if (task.action && await handleUploadAction(task, session, offset)) return;
       if (cause instanceof ApiError && cause.status === 401) {
         onLoggedOut();
         return;
       }
       const resumable = !!session && !(cause instanceof ApiError && ['upload_closed', 'not_found'].includes(cause.code));
-      updateJob(key, {
+      if (resumable && session) {
+        try {
+          const server = await api.uploadHead(session.id);
+          offset = Math.min(server.offset, file.size);
+          persistUploadOffset(session, offset);
+        } catch (headCause) {
+          if (headCause instanceof ApiError && headCause.status === 401) onLoggedOut();
+        }
+        resetUploadProgress(task, offset);
+      }
+      if (!resumable) {
+        removeSavedUpload(session?.id);
+        task.session = null;
+      } else {
+        task.session = session;
+      }
+      updateJob(task.key, {
         uploadId: session?.id || null,
-        saved: session,
+        saved: resumable ? session || undefined : undefined,
         status: resumable ? 'paused' : 'error',
+        speed: 0,
         detail: friendlyError(cause)
       });
-      setError(friendlyError(cause));
     }
+  }
+
+  function pumpUploadQueue() {
+    const queue = uploadQueueRef.current;
+    while (activeUploadsRef.current.size < MAX_CONCURRENT_UPLOADS && queue.length > 0) {
+      const task = queue.shift()!;
+      if (task.action === 'cancel') continue;
+      if (task.action === 'pause') {
+        task.action = null;
+        updateJob(task.key, { status: 'paused', speed: 0, detail: 'Paused in queue.' });
+        continue;
+      }
+      activeUploadsRef.current.set(task.key, task);
+      task.finalizing = false;
+      task.lastProgressAt = performance.now();
+      updateJob(task.key, { status: 'uploading', speed: 0, detail: 'Preparing transfer…' });
+      void runUpload(task).finally(() => {
+        activeUploadsRef.current.delete(task.key);
+        task.controller = null;
+        task.finalizing = false;
+        pumpUploadQueue();
+      });
+    }
+  }
+
+  function queueUploadTask(task: UploadTask) {
+    task.action = null;
+    if (!activeUploadsRef.current.has(task.key) && !uploadQueueRef.current.some((item) => item.key === task.key)) {
+      uploadQueueRef.current.push(task);
+    }
+    const fileSize = task.file?.size ?? 0;
+    updateJob(task.key, {
+      uploadId: task.session?.id || null,
+      saved: task.session || undefined,
+      uploadedBytes: task.uploadedBytes,
+      progress: fileSize ? (task.uploadedBytes / fileSize) * 100 : 100,
+      speed: 0,
+      status: 'queued',
+      detail: 'Waiting in queue…'
+    });
+    pumpUploadQueue();
+  }
+
+  function enqueueUpload(file: File, parentId: string | null, saved?: SavedUpload, existingKey?: string) {
+    const key = existingKey || saved?.id || 'pending-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+    const now = performance.now();
+    const task = uploadTasksRef.current.get(key) || {
+      key,
+      file,
+      parentId: saved ? saved.parentId : parentId,
+      session: saved || null,
+      action: null,
+      controller: null,
+      finalizing: false,
+      uploadedBytes: Math.min(file.size, Math.max(0, saved?.uploadedBytes || 0)),
+      speed: 0,
+      sampleAt: now,
+      sampleBytes: Math.min(file.size, Math.max(0, saved?.uploadedBytes || 0)),
+      lastProgressAt: now
+    } satisfies UploadTask;
+    task.file = file;
+    task.parentId = saved ? saved.parentId : parentId;
+    task.session = saved || task.session;
+    task.action = null;
+    uploadTasksRef.current.set(key, task);
+    queueUploadTask(task);
+    updateJob(key, { key, name: file.name, size: file.size });
   }
 
   async function chooseFiles(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
     event.target.value = '';
     if (!files.length) return;
+    setError('');
     const parentId = currentFolderId;
     if (resumeTargetId) {
       const saved = readSavedUploads().find((item) => item.id === resumeTargetId);
@@ -1028,12 +1296,12 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         setError('Choose the same file that was selected for this upload to resume it.');
         return;
       }
-      await runUpload(file, saved, saved.id);
+      enqueueUpload(file, saved.parentId, saved, saved.id);
       return;
     }
     for (const file of files) {
       const saved = readSavedUploads().find((item) => fileMatches(file, item, parentId));
-      await runUpload(file, saved);
+      enqueueUpload(file, parentId, saved);
     }
   }
 
@@ -1043,21 +1311,65 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   }
 
   function resumeUpload(job: UploadJob) {
+    const task = uploadTasksRef.current.get(job.key);
+    if (task?.file) {
+      task.finalizing = false;
+      queueUploadTask(task);
+      return;
+    }
     setResumeTargetId(job.uploadId);
     fileInputRef.current?.click();
   }
 
+  function pauseUpload(job: UploadJob) {
+    const task = uploadTasksRef.current.get(job.key);
+    if (!task || task.finalizing || task.action) return;
+    task.action = 'pause';
+    updateJob(job.key, { speed: 0, detail: 'Pausing…' });
+    task.controller?.abort();
+  }
+
+  function retryUpload(job: UploadJob) {
+    const task = uploadTasksRef.current.get(job.key);
+    if (!task?.file) {
+      setResumeTargetId(job.uploadId);
+      fileInputRef.current?.click();
+      return;
+    }
+    removeSavedUpload(task.session?.id || job.uploadId);
+    task.session = null;
+    task.action = null;
+    task.uploadedBytes = 0;
+    task.speed = 0;
+    task.sampleAt = performance.now();
+    task.sampleBytes = 0;
+    queueUploadTask(task);
+  }
+
   async function cancelUpload(job: UploadJob) {
+    const task = uploadTasksRef.current.get(job.key);
+    if (task && activeUploadsRef.current.has(job.key)) {
+      if (task.finalizing || task.action) return;
+      task.action = 'cancel';
+      updateJob(job.key, { speed: 0, detail: 'Cancelling…' });
+      task.controller?.abort();
+      return;
+    }
+
+    uploadQueueRef.current = uploadQueueRef.current.filter((item) => item.key !== job.key);
     try {
-      if (job.uploadId) {
+      const sessionId = task?.session?.id || job.uploadId;
+      if (sessionId) {
         try {
-          await api.cancelUpload(job.uploadId);
+          await api.cancelUpload(sessionId);
         } catch (cause) {
           if (!(cause instanceof ApiError) || !['upload_closed', 'not_found'].includes(cause.code)) throw cause;
         }
       }
-      writeSavedUploads(readSavedUploads().filter((item) => item.id !== job.uploadId));
+      removeSavedUpload(sessionId);
+      uploadTasksRef.current.delete(job.key);
       setJobs((items) => items.filter((item) => item.key !== job.key));
+      pumpUploadQueue();
     } catch (cause) {
       setError(friendlyError(cause));
     }
@@ -1184,7 +1496,11 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const searchActive = section === 'drive' && (query.trim().length > 0 || filtersReady(route.filters, currentFolderId));
   const visibleRows = entries;
   const previewItems = visibleRows.filter((entry) => entry.kind === 'file' && isFilePreviewable(entry));
-  const pendingJobs = jobs.filter((job) => job.status !== 'done');
+  const activeUploadJobs = jobs.filter((job) => job.status === 'uploading');
+  const queuedUploadJobs = jobs.filter((job) => job.status === 'queued');
+  const pausedUploadJobs = jobs.filter((job) => job.status === 'paused' || job.status === 'error');
+  const completedUploadCount = jobs.filter((job) => job.status === 'done').length;
+  const totalUploadSpeed = activeUploadJobs.reduce((total, job) => total + job.speed, 0);
   const sortValue = `${route.sort}:${route.order}`;
   const allTrashSelected = section === 'trash' && visibleRows.length > 0 && visibleRows.every((entry) => trashSelection.includes(entry.id));
 
@@ -1659,7 +1975,15 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       {jobs.length > 0 && (
         <aside className="upload-queue" aria-label="Upload queue">
           <div className="upload-queue-head">
-            <span><CloudUpload size={17} /> Uploads ({pendingJobs.length})</span>
+            <button className="upload-queue-open" onClick={() => setUploadManagerOpen(true)} aria-haspopup="dialog">
+              <span className="upload-queue-mark"><CloudUpload size={17} /></span>
+              <span className="upload-queue-summary">
+                <strong>Uploads</strong>
+                <small>{activeUploadJobs.length} uploading · {queuedUploadJobs.length} queued</small>
+              </span>
+              <span className="upload-queue-speed">{formatSize(totalUploadSpeed)}/s</span>
+              <ChevronDown size={16} />
+            </button>
             <details className="queue-menu">
               <summary className="icon-button" aria-label="Upload queue actions"><MoreHorizontal size={17} /></summary>
               <div className="menu-popover">
@@ -1668,20 +1992,79 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             </details>
           </div>
           <div className="upload-queue-items">
-            {jobs.slice(-4).map((job) => (
+            {(activeUploadJobs.length ? activeUploadJobs : jobs.filter((job) => job.status !== 'done')).slice(0, 3).map((job) => (
               <div className="upload-job" key={job.key}>
-                <span className={'upload-job-icon' + (job.status === 'done' ? ' upload-complete-icon' : '')}>{job.status === 'done' ? <Check size={16} /> : <Upload size={16} />}</span>
+                <span className="upload-job-icon"><Upload size={15} /></span>
                 <div className="upload-job-content">
-                  <div className="upload-job-title"><strong title={job.name}>{job.name}</strong><span>{job.status === 'uploading' ? Math.round(job.progress) + '%' : job.status === 'done' ? 'Done' : job.status === 'queued' ? 'Waiting' : job.status === 'paused' ? 'Paused' : 'Failed'}</span></div>
+                  <div className="upload-job-title"><strong title={job.name}>{job.name}</strong><span>{job.status === 'uploading' ? Math.round(job.progress) + '%' : job.status === 'queued' ? 'Waiting' : job.status === 'paused' ? 'Paused' : 'Failed'}</span></div>
                   <div className="upload-progress"><i style={{ width: job.progress + '%' }} /></div>
-                  <small>{job.detail}</small>
+                  <small>{formatSize(job.uploadedBytes)} / {formatSize(job.size)}{job.status === 'uploading' ? ' · ' + formatSize(job.speed) + '/s' : ''}</small>
                 </div>
-                {job.status === 'paused' && job.uploadId && <button className="queue-action" onClick={() => resumeUpload(job)} title="Resume upload"><RotateCcw size={15} /></button>}
-                {(job.status === 'paused' || job.status === 'error') && <button className="queue-action" onClick={() => void cancelUpload(job)} title="Remove upload"><X size={15} /></button>}
               </div>
             ))}
           </div>
         </aside>
+      )}
+
+      {uploadManagerOpen && (
+        <div className="upload-manager-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setUploadManagerOpen(false); }}>
+          <section className="upload-manager" role="dialog" aria-modal="true" aria-labelledby="upload-manager-title">
+            <header className="upload-manager-header">
+              <div>
+                <span className="eyebrow">TRANSFER ACTIVITY</span>
+                <h2 id="upload-manager-title">Upload manager</h2>
+                <p>{activeUploadJobs.length} uploading · {queuedUploadJobs.length} queued · {formatSize(totalUploadSpeed)}/s total</p>
+              </div>
+              <div className="upload-manager-header-actions">
+                <button className="upload-manager-clear" disabled={!completedUploadCount} onClick={() => setJobs((items) => items.filter((job) => job.status !== 'done'))}>Clear completed</button>
+                <button className="icon-button" onClick={() => setUploadManagerOpen(false)} aria-label="Close upload manager"><X size={18} /></button>
+              </div>
+            </header>
+
+            <div className="upload-manager-summary">
+              <div><span>Files</span><strong>{jobs.length}</strong></div>
+              <div><span>Uploading</span><strong>{activeUploadJobs.length} / {MAX_CONCURRENT_UPLOADS}</strong></div>
+              <div><span>Waiting</span><strong>{queuedUploadJobs.length}</strong></div>
+              <div><span>Paused / failed</span><strong>{pausedUploadJobs.length}</strong></div>
+              <div><span>Completed</span><strong>{completedUploadCount}</strong></div>
+            </div>
+
+            <div className="upload-manager-list">
+              {jobs.length === 0 && <p className="upload-manager-empty">No upload tasks.</p>}
+              {jobs.map((job) => {
+                const task = uploadTasksRef.current.get(job.key);
+                const isFinishing = !!task?.finalizing;
+                const isControlling = !!task?.action;
+                const statusLabel = isFinishing ? 'Finishing' : job.status === 'uploading' ? 'Uploading' : job.status === 'queued' ? 'Waiting' : job.status === 'paused' ? 'Paused' : job.status === 'error' ? 'Failed' : 'Complete';
+                const eta = job.status === 'uploading' && job.speed > 0 ? (job.size - job.uploadedBytes) / job.speed : null;
+                return (
+                  <article className="upload-manager-job" key={job.key}>
+                    <div className="upload-manager-job-main">
+                      <span className={'upload-job-icon' + (job.status === 'done' ? ' upload-complete-icon' : '')}>{job.status === 'done' ? <Check size={16} /> : <Upload size={15} />}</span>
+                      <div className="upload-job-content">
+                        <div className="upload-job-title"><strong title={job.name}>{job.name}</strong><span className={'upload-job-state upload-state-' + job.status}>{statusLabel}</span></div>
+                        <div className="upload-progress" role="progressbar" aria-label={'Upload progress for ' + job.name} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress)}><i style={{ width: job.progress + '%' }} /></div>
+                        <div className="upload-manager-job-stats">
+                          <span>{formatSize(job.uploadedBytes)} / {formatSize(job.size)}</span>
+                          <span>{job.status === 'uploading' ? formatSize(job.speed) + '/s' : '—'}</span>
+                          <span>ETA {formatUploadEta(eta)}</span>
+                        </div>
+                        <small className="upload-manager-detail">{job.detail}</small>
+                      </div>
+                    </div>
+                    <div className="upload-manager-job-actions">
+                      {job.status === 'uploading' && !isFinishing && !isControlling && <button className="queue-action" onClick={() => pauseUpload(job)} aria-label={'Pause ' + job.name} title="Pause upload"><Pause size={16} /></button>}
+                      {job.status === 'queued' && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={'Cancel ' + job.name} title="Cancel upload"><X size={16} /></button>}
+                      {job.status === 'paused' && <button className="queue-action" onClick={() => resumeUpload(job)} aria-label={'Resume ' + job.name} title="Resume upload"><Play size={16} /></button>}
+                      {job.status === 'error' && <button className="queue-action" onClick={() => retryUpload(job)} aria-label={'Retry ' + job.name} title="Retry upload"><RotateCcw size={16} /></button>}
+                      {(job.status === 'uploading' || job.status === 'paused' || job.status === 'error') && !isFinishing && !isControlling && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={'Cancel ' + job.name} title="Cancel upload"><X size={16} /></button>}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </div>
       )}
 
       {modal && (

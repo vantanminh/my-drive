@@ -174,6 +174,74 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
   return undefined as T;
 }
 
+function uploadChunkWithProgress(
+  id: string,
+  offset: number,
+  chunk: Blob,
+  onProgress?: (loadedBytes: number, totalBytes: number) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    const succeed = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = (cause: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(cause);
+    };
+    const abort = () => xhr.abort();
+
+    if (signal?.aborted) {
+      fail(new DOMException('The upload was aborted.', 'AbortError'));
+      return;
+    }
+
+    xhr.open('PATCH', '/api/uploads/' + encodeURIComponent(id), true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Content-Type', 'application/offset+octet-stream');
+    xhr.setRequestHeader('Upload-Offset', String(offset));
+    const token = currentCsrfToken();
+    if (token) xhr.setRequestHeader('X-CSRF-Token', token);
+    xhr.upload.addEventListener('progress', (event) => {
+      onProgress?.(event.loaded, event.lengthComputable ? event.total : chunk.size);
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        succeed();
+        return;
+      }
+      let code = 'request_failed';
+      try {
+        const payload = JSON.parse(xhr.responseText) as { error?: string };
+        if (payload.error) code = payload.error;
+      } catch {
+        code = xhr.statusText || code;
+      }
+      fail(new ApiError(xhr.status, code, xhr.getResponseHeader('Retry-After')));
+    });
+    xhr.addEventListener('error', () => fail(new ApiError(0, 'network_error')));
+    xhr.addEventListener('abort', () => fail(new DOMException('The upload was aborted.', 'AbortError')));
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    try {
+      xhr.send(chunk);
+    } catch (cause) {
+      fail(cause);
+    }
+  });
+}
+
 export const api = {
   me: (signal?: AbortSignal) => request<User>('/api/auth/me', { signal }),
   changePassword: (currentPassword: string, newPassword: string) =>
@@ -452,16 +520,13 @@ export const api = {
       length: Number(response.headers.get('Upload-Length') || 0)
     };
   },
-  uploadChunk: (id: string, offset: number, chunk: Blob) =>
-    request<void>('/api/uploads/' + encodeURIComponent(id), {
-      method: 'PATCH',
-      body: chunk,
-      headers: {
-        'Content-Type': 'application/offset+octet-stream',
-        'Upload-Offset': String(offset)
-      },
-      csrf: true
-    }),
+  uploadChunk: (
+    id: string,
+    offset: number,
+    chunk: Blob,
+    onProgress?: (loadedBytes: number, totalBytes: number) => void,
+    signal?: AbortSignal
+  ) => uploadChunkWithProgress(id, offset, chunk, onProgress, signal),
   finalizeUpload: (id: string) =>
     request<{ file_id: string; status: string }>('/api/uploads/' + encodeURIComponent(id) + '/finalize', {
       method: 'POST',
