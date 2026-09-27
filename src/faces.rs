@@ -26,6 +26,7 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/faces", get(list_faces))
         .route("/api/faces/{cluster_id}", patch(rename_face))
+        .route("/api/faces/{cluster_id}/separate", post(separate_faces))
         .route("/api/faces/merge", post(merge_faces))
         .route("/api/admin/faces", get(list_admin_faces))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -388,6 +389,103 @@ async fn merge_faces(
         merged_clusters,
         moved_faces,
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SeparateRequest {
+    file_ids: Vec<Uuid>,
+}
+
+async fn separate_faces(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Path(cluster_id): Path<Uuid>,
+    Json(request): Json<SeparateRequest>,
+) -> Result<Response, FaceError> {
+    if !require_csrf(&headers, &user, state.auth_settings) {
+        return Err(FaceError::Csrf);
+    }
+    if request.file_ids.is_empty() || request.file_ids.len() > MAX_MERGE_SOURCES {
+        return Err(FaceError::BadRequest);
+    }
+    let mut file_ids = request.file_ids.clone();
+    file_ids.sort_unstable();
+    file_ids.dedup();
+    if file_ids.len() != request.file_ids.len() {
+        return Err(FaceError::BadRequest);
+    }
+
+    let mut transaction = state.pool.begin().await.map_err(FaceError::Database)?;
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM face_clusters WHERE id = $1 AND owner_id = $2)",
+    )
+    .bind(cluster_id)
+    .bind(user.id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+    if !owned {
+        return Err(FaceError::NotFound);
+    }
+    let new_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO face_clusters (id, owner_id) VALUES ($1, $2)")
+        .bind(new_id)
+        .bind(user.id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(FaceError::Database)?;
+    let moved = sqlx::query(
+        "UPDATE face_observations AS observation \
+            SET cluster_id = $1 \
+           FROM file_versions AS version \
+           JOIN drive_entries AS entry ON entry.id = version.file_id \
+          WHERE observation.file_version_id = version.id \
+            AND observation.cluster_id = $2 \
+            AND entry.owner_id = $3 \
+            AND entry.id = ANY($4::UUID[])",
+    )
+    .bind(new_id)
+    .bind(cluster_id)
+    .bind(user.id)
+    .bind(&file_ids)
+    .execute(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?
+    .rows_affected();
+    if moved == 0 {
+        return Err(FaceError::NotFound);
+    }
+    sqlx::query(
+        "DELETE FROM face_clusters AS cluster \
+          WHERE cluster.id = $1 AND cluster.owner_id = $2 AND cluster.label IS NULL \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM face_observations AS observation \
+                 WHERE observation.cluster_id = cluster.id \
+            )",
+    )
+    .bind(cluster_id)
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+    sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+         VALUES ('face_cluster_separated', $1, $2, jsonb_build_object('source_id', $3, 'moved_faces', $4))",
+    )
+    .bind(user.id)
+    .bind(new_id)
+    .bind(cluster_id)
+    .bind(i64::try_from(moved).unwrap_or(i64::MAX))
+    .execute(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+    transaction.commit().await.map_err(FaceError::Database)?;
+    Ok(no_store(Json(serde_json::json!({
+        "clusterId": new_id,
+        "movedFaces": moved,
+    }))))
 }
 
 fn require_owner(user: &AuthenticatedUser) -> Result<(), FaceError> {

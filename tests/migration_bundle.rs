@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 12);
+    assert_eq!(migrator.iter().len(), 13);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -78,4 +78,8 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     assert!(library.contains("CREATE TABLE albums"));
     assert!(library.contains("CREATE TABLE album_items"));
     assert!(library.contains("resource_type = 'album'"));
+
+    let photos_folder = include_str!("../migrations/0013_system_photos_folder.sql");
+    assert!(photos_folder.contains("system_role"));
+    assert!(photos_folder.contains("drive_entries_one_system_role"));
 }

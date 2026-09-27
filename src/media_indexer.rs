@@ -18,7 +18,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    face_indexer::{self, DEFAULT_MODEL_PATH, FaceDetectionError},
+    face_indexer::{self, DEFAULT_MODEL_PATH, FACE_INDEX_RECIPE_VERSION, FaceDetectionError},
     storage::{LocalStorage, PreviewStorage, StorageError},
 };
 
@@ -35,7 +35,8 @@ const VIEWER_MAX_BYTES: usize = 4 * 1024 * 1024;
 const VIDEO_POSTER_MAX_BYTES: usize = 512 * 1024;
 const VIDEO_PREVIEW_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FACE_MATCH_CANDIDATES: i64 = 512;
-const FACE_DESCRIPTOR_DISTANCE_THRESHOLD: u32 = 42;
+const FACE_DESCRIPTOR_DISTANCE_THRESHOLD: u32 = 40;
+const FACE_CLUSTER_MERGE_THRESHOLD: u32 = 28;
 const MAX_FACE_OBSERVATIONS_PER_FILE: usize = 64;
 
 #[derive(Debug, Error)]
@@ -68,10 +69,11 @@ struct ClaimedJob {
     attempts: i32,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 struct FaceClusterCandidate {
     cluster_id: Uuid,
     descriptor: Vec<u8>,
+    label: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -308,7 +310,7 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
     sqlx::query(
         "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
-         SELECT version.id, 'face_index', 2 \
+         SELECT version.id, 'face_index', $1 \
            FROM file_versions AS version \
            JOIN files AS file ON file.current_version_id = version.id \
            JOIN drive_entries AS entry ON entry.id = file.id \
@@ -327,12 +329,13 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
                 SELECT 1 FROM media_index_jobs AS existing \
                  WHERE existing.file_version_id = version.id \
                    AND existing.task = 'face_index' \
-                   AND existing.recipe_version = 2 \
+                   AND existing.recipe_version = $1 \
             ) \
           ORDER BY version.created_at, version.id \
           LIMIT 100 \
          ON CONFLICT (file_version_id, task, recipe_version) DO NOTHING",
     )
+    .bind(FACE_INDEX_RECIPE_VERSION)
     .execute(pool)
     .await?;
     Ok(())
@@ -711,7 +714,7 @@ async fn process_face_job(
     .await
     .map_err(|_| retryable("face_index_unavailable"))?;
     let mut candidates = sqlx::query_as::<_, FaceClusterCandidate>(
-        "SELECT representative.cluster_id, representative.descriptor \
+        "SELECT representative.cluster_id, representative.descriptor, cluster.label \
            FROM ( \
                SELECT observation.cluster_id, observation.descriptor, \
                       row_number() OVER ( \
@@ -726,14 +729,16 @@ async fn process_face_job(
                   AND entry.deleted_at IS NULL \
                   AND observation.cluster_id IS NOT NULL \
                   AND observation.descriptor IS NOT NULL \
+                  AND observation.recipe_version = $3 \
            ) AS representative \
            JOIN face_clusters AS cluster ON cluster.id = representative.cluster_id \
-          WHERE representative.representative_rank <= 3 \
+          WHERE representative.representative_rank <= 5 \
           ORDER BY cluster.updated_at DESC, representative.cluster_id, representative.representative_rank \
           LIMIT $2",
     )
     .bind(job.owner_id)
     .bind(MAX_FACE_MATCH_CANDIDATES)
+    .bind(job.recipe_version)
     .fetch_all(&mut *transaction)
     .await
     .map_err(|_| retryable("face_index_unavailable"))?;
@@ -770,6 +775,7 @@ async fn process_face_job(
             candidates.push(FaceClusterCandidate {
                 cluster_id,
                 descriptor: face.descriptor.clone(),
+                label: None,
             });
             cluster_id
         };
@@ -798,11 +804,119 @@ async fn process_face_job(
             .await
             .map_err(|_| retryable("face_index_unavailable"))?;
     }
+    for (from_id, into_id) in cluster_merge_plan(&candidates) {
+        sqlx::query("UPDATE face_observations SET cluster_id = $1 WHERE cluster_id = $2")
+            .bind(into_id)
+            .bind(from_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| retryable("face_index_unavailable"))?;
+        sqlx::query("DELETE FROM face_clusters WHERE id = $1 AND label IS NULL")
+            .bind(from_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| retryable("face_index_unavailable"))?;
+        sqlx::query("UPDATE face_clusters SET updated_at = now() WHERE id = $1")
+            .bind(into_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| retryable("face_index_unavailable"))?;
+    }
     transaction
         .commit()
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
     Ok(())
+}
+
+fn cluster_merge_plan(candidates: &[FaceClusterCandidate]) -> Vec<(Uuid, Uuid)> {
+    struct Group {
+        id: Uuid,
+        label: Option<String>,
+        descriptors: Vec<Vec<u8>>,
+    }
+    let mut groups = Vec::<Group>::new();
+    for candidate in candidates {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.id == candidate.cluster_id)
+        {
+            group.descriptors.push(candidate.descriptor.clone());
+            if group.label.is_none() {
+                group.label.clone_from(&candidate.label);
+            }
+        } else {
+            groups.push(Group {
+                id: candidate.cluster_id,
+                label: candidate.label.clone(),
+                descriptors: vec![candidate.descriptor.clone()],
+            });
+        }
+    }
+    groups.sort_by_key(|group| group.id);
+    let mut parent: Vec<usize> = (0..groups.len()).collect();
+    fn find(parent: &mut [usize], mut index: usize) -> usize {
+        while parent[index] != index {
+            parent[index] = parent[parent[index]];
+            index = parent[index];
+        }
+        index
+    }
+    for left in 0..groups.len() {
+        for right in (left + 1)..groups.len() {
+            let left_root = find(&mut parent, left);
+            let right_root = find(&mut parent, right);
+            if left_root == right_root {
+                continue;
+            }
+            if groups[left_root].label.is_some() && groups[right_root].label.is_some() {
+                continue;
+            }
+            let Some(distance) = closest_descriptor_distance(
+                &groups[left_root].descriptors,
+                &groups[right_root].descriptors,
+            ) else {
+                continue;
+            };
+            if distance > FACE_CLUSTER_MERGE_THRESHOLD {
+                continue;
+            }
+            let (root, child) = match (
+                groups[left_root].label.is_some(),
+                groups[right_root].label.is_some(),
+            ) {
+                (true, false) => (left_root, right_root),
+                (false, true) => (right_root, left_root),
+                _ if groups[left_root].id <= groups[right_root].id => (left_root, right_root),
+                _ => (right_root, left_root),
+            };
+            let extra = groups[child].descriptors.clone();
+            groups[root].descriptors.extend(extra);
+            parent[child] = root;
+        }
+    }
+    let mut plan = Vec::new();
+    for index in 0..groups.len() {
+        let root = find(&mut parent, index);
+        if root != index {
+            plan.push((groups[index].id, groups[root].id));
+        }
+    }
+    plan.sort_by_key(|(from_id, _)| *from_id);
+    plan
+}
+
+fn closest_descriptor_distance(left: &[Vec<u8>], right: &[Vec<u8>]) -> Option<u32> {
+    let mut best = None;
+    for left in left {
+        for right in right {
+            let Some(distance) = descriptor_distance(left, right) else {
+                continue;
+            };
+            best = Some(best.map_or(distance, |current: u32| current.min(distance)));
+        }
+    }
+    best
 }
 
 fn matching_cluster(descriptor: &[u8], candidates: &[FaceClusterCandidate]) -> Option<Uuid> {
@@ -1315,10 +1429,21 @@ async fn transcode_video_preview(input: &Path, output: &Path) -> Result<(), Tool
 }
 
 fn face_seek_points(duration: Option<f64>) -> Vec<f64> {
-    let Some(duration) = duration.filter(|value| value.is_finite() && *value > 2.0) else {
+    let Some(duration) = duration.filter(|value| value.is_finite() && *value > 1.0) else {
         return vec![0.0];
     };
-    vec![0.0, duration * 0.5, duration * 0.9]
+    if duration <= 4.0 {
+        return vec![0.0, duration * 0.5];
+    }
+    // Sample across the clip so a person who is absent from the opening frame
+    // is still observed, while staying within a small fixed frame budget.
+    vec![
+        duration * 0.08,
+        duration * 0.28,
+        duration * 0.5,
+        duration * 0.72,
+        duration * 0.92,
+    ]
 }
 
 async fn video_face_seek_points(input: &Path) -> Vec<f64> {
@@ -1777,8 +1902,8 @@ fn retryable(code: &'static str) -> JobFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        FaceClusterCandidate, backfill_batch, claim_one, descriptor_distance, face_seek_points,
-        matches_magic, matching_cluster, record_failure, retryable, run_once,
+        FaceClusterCandidate, backfill_batch, claim_one, cluster_merge_plan, descriptor_distance,
+        face_seek_points, matches_magic, matching_cluster, record_failure, retryable, run_once,
         supports_ffmpeg_image_mime, supports_image_mime, supports_video_mime,
         validate_metadata_free_webp,
     };
@@ -1820,13 +1945,14 @@ mod tests {
     #[test]
     fn video_face_sampling_is_bounded_and_falls_back_to_first_frame() {
         assert_eq!(face_seek_points(None), vec![0.0]);
-        assert_eq!(face_seek_points(Some(2.0)), vec![0.0]);
+        assert_eq!(face_seek_points(Some(0.4)), vec![0.0]);
+        let brief = face_seek_points(Some(3.0));
+        assert_eq!(brief.len(), 2);
+        assert_eq!(brief[0], 0.0);
         let points = face_seek_points(Some(120.0));
-        assert_eq!(points.len(), 3);
-        assert_eq!(points[0], 0.0);
-        assert_eq!(points[1], 60.0);
-        assert_eq!(points[2], 108.0);
-        assert!(points.iter().all(|point| *point <= 120.0));
+        assert_eq!(points.len(), 5);
+        assert!(points.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(points.iter().all(|point| (0.0..=120.0).contains(point)));
     }
 
     #[test]
@@ -1840,14 +1966,17 @@ mod tests {
             FaceClusterCandidate {
                 cluster_id: second_id,
                 descriptor: near.clone(),
+                label: None,
             },
             FaceClusterCandidate {
                 cluster_id: first_id,
                 descriptor: near,
+                label: None,
             },
             FaceClusterCandidate {
                 cluster_id: Uuid::from_u128(3),
                 descriptor: far,
+                label: None,
             },
         ];
         assert_eq!(
@@ -1867,18 +1996,69 @@ mod tests {
             FaceClusterCandidate {
                 cluster_id: first_id,
                 descriptor: vec![220_u8; crate::face_indexer::DESCRIPTOR_LEN],
+                label: None,
             },
             FaceClusterCandidate {
                 cluster_id: first_id,
                 descriptor: vec![132_u8; crate::face_indexer::DESCRIPTOR_LEN],
+                label: None,
             },
             FaceClusterCandidate {
                 cluster_id: second_id,
                 descriptor: vec![160_u8; crate::face_indexer::DESCRIPTOR_LEN],
+                label: None,
             },
         ];
 
         assert_eq!(matching_cluster(&descriptor, &candidates), Some(first_id));
+    }
+
+    #[test]
+    fn unlabeled_near_duplicate_clusters_merge_and_named_clusters_stay_apart() {
+        let unlabeled_a = Uuid::from_u128(1);
+        let unlabeled_b = Uuid::from_u128(2);
+        let ada = Uuid::from_u128(3);
+        let bea = Uuid::from_u128(4);
+        let matching_unlabeled = Uuid::from_u128(6);
+        let same = vec![10_u8; crate::face_indexer::DESCRIPTOR_LEN];
+        let named = vec![80_u8; crate::face_indexer::DESCRIPTOR_LEN];
+        let far = vec![240_u8; crate::face_indexer::DESCRIPTOR_LEN];
+        let plan = cluster_merge_plan(&[
+            FaceClusterCandidate {
+                cluster_id: unlabeled_b,
+                descriptor: same.clone(),
+                label: None,
+            },
+            FaceClusterCandidate {
+                cluster_id: unlabeled_a,
+                descriptor: same,
+                label: None,
+            },
+            FaceClusterCandidate {
+                cluster_id: ada,
+                descriptor: named.clone(),
+                label: Some("Ada".to_owned()),
+            },
+            FaceClusterCandidate {
+                cluster_id: bea,
+                descriptor: named.clone(),
+                label: Some("Bea".to_owned()),
+            },
+            FaceClusterCandidate {
+                cluster_id: Uuid::from_u128(5),
+                descriptor: far,
+                label: None,
+            },
+            FaceClusterCandidate {
+                cluster_id: matching_unlabeled,
+                descriptor: named,
+                label: None,
+            },
+        ]);
+        assert_eq!(
+            plan,
+            vec![(unlabeled_b, unlabeled_a), (matching_unlabeled, ada),]
+        );
     }
 
     #[test]

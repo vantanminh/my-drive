@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
-  Activity, Check, ChevronDown, ChevronRight, CircleUserRound, Cloud, CloudUpload, Download, Eye, File, FileImage, Film,
-  FileSpreadsheet, FileText, Folder, FolderPlus, Gauge, HardDrive, Images, Info, LayoutGrid, List, LockKeyhole, LogOut, MoreHorizontal,
-  Pause, Play, Presentation, RotateCcw, ScanFace, Search, Share2, ShieldCheck, SlidersHorizontal, Trash2, Upload, Users, X
+  Activity, Check, ChevronDown, ChevronRight, CircleUserRound, ClipboardPaste, Cloud, CloudUpload, Copy, Download, Eye, File, FileImage, Film,
+  FileSpreadsheet, FileText, Folder, FolderInput, FolderPlus, Gauge, HardDrive, Images, Info, LayoutGrid, List, LockKeyhole, LogOut, MoreHorizontal,
+  Pause, Play, Presentation, RotateCcw, ScanFace, Scissors, Search, Share2, ShieldCheck, SlidersHorizontal, Trash2, Upload, Users, X
 } from 'lucide-react';
 import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import { buildDrivePath, clearSearchParam, emptyFilters, hasActiveFilters, navigateTo, parseDriveRoute, useBrowserHref, type DriveFilters, type DriveOrder, type DrivePanel, type DriveSort } from '../route';
+import { nextSelection, selectionGesture } from '../selection';
 import type { Entry, EntryDetails, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
+import { AnchoredMenu, ContextMenu, type MenuItem } from './ContextMenu';
+import DestinationDialog from './DestinationDialog';
 import FilePreviewer from './FilePreviewer';
 import { isFilePreviewable, mediaKindFor } from './MediaViewer';
 import AccountManagementPanel from './AccountManagementPanel';
@@ -28,8 +31,11 @@ type Breadcrumb = { id: string; name: string };
 type Modal =
   | { kind: 'new-folder' }
   | { kind: 'rename'; entry: Entry }
-  | { kind: 'move'; entry: Entry }
+  | { kind: 'destination'; action: 'move' | 'copy'; ids: string[] }
   | null;
+
+type ShareSubject = { id: string; kind: 'file' | 'folder' | 'album'; name: string };
+type DriveClipboard = { mode: 'copy' | 'cut'; ids: string[] };
 
 type SavedUpload = {
   schema: 1;
@@ -502,68 +508,29 @@ function MediaIndexPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function EntryMenu({
-  entry,
-  section,
-  currentFolderId,
-  onOpen,
-  onPreview,
-  onDownload,
-  onShare,
-  onRename,
-  onMove,
-  onMoveHere,
-  onMoveToRoot,
-  onTrash
-}: {
-  entry: Entry;
-  section: Section;
-  currentFolderId: string | null;
-  onOpen: () => void;
-  onPreview: () => void;
-  onDownload: () => void;
-  onShare: () => void;
-  onRename: () => void;
-  onMove: () => void;
-  onMoveHere: () => void;
-  onMoveToRoot: () => void;
-  onTrash: () => void;
-}) {
-  function closeMenu(event: MouseEvent<HTMLButtonElement>) {
-    event.currentTarget.closest('details')?.removeAttribute('open');
-  }
-
-  if (section === 'trash') {
-    return <span className="trash-hint">In trash</span>;
-  }
-
+function EntryMenu({ label, items }: { label: string; items: MenuItem[] }) {
   return (
-    <details className="row-menu">
-      <summary className="icon-button" aria-label={'Actions for ' + entry.name}>
-        <MoreHorizontal size={18} />
-      </summary>
-      <div className="menu-popover">
-        {entry.kind === 'folder' ? (
-          <button onClick={(event) => { closeMenu(event); onOpen(); }}><Folder size={15} /> Open folder</button>
-        ) : (
-          <>
-            {isFilePreviewable(entry) && <button onClick={(event) => { closeMenu(event); onPreview(); }}><Eye size={15} /> Preview</button>}
-            <button onClick={(event) => { closeMenu(event); onDownload(); }}><Download size={15} /> Download</button>
-          </>
-        )}
-        <button onClick={(event) => { closeMenu(event); onShare(); }}><Share2 size={15} /> Create share link</button>
-        <div className="menu-divider" />
-        <button onClick={(event) => { closeMenu(event); onRename(); }}>Rename</button>
-        <button onClick={(event) => { closeMenu(event); onMove(); }}>Move to…</button>
-        <button disabled={!currentFolderId || entry.parent_id === currentFolderId} onClick={(event) => { closeMenu(event); onMoveHere(); }}>
-          Move to this folder
-        </button>
-        <button disabled={entry.parent_id === null} onClick={(event) => { closeMenu(event); onMoveToRoot(); }}>Move to My Drive</button>
-        <div className="menu-divider" />
-        <button className="menu-danger" onClick={(event) => { closeMenu(event); onTrash(); }}><Trash2 size={15} /> Move to trash</button>
-      </div>
-    </details>
+    <AnchoredMenu label={label} items={items}>
+      <MoreHorizontal size={18} />
+    </AnchoredMenu>
   );
+}
+
+function isSystemFolder(entry: Entry): boolean {
+  return entry.kind === 'folder' && entry.system_role === 'photos';
+}
+
+function downloadFiles(ids: string[]) {
+  ids.forEach((id, index) => {
+    window.setTimeout(() => {
+      const link = document.createElement('a');
+      link.href = downloadUrl(id);
+      link.rel = 'noopener';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }, index * 220);
+  });
 }
 
 export default function DriveApp({ user, onLoggedOut }: Props) {
@@ -600,7 +567,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [notice, setNotice] = useState('');
   const [refresh, setRefresh] = useState(0);
   const [modal, setModal] = useState<Modal>(null);
-  const [shareTarget, setShareTarget] = useState<Entry | null>(null);
+  const [shareTargets, setShareTargets] = useState<ShareSubject[] | null>(null);
   const [viewer, setViewer] = useState<Entry | null>(null);
   const accountAdminOpen = panel === 'accounts';
   const faceAdminOpen = panel === 'faces';
@@ -658,6 +625,11 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [viewMode, setViewMode] = useState<'list' | 'grid'>(() => window.localStorage.getItem('my-drive-view') === 'grid' ? 'grid' : 'list');
   const [filtersOpen, setFiltersOpen] = useState(() => hasActiveFilters(route.filters));
   const [trashSelection, setTrashSelection] = useState<string[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [clipboard, setClipboard] = useState<DriveClipboard | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; ids: string[] } | null>(null);
+  const selectionAnchor = useRef<string | null>(null);
   const [detailsId, setDetailsId] = useState<string | null>(null);
   const [details, setDetails] = useState<EntryDetails | null>(null);
 
@@ -793,16 +765,50 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         searchInputRef.current?.focus();
       }
       if (event.key === 'Escape') {
+        if (contextMenu) {
+          setContextMenu(null);
+          return;
+        }
         setModal(null);
-        setShareTarget(null);
+        setShareTargets(null);
         if (route.fileId) clearSearchParam('file');
         else setViewer(null);
         document.querySelectorAll('details[open]').forEach((element) => element.removeAttribute('open'));
+        return;
+      }
+      const target = event.target;
+      const typing = target instanceof HTMLElement && !!target.closest('input, textarea, select, [contenteditable="true"]');
+      if (typing || section !== 'drive' || modal || shareTargets || viewer) return;
+      const key = event.key.toLowerCase();
+      const command = event.metaKey || event.ctrlKey;
+      if (command && key === 'a') {
+        event.preventDefault();
+        setSelectedIds(entries.map((entry) => entry.id));
+        setSelectionMode(true);
+      } else if (command && key === 'c' && selectedIds.length) {
+        event.preventDefault();
+        setClipboard({ mode: 'copy', ids: selectedIds });
+        setNotice(selectedIds.length === 1 ? 'Copied 1 item.' : `Copied ${selectedIds.length} items.`);
+      } else if (command && key === 'x' && selectedIds.length) {
+        event.preventDefault();
+        const ids = operableIds(selectedIds);
+        if (!ids.length) {
+          setError('The Photos folder cannot be moved.');
+          return;
+        }
+        setClipboard({ mode: 'cut', ids });
+        setNotice(ids.length === 1 ? 'Ready to move 1 item.' : `Ready to move ${ids.length} items.`);
+      } else if (command && key === 'v' && clipboard) {
+        event.preventDefault();
+        void pasteClipboard();
+      } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIds.length) {
+        event.preventDefault();
+        void trashEntries(operableIds(selectedIds));
       }
     }
     window.addEventListener('keydown', onKeyboardShortcut);
     return () => window.removeEventListener('keydown', onKeyboardShortcut);
-  }, [route.fileId, section]);
+  }, [clipboard, contextMenu, currentFolderId, entries, modal, route.fileId, section, selectedIds, shareTargets, viewer]);
 
   useEffect(() => {
     if (section === 'photos' || section === 'storage') {
@@ -887,23 +893,6 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     };
   }, [detailsId, section]);
 
-  const folderOptions = useMemo(() => {
-    const options: Array<{ id: string | null; name: string }> = [{ id: null, name: 'My Drive' }];
-    breadcrumbs.forEach((crumb, index) => options.push({
-      id: crumb.id,
-      name: ['My Drive', ...breadcrumbs.slice(0, index + 1).map((item) => item.name)].join(' / ')
-    }));
-    entries.filter((entry) => entry.kind === 'folder').forEach((entry) => {
-      if (!options.some((option) => option.id === entry.id)) {
-        options.push({
-          id: entry.id,
-          name: ['My Drive', ...breadcrumbs.map((item) => item.name), entry.name].join(' / ')
-        });
-      }
-    });
-    return options;
-  }, [breadcrumbs, entries]);
-
   function patchFilters(patch: Partial<DriveFilters>) {
     showDrive({ filters: { ...route.filters, ...patch }, fileId: null }, 'replace');
   }
@@ -985,6 +974,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   }
 
   async function moveTo(entry: Entry, targetId: string | null) {
+    if (isSystemFolder(entry)) {
+      setError('The Photos folder cannot be moved.');
+      return false;
+    }
     try {
       if (entry.kind === 'folder' && targetId) {
         let parent = await api.getEntry(targetId);
@@ -1005,6 +998,107 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       setError(friendlyError(cause));
       return false;
     }
+  }
+
+  function operableIds(ids: string[]): string[] {
+    const blocked = new Set(entries.filter(isSystemFolder).map((entry) => entry.id));
+    return ids.filter((id) => !blocked.has(id));
+  }
+
+  function chooseEntries(id: string, gesture: 'toggle' | 'range' | 'replace') {
+    const result = nextSelection(selectedIds, entries.map((entry) => entry.id), id, gesture, selectionAnchor.current);
+    selectionAnchor.current = result.anchor;
+    setSelectedIds(result.ids);
+    if (result.ids.length > 0) setSelectionMode(true);
+  }
+
+  function shareSubjects(ids: string[]): ShareSubject[] {
+    return entries.filter((entry) => ids.includes(entry.id)).map((entry) => ({
+      id: entry.id,
+      kind: entry.kind,
+      name: entry.name
+    }));
+  }
+
+  async function runBatch(action: 'move' | 'copy' | 'trash', ids: string[], parentId?: string | null) {
+    const allowed = action === 'trash' || action === 'move' || action === 'copy' ? operableIds(ids) : ids;
+    if (allowed.length === 0) {
+      setError('The Photos folder cannot be renamed, moved, copied, or deleted.');
+      return;
+    }
+    const skipped = ids.length - allowed.length;
+    const result = await api.batchEntries({
+      action,
+      ids: allowed,
+      ...(action === 'trash' ? {} : { parent_id: parentId ?? null })
+    });
+    setRefresh((value) => value + 1);
+    setSelectedIds(action === 'copy' && (parentId ?? null) === currentFolderId ? result.entry_ids : []);
+    if (action === 'move') setClipboard((current) => current?.mode === 'cut' ? null : current);
+    const verb = action === 'copy' ? 'Copied' : action === 'move' ? 'Moved' : 'Moved to trash';
+    setNotice(`${verb} ${result.count} item${result.count === 1 ? '' : 's'}.` + (skipped ? ' The Photos folder was left in place.' : ''));
+    setModal(null);
+    setContextMenu(null);
+  }
+
+  async function pasteClipboard() {
+    if (!clipboard) return;
+    try {
+      await runBatch(clipboard.mode === 'cut' ? 'move' : 'copy', clipboard.ids, currentFolderId);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }
+
+  async function trashEntries(ids: string[]) {
+    const allowed = operableIds(ids);
+    if (allowed.length === 0) {
+      setError('The Photos folder cannot be deleted.');
+      return;
+    }
+    const count = allowed.length;
+    if (!window.confirm(count === 1 ? 'Move this item to trash?' : `Move ${count} items to trash?`)) return;
+    try {
+      await runBatch('trash', allowed);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }
+
+  function entryMenuItems(ids: string[]): MenuItem[] {
+    const chosen = entries.filter((entry) => ids.includes(entry.id));
+    const single = chosen.length === 1 ? chosen[0] : null;
+    const locked = chosen.length > 0 && chosen.every(isSystemFolder);
+    const files = chosen.filter((entry) => entry.kind === 'file');
+    return [
+      { id: 'open', label: single?.kind === 'folder' ? 'Open' : 'Open', hidden: !single, icon: single?.kind === 'folder' ? <Folder size={15} /> : <Eye size={15} />, onSelect: () => {
+        if (!single) return;
+        if (single.kind === 'folder') void openFolder(single);
+        else if (isFilePreviewable(single)) openPreview(single);
+        else window.location.assign(downloadUrl(single.id));
+      } },
+      { id: 'preview', label: 'Preview', hidden: !single || single.kind !== 'file' || !isFilePreviewable(single), icon: <Eye size={15} />, onSelect: () => single && openPreview(single) },
+      { id: 'download', label: files.length > 1 ? 'Download' : 'Download', hidden: files.length === 0, icon: <Download size={15} />, onSelect: () => downloadFiles(files.map((entry) => entry.id)) },
+      { id: 'share', label: 'Share', hidden: chosen.length === 0, icon: <Share2 size={15} />, onSelect: () => setShareTargets(shareSubjects(ids)) },
+      { id: 'details', label: 'Details', hidden: !single, icon: <Info size={15} />, onSelect: () => single && setDetailsId(single.id) },
+      { id: 'rename', label: 'Rename', hidden: !single, disabled: !single || isSystemFolder(single), onSelect: () => single && setModal({ kind: 'rename', entry: single }) },
+      { id: 'move', label: 'Move', disabled: locked, icon: <FolderInput size={15} />, onSelect: () => setModal({ kind: 'destination', action: 'move', ids: operableIds(ids) }) },
+      { id: 'copy-to', label: 'Copy to…', disabled: locked, icon: <Copy size={15} />, onSelect: () => setModal({ kind: 'destination', action: 'copy', ids: operableIds(ids) }) },
+      { id: 'cut', label: 'Cut', disabled: locked, icon: <Scissors size={15} />, onSelect: () => { const next = operableIds(ids); setClipboard({ mode: 'cut', ids: next }); setNotice(next.length === 1 ? 'Ready to move 1 item.' : `Ready to move ${next.length} items.`); } },
+      { id: 'copy', label: 'Copy', disabled: locked, icon: <Copy size={15} />, onSelect: () => { const next = operableIds(ids); setClipboard({ mode: 'copy', ids: next }); setNotice(next.length === 1 ? 'Copied 1 item.' : `Copied ${next.length} items.`); } },
+      { id: 'move-here', label: 'Move to this folder', hidden: !single || !currentFolderId || single.parent_id === currentFolderId, disabled: !single || isSystemFolder(single), onSelect: () => single && void moveTo(single, currentFolderId) },
+      { id: 'move-root', label: 'Move to My Drive', hidden: !single || single.parent_id === null, disabled: !single || isSystemFolder(single), onSelect: () => single && void moveTo(single, null) },
+      { id: 'trash', label: 'Move to trash', danger: true, disabled: locked, icon: <Trash2 size={15} />, onSelect: () => void trashEntries(ids) }
+    ];
+  }
+
+  function backgroundMenuItems(): MenuItem[] {
+    return [
+      { id: 'upload', label: 'Upload files', icon: <Upload size={15} />, onSelect: pickFiles },
+      { id: 'folder', label: 'New folder', icon: <FolderPlus size={15} />, onSelect: () => setModal({ kind: 'new-folder' }) },
+      { id: 'paste', label: clipboard?.mode === 'cut' ? 'Paste move' : 'Paste', disabled: !clipboard, icon: <ClipboardPaste size={15} />, onSelect: () => void pasteClipboard() },
+      { id: 'select-all', label: 'Select all', disabled: entries.length === 0, onSelect: () => { setSelectedIds(entries.map((entry) => entry.id)); setSelectionMode(true); } }
+    ];
   }
 
   function setUploadProgress(task: UploadTask, bytes: number) {
@@ -1399,6 +1493,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     const data = new FormData(event.currentTarget);
     const name = String(data.get('name') || '').trim();
     if (!name) return;
+    if (isSystemFolder(entry)) {
+      setError('The Photos folder cannot be renamed.');
+      return;
+    }
     try {
       await api.renameEntry(entry.id, name);
       setModal(null);
@@ -1407,29 +1505,6 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       if (renamed.some((crumb, index) => crumb.name !== breadcrumbsRef.current[index]?.name)) {
         showDrive({ folders: renamed }, 'replace');
       }
-      setRefresh((value) => value + 1);
-    } catch (cause) {
-      setError(friendlyError(cause));
-    }
-  }
-
-  async function moveEntry(event: FormEvent<HTMLFormElement>, entry: Entry) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const target = String(data.get('parent_id') || '');
-    if (target === entry.id) {
-      setError('An item cannot be moved into itself.');
-      return;
-    }
-    const moved = await moveTo(entry, target || null);
-    if (moved) setModal(null);
-  }
-
-  async function trashEntry(entry: Entry) {
-    if (!window.confirm('Move “' + entry.name + '” to trash?')) return;
-    try {
-      await api.trashEntry(entry.id);
-      setNotice('Moved to trash');
       setRefresh((value) => value + 1);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -1764,7 +1839,16 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               )}
             </section>
           ) : (
-            <section className="drive-list-section">
+            <section
+              className={'drive-list-section' + (selectedIds.length ? ' selection-active' : '')}
+              onContextMenu={(event) => {
+                if (section !== 'drive') return;
+                const target = event.target;
+                if (target instanceof HTMLElement && target.closest('[data-entry-id], .context-menu, .batch-bar')) return;
+                event.preventDefault();
+                setContextMenu({ x: event.clientX, y: event.clientY, ids: [] });
+              }}
+            >
               <div className="explorer-toolbar">
                 <div className="explorer-toolbar-copy">
                   {section === 'trash' && (
@@ -1778,7 +1862,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                       <span>{trashSelection.length ? `${trashSelection.length} selected` : 'Select'}</span>
                     </label>
                   )}
-                  <span>{searchActive ? 'Search results' : section === 'trash' ? 'Items in trash' : 'Files'}</span>
+                  <span>{searchActive ? 'Search results' : section === 'trash' ? 'Items in trash' : selectedIds.length ? `${selectedIds.length} selected` : 'Files'}</span>
                 </div>
                 <div className="explorer-toolbar-actions">
                   {section === 'drive' && (
@@ -1793,6 +1877,19 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                         <option value="size:asc">Smallest first</option>
                       </select>
                     </label>
+                  )}
+                  {section === 'drive' && (
+                    <button
+                      className={'button button-secondary' + (selectionMode ? ' is-active' : '')}
+                      type="button"
+                      aria-pressed={selectionMode}
+                      onClick={() => {
+                        setSelectionMode((value) => !value);
+                        if (selectionMode) setSelectedIds([]);
+                      }}
+                    >
+                      Select
+                    </button>
                   )}
                   {section === 'drive' && (
                     <button
@@ -1872,44 +1969,75 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     else if (isFilePreviewable(entry)) openPreview(entry);
                     else window.location.assign(downloadUrl(entry.id));
                   };
+                  const activate = (event: MouseEvent<HTMLElement>) => {
+                    if (section !== 'drive') {
+                      open();
+                      return;
+                    }
+                    const gesture = selectionGesture(event, selectionMode);
+                    if (gesture) {
+                      event.preventDefault();
+                      chooseEntries(entry.id, gesture);
+                      return;
+                    }
+                    open();
+                  };
+                  const onRowMenu = (event: MouseEvent<HTMLElement>) => {
+                    if (section !== 'drive') return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const ids = selectedIds.includes(entry.id) ? selectedIds : [entry.id];
+                    if (!selectedIds.includes(entry.id)) {
+                      setSelectedIds([entry.id]);
+                      selectionAnchor.current = entry.id;
+                    }
+                    setContextMenu({ x: event.clientX, y: event.clientY, ids });
+                  };
+                  const menuIds = selectedIds.includes(entry.id) && selectedIds.length > 1 ? selectedIds : [entry.id];
+                  const selected = section === 'trash' ? trashSelection.includes(entry.id) : selectedIds.includes(entry.id);
+                  const cut = clipboard?.mode === 'cut' && clipboard.ids.includes(entry.id);
                   const actions = section === 'trash' ? (
                     <button className="icon-button restore-button" onClick={() => void restoreEntry(entry)} aria-label={'Restore ' + entry.name} title="Restore"><RotateCcw size={17} /></button>
                   ) : (
                     <>
                       <button className="icon-button" onClick={() => setDetailsId(entry.id)} aria-label={'Details for ' + entry.name} title="Details"><Info size={16} /></button>
-                      <EntryMenu
-                        entry={entry}
-                        section={section}
-                        currentFolderId={currentFolderId}
-                        onOpen={() => void openFolder(entry)}
-                        onPreview={() => openPreview(entry)}
-                        onDownload={() => window.location.assign(downloadUrl(entry.id))}
-                        onShare={() => setShareTarget(entry)}
-                        onRename={() => setModal({ kind: 'rename', entry })}
-                        onMove={() => setModal({ kind: 'move', entry })}
-                        onMoveHere={() => void moveTo(entry, currentFolderId)}
-                        onMoveToRoot={() => void moveTo(entry, null)}
-                        onTrash={() => void trashEntry(entry)}
-                      />
+                      <EntryMenu label={'Actions for ' + entry.name} items={entryMenuItems(menuIds)} />
                     </>
+                  );
+                  const checkbox = (
+                    <label className="entry-select" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => {
+                          if (section === 'trash') {
+                            setTrashSelection((current) => current.includes(entry.id) ? current.filter((id) => id !== entry.id) : [...current, entry.id]);
+                          } else {
+                            chooseEntries(entry.id, 'toggle');
+                          }
+                        }}
+                        aria-label={'Select ' + entry.name}
+                      />
+                    </label>
                   );
                   if (viewMode === 'grid') {
                     return (
-                      <article className={'entry-card' + (trashSelection.includes(entry.id) ? ' selected' : '')} key={entry.id}>
-                        <button className="entry-card-preview" onClick={open} disabled={section === 'trash'}>
+                      <article
+                        className={'entry-card' + (selected ? ' selected' : '') + (cut ? ' is-cut' : '')}
+                        key={entry.id}
+                        data-entry-id={entry.id}
+                        onContextMenu={onRowMenu}
+                      >
+                        <button className="entry-card-preview" onClick={activate} disabled={section === 'trash'}>
                           <EntryVisual entry={entry} showThumbnail={section !== 'trash'} />
                           {entry.kind === 'file' && mediaKindFor(entry) === 'video' && <span className="photo-badge">Video</span>}
+                          {checkbox}
                         </button>
                         <div className="entry-card-meta">
-                          {section === 'trash' && (
-                            <input
-                              type="checkbox"
-                              checked={trashSelection.includes(entry.id)}
-                              onChange={() => setTrashSelection((current) => current.includes(entry.id) ? current.filter((id) => id !== entry.id) : [...current, entry.id])}
-                              aria-label={'Select ' + entry.name}
-                            />
-                          )}
-                          <button className="entry-name" onClick={open} disabled={section === 'trash'}>{entry.name}</button>
+                          <button className="entry-name" onClick={activate} disabled={section === 'trash'}>
+                            {entry.name}
+                            {isSystemFolder(entry) && <span className="system-badge">Photos</span>}
+                          </button>
                           <span>{entrySize(entry)}{entry.kind === 'folder' && entry.folder_file_count != null ? ` · ${entry.folder_file_count} files` : ''}</span>
                           <div className="entry-card-actions">{actions}</div>
                         </div>
@@ -1917,24 +2045,17 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     );
                   }
                   return (
-                  <div className="table-row drive-grid" key={entry.id}>
+                  <div className={'table-row drive-grid' + (selected ? ' selected' : '') + (cut ? ' is-cut' : '')} key={entry.id} data-entry-id={entry.id} onContextMenu={onRowMenu}>
                     <div className="entry-main">
-                      {section === 'trash' && (
-                        <input
-                          type="checkbox"
-                          checked={trashSelection.includes(entry.id)}
-                          onChange={() => setTrashSelection((current) => current.includes(entry.id) ? current.filter((id) => id !== entry.id) : [...current, entry.id])}
-                          aria-label={'Select ' + entry.name}
-                        />
-                      )}
+                      {checkbox}
                       <EntryVisual entry={entry} showThumbnail={section !== 'trash'} />
                       <div className="entry-name-wrap">
                         {entry.kind === 'folder' && section !== 'trash' ? (
-                          <button className="entry-name" onClick={() => void openFolder(entry)}>{entry.name}</button>
+                          <button className="entry-name" onClick={activate}>{entry.name}{isSystemFolder(entry) && <span className="system-badge">Photos</span>}</button>
                         ) : entry.kind === 'file' && section !== 'trash' ? (
                           isFilePreviewable(entry) ? (
-                            <button className="entry-name" onClick={() => openPreview(entry)}>{entry.name}</button>
-                          ) : <a className="entry-name" href={downloadUrl(entry.id)}>{entry.name}</a>
+                            <button className="entry-name" onClick={activate}>{entry.name}</button>
+                          ) : <a className="entry-name" href={downloadUrl(entry.id)} onClick={(event) => { const gesture = selectionGesture(event, selectionMode); if (gesture) { event.preventDefault(); chooseEntries(entry.id, gesture); } }}>{entry.name}</a>
                         ) : (
                           <span className="entry-name">{entry.name}</span>
                         )}
@@ -2077,7 +2198,21 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         </div>
       )}
 
-      {modal && (
+      {modal?.kind === 'destination' && (
+        <DestinationDialog
+          title={modal.action === 'copy' ? 'Copy items' : 'Move items'}
+          description={modal.ids.length === 1 ? 'Choose where this item should go.' : `Choose where these ${modal.ids.length} items should go.`}
+          confirmLabel={modal.action === 'copy' ? 'Copy here' : 'Move here'}
+          startId={currentFolderId}
+          excludeIds={modal.ids}
+          onCancel={() => setModal(null)}
+          onConfirm={async (parentId) => {
+            await runBatch(modal.action, modal.ids, parentId);
+          }}
+        />
+      )}
+
+      {modal && modal.kind !== 'destination' && (
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null); }}>
           <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
             <button className="modal-close icon-button" onClick={() => setModal(null)} aria-label="Close dialog"><X size={18} /></button>
@@ -2107,35 +2242,40 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                 </form>
               </>
             )}
-            {modal.kind === 'move' && (
-              <>
-                <span className="modal-icon"><Folder size={19} /></span>
-                <span className="eyebrow">ORGANIZE FILES</span>
-                <h2 id="modal-title">Move “{modal.entry.name}”</h2>
-                <p className="modal-description">Choose a destination folder.</p>
-                <form className="form-stack" onSubmit={(event) => void moveEntry(event, modal.entry)}>
-                  <label className="field-label" htmlFor="move-parent">Move to</label>
-                  <select id="move-parent" name="parent_id" className="text-input select-input" defaultValue={currentFolderId || ''}>
-                    {folderOptions.filter((option) => option.id !== modal.entry.id).map((option) => (
-                      <option key={option.id || 'root'} value={option.id || ''}>{option.name}</option>
-                    ))}
-                  </select>
-                  <div className="modal-actions"><button type="button" className="button button-secondary" onClick={() => setModal(null)}>Cancel</button><button type="submit" className="button button-primary">Move item</button></div>
-                </form>
-              </>
-            )}
           </section>
         </div>
       )}
 
-      {shareTarget && (
+      {shareTargets && (
         <ShareDialog
-          entry={shareTarget}
-          onClose={() => setShareTarget(null)}
+          entries={shareTargets}
+          onClose={() => setShareTargets(null)}
           onCreated={() => {
             setShareRefresh((value) => value + 1);
-            setNotice('Share link created');
+            setNotice(shareTargets.length > 1 ? 'Share links created' : 'Share link created');
           }}
+        />
+      )}
+
+      {section === 'drive' && selectedIds.length > 0 && (
+        <div className="batch-bar" role="toolbar" aria-label="Selected items">
+          <strong>{selectedIds.length} selected</strong>
+          <button className="batch-action" type="button" onClick={() => downloadFiles(entries.filter((entry) => selectedIds.includes(entry.id) && entry.kind === 'file').map((entry) => entry.id))}><Download size={15} /> Download</button>
+          <button className="batch-action" type="button" onClick={() => setShareTargets(shareSubjects(selectedIds))}><Share2 size={15} /> Share</button>
+          <button className="batch-action" type="button" onClick={() => setModal({ kind: 'destination', action: 'move', ids: operableIds(selectedIds) })}><FolderInput size={15} /> Move</button>
+          <button className="batch-action" type="button" onClick={() => setModal({ kind: 'destination', action: 'copy', ids: operableIds(selectedIds) })}><Copy size={15} /> Copy</button>
+          <button className="batch-action" type="button" onClick={() => { const ids = operableIds(selectedIds); setClipboard({ mode: 'cut', ids }); setNotice(ids.length === 1 ? 'Ready to move 1 item.' : `Ready to move ${ids.length} items.`); }}><Scissors size={15} /> Cut</button>
+          <button className="batch-action batch-danger" type="button" onClick={() => void trashEntries(selectedIds)}><Trash2 size={15} /> Trash</button>
+          <button className="batch-action" type="button" onClick={() => { setSelectedIds([]); setSelectionMode(false); }}>Clear</button>
+        </div>
+      )}
+
+      {contextMenu && section === 'drive' && (
+        <ContextMenu
+          point={{ x: contextMenu.x, y: contextMenu.y }}
+          items={contextMenu.ids.length ? entryMenuItems(contextMenu.ids) : backgroundMenuItems()}
+          label="Item actions"
+          onClose={() => setContextMenu(null)}
         />
       )}
 

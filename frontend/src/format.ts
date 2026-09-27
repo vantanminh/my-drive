@@ -39,6 +39,7 @@ export function friendlyError(error: unknown): string {
     too_many_attempts: 'Too many attempts. Wait a little before trying again.',
     invalid_request: 'Check the information and try again.',
     conflict: 'An item with that name already exists in this location.',
+    protected_entry: 'The Photos folder is managed for you and cannot be renamed, moved, or deleted.',
     not_found: 'This item is no longer available.',
     upload_closed: 'This upload session has expired. Start the upload again.',
     offset_mismatch: 'The upload position changed. It will resume from the server position.',
