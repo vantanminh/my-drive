@@ -34,7 +34,13 @@ class InstallerTests(unittest.TestCase):
                        {'storage': '/srv/my-drive', 'database': '/srv/my-drive/postgres'},
                        {'quota_gib': True}, {'media_indexing': 'false'}, {'owner_password': 'short'},
                        {'unknown': True}, {'host': '192.0.2.1', 'tls': 'acme'},
-                       {'images': {'app': 'foo:bar'}}]:
+                       {'images': {'app': 'foo:bar'}},
+                       {'tls': 'acme-dns', 'cloudflare_api_token': 'short'},
+                       {'tls': 'acme-dns', 'cloudflare_api_token': 'a' * 51},
+                       {'tls': 'acme', 'cloudflare_api_token': 'a' * 40},
+                       {'host': '192.0.2.1', 'tls': 'acme-dns', 'cloudflare_api_token': 'a' * 40},
+                       {'tls': 'acme-dns', 'cloudflare_api_token': 'a' * 40, 'cloudflare_tunnel': True},
+                       {'tls': 'acme-dns', 'cloudflare_api_token': 'a' * 40, 'cloudflare_tunnel_token': 'bad token'}]:
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 self.config(**fields)
 
@@ -111,6 +117,158 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(any('build' in args for args in calls))
             self.assertEqual(sum(args[:2] == ('docker', 'pull') for args in calls), len(images))
             self.assertEqual(config['images']['document-preview'], 'ghcr.io/example/drive-document-preview:v1.2.3')
+
+    def test_quick_connect_dns01_keeps_secrets_out_of_caddy_and_argv(self):
+        token = 'a' * 40
+        new_token = 'cfut_' + ('b' * 32)
+        tunnel = ('A' * 20) + '+/=' + ('B' * 20)
+        for api_token in (token, new_token):
+            config = self.config(tls='acme-dns', cloudflare_api_token=api_token, cloudflare_tunnel_token=tunnel)
+            self.assertTrue(config['cloudflare_tunnel'])
+            caddy = vps.caddyfile(config)
+            self.assertNotIn(api_token, caddy)
+            self.assertNotIn(tunnel, caddy)
+            self.assertIn('dns cloudflare {env.CLOUDFLARE_API_TOKEN}', caddy)
+            self.assertIn('resolvers 1.1.1.1 1.0.0.1', caddy)
+            self.assertIn('email owner@example.com', caddy)
+            self.assertIn('https://drive.example.com', caddy)
+        values = {}
+        vps.persist_quick_connect(config, values)
+        self.assertEqual(values['CLOUDFLARE_API_TOKEN'], new_token)
+        self.assertEqual(values['CLOUDFLARE_TUNNEL_TOKEN'], tunnel)
+        self.assertNotIn('cloudflare_api_token', config)
+        self.assertNotIn('cloudflare_tunnel_token', config)
+        saved = dict(config, owner_password='y' * 16)
+        again = vps.validate(saved)
+        self.assertTrue(again['cloudflare_tunnel'])
+        self.assertNotIn('cloudflare_api_token', again)
+        self.assertNotIn('cloudflare_tunnel_token', again)
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / '.env'
+            vps.write_env(env_file, values)
+            text = env_file.read_text()
+            self.assertIn(json.dumps(new_token), text)
+            self.assertIn(json.dumps(tunnel), text)
+            self.assertNotIn('\n' + new_token, text)
+        model = {'services': {
+            'app': {'environment': {'COOKIE_SECURE': 'true'}, 'ports': ['3000:3000'],
+                    'networks': ['default', 'preview-private']},
+            'db': {'environment': {}},
+            'document-preview': {'networks': ['preview-private']}},
+                 'networks': {'preview-private': {'internal': True}}}
+        actual = vps.make_compose(copy.deepcopy(model), config)
+        proxy = actual['services']['proxy']
+        self.assertEqual(proxy['image'], '${MY_DRIVE_CADDY_IMAGE}')
+        self.assertEqual(proxy['environment']['CLOUDFLARE_API_TOKEN'], '${CLOUDFLARE_API_TOKEN}')
+        self.assertEqual(proxy['ports'], ['80:80', '443:443'])
+        self.assertEqual(actual['services']['app']['environment']['COOKIE_SECURE'], 'true')
+        cloudflared = actual['services']['cloudflared']
+        self.assertEqual(cloudflared['image'], vps.CLOUDFLARED_IMAGE)
+        self.assertEqual(cloudflared['command'], ['tunnel', '--no-autoupdate', 'run'])
+        self.assertNotIn(tunnel, cloudflared['command'])
+        self.assertEqual(cloudflared['environment']['TUNNEL_TOKEN'], '${CLOUDFLARE_TUNNEL_TOKEN}')
+        self.assertEqual(cloudflared['networks'], ['quick-connect'])
+        self.assertIn('quick-connect', actual['services']['app']['networks'])
+        self.assertNotIn('quick-connect', actual['services']['db'].get('networks', []))
+        self.assertNotIn('quick-connect', actual['services']['document-preview']['networks'])
+        self.assertIn('quick-connect', actual['networks'])
+
+        direct = self.config(tls='acme-dns', cloudflare_api_token=token, cloudflare_tunnel_token='')
+        self.assertFalse(direct['cloudflare_tunnel'])
+        self.assertNotIn('cloudflare_tunnel_token', direct)
+        direct_model = vps.make_compose(copy.deepcopy(model), direct)
+        self.assertNotIn('cloudflared', direct_model['services'])
+        self.assertNotIn('quick-connect', direct_model['services']['app']['networks'])
+
+        plain_config = self.config()
+        plain = vps.make_compose(copy.deepcopy(model), plain_config)
+        self.assertEqual(plain['services']['proxy']['image'], 'caddy:2-alpine')
+        self.assertNotIn('environment', plain['services']['proxy'])
+        self.assertNotIn('cloudflared', plain['services'])
+        self.assertNotIn('dns cloudflare', vps.caddyfile(plain_config))
+
+        sealed = {key: value for key, value in direct.items() if key != 'cloudflare_api_token'}
+        sealed['owner_password'] = 'x' * 16
+        revalidated = vps.validate(sealed)
+        self.assertNotIn('cloudflare_api_token', revalidated)
+        self.assertFalse(revalidated['cloudflare_tunnel'])
+        with self.assertRaises(ValueError):
+            vps.persist_quick_connect(revalidated, {})
+
+        images = vps.prebuilt_images(self.config(tls='acme-dns', cloudflare_api_token=token),
+                                     'ghcr.io/example/drive', 'v1.2.3')
+        self.assertEqual(images['caddy'], 'ghcr.io/example/drive-caddy:v1.2.3')
+        self.assertNotIn('caddy', vps.prebuilt_images(self.config(), 'ghcr.io/example/drive', 'v1.2.3'))
+        caddy_ref = 'registry.example.com/caddy:1'
+        accepted = self.config(tls='acme-dns', cloudflare_api_token=token, images={
+            'app': 'registry.example.com/app:1', 'document-preview': 'registry.example.com/doc:1', 'caddy': caddy_ref})
+        self.assertEqual(accepted['images']['caddy'], caddy_ref)
+
+    @unittest.skipUnless(compose_available(), 'Docker Compose CLI is not available')
+    def test_quick_connect_compose_resolves_secrets_without_exposing_the_database(self):
+        token = 'd' * 40
+        tunnel = ('E' * 40) + '+/='
+        config = self.config(tls='acme-dns', cloudflare_api_token=token, cloudflare_tunnel_token=tunnel)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)
+            for directory in ('db', 'storage', 'previews', 'caddy-data', 'caddy-config'):
+                (path / directory).mkdir()
+            values = {
+                'POSTGRES_PASSWORD': 'a' * 64, 'MEDIA_INDEXER_PASSWORD': 'b' * 64,
+                'POSTGRES_DATA_SSD': str(path / 'db'), 'STORAGE_DATA_HDD': str(path / 'storage'),
+                'MEDIA_PREVIEW_DATA_SSD': str(path / 'previews'), 'STORAGE_EXPECTED_DEVICE': '8:1',
+                'MEDIA_PREVIEW_EXPECTED_DEVICE': '8:2', 'BOOTSTRAP_OWNER_PASSWORD': 'p' * 16,
+                'BOOTSTRAP_OWNER_EMAIL': 'owner@example.com', 'MY_DRIVE_IMAGE': 'own-app:test',
+                'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE': 'own-doc:test', 'MY_DRIVE_INDEXER_IMAGE': 'own-index:test',
+                'MY_DRIVE_CADDY_IMAGE': 'own-caddy:test'}
+            vps.persist_quick_connect(config, values)
+            vps.write_env(path / '.env', values)
+            clean = {key: value for key, value in os.environ.items() if key not in values}
+            raw = json.loads(subprocess.check_output([
+                'docker', 'compose', '--env-file', str(path / '.env'), '-f', str(ROOT / 'compose.yaml'),
+                'config', '--format', 'json', '--no-interpolate', '--no-path-resolution'], text=True, env=clean))
+            with patch.object(vps, 'INSTALL', path):
+                generated = vps.make_compose(raw, config)
+            target = path / 'compose.yaml'
+            target.write_text(json.dumps(generated))
+            resolved = json.loads(subprocess.check_output([
+                'docker', 'compose', '--env-file', str(path / '.env'), '-f', str(target),
+                'config', '--format', 'json'], text=True, env=clean))
+        proxy = resolved['services']['proxy']
+        cloudflared = resolved['services']['cloudflared']
+        self.assertEqual(proxy['image'], 'own-caddy:test')
+        self.assertEqual(proxy['environment']['CLOUDFLARE_API_TOKEN'], token)
+        self.assertEqual(cloudflared['environment']['TUNNEL_TOKEN'], tunnel)
+        command = cloudflared['command']
+        if isinstance(command, str):
+            self.assertNotIn(tunnel, command)
+        else:
+            self.assertNotIn(tunnel, command)
+            self.assertNotIn('--token', command)
+        self.assertIn('quick-connect', cloudflared['networks'])
+        self.assertIn('quick-connect', resolved['services']['app']['networks'])
+        self.assertNotIn('quick-connect', resolved['services']['db'].get('networks') or {})
+
+    def test_local_caddy_build_does_not_receive_cloudflare_token(self):
+        token = 'c' * 40
+        config = self.config(tls='acme-dns', cloudflare_api_token=token)
+        calls = []
+
+        def command(*args, **kwargs):
+            calls.append(args)
+            return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            dockerfile = source / 'docker/caddy/Dockerfile'
+            dockerfile.parent.mkdir(parents=True)
+            dockerfile.write_text('FROM scratch\n')
+            with patch.object(vps, 'run', side_effect=command):
+                images = vps.build_images(config, source)
+        self.assertTrue(images['caddy'].startswith('my-drive-local-caddy:'))
+        flat = ' '.join(str(part) for args in calls for part in args)
+        self.assertNotIn(token, flat)
+        self.assertIn(str(dockerfile), flat)
 
     def test_prebuilt_reference_validation(self):
         for prefix, tag in [('https://registry/drive', 'latest'), ('ghcr.io/example/drive', 'tag;command')]:

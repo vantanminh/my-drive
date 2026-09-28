@@ -88,6 +88,15 @@ jobs:
           push: false
           cache-from: type=gha,scope=my-drive-indexer-db-setup
 
+      - name: Build Quick Connect Caddy image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/caddy
+          file: ./docker/caddy/Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=my-drive-caddy
+
   database-fixture:
     needs: validate
     runs-on: ubuntu-latest
@@ -194,6 +203,7 @@ jobs:
           printf 'document_preview=%s-document-preview\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'indexer=%s-indexer\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'db=%s-indexer-db-setup\n' "$repository" >> "$GITHUB_OUTPUT"
+          printf 'caddy=%s-caddy\n' "$repository" >> "$GITHUB_OUTPUT"
 
       - name: Extract application image metadata
         id: app-meta
@@ -233,6 +243,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.images.outputs.db }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+
+      - name: Extract Quick Connect Caddy image metadata
+        id: caddy-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.caddy }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -297,6 +318,18 @@ jobs:
           labels: ${{ steps.db-meta.outputs.labels }}
           cache-from: type=gha,scope=my-drive-indexer-db-setup
           cache-to: type=gha,scope=my-drive-indexer-db-setup,mode=max
+
+      - name: Build and publish Quick Connect Caddy image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/caddy
+          file: ./docker/caddy/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.caddy-meta.outputs.tags }}
+          labels: ${{ steps.caddy-meta.outputs.labels }}
+          cache-from: type=gha,scope=my-drive-caddy
+          cache-to: type=gha,scope=my-drive-caddy,mode=max
 
   smoke:
     needs: publish
