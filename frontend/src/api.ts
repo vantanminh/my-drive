@@ -349,7 +349,7 @@ export const api = {
     request<GoogleDriveSettings>('/api/google-drive/settings', { signal, cache: 'no-store' }),
   googleDriveSaveSettings: (settings: { client_id: string; client_secret: string; redirect_uri: string }) =>
     request<void>('/api/google-drive/settings', {
-      method: 'POST', csrf: true, cache: 'no-store', body: JSON.stringify(settings)
+      method: 'POST', csrf: true, cache: 'no-store', json: settings
     }),
   googleDriveConnect: () =>
     request<{ authorize_url: string }>('/api/google-drive/connect', {

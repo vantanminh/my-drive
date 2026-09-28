@@ -43,7 +43,7 @@ jobs:
 
       - name: Build frontend
         working-directory: frontend
-        run: npm ci --no-audit --no-fund && npm run build
+        run: npm ci --no-audit --no-fund && npm test && npm run build
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
