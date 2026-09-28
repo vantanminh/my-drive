@@ -86,7 +86,8 @@ dùng ACME nó cũng là email liên hệ CA.
 | --- | --- |
 | `media_indexing=false` | VPS một filesystem; tắt cache ảnh/video và face indexing. Upload, download, share, tài khoản và document preview vẫn chạy. |
 | `media_indexing=true` | Cache preview phải nằm trên filesystem khác với dữ liệu gốc. PostgreSQL có thể cùng filesystem với cache. Bộ cài kiểm tra UUID và ứng dụng kiểm tra device của bind mount. |
-| `tls=acme` | Tên miền công khai; Caddy xin và gia hạn chứng chỉ tự động qua CA công khai. |
+| `tls=acme` | Tên miền công khai; Caddy xin và gia hạn chứng chỉ tự động qua CA công khai. Origin phải nhận được HTTP-01 hoặc TLS-ALPN-01 từ Internet. |
+| `tls=acme-dns` | Quick Connect. Cùng tên miền, chứng chỉ Let's Encrypt bằng DNS-01 qua Cloudflare. Origin không cần mở cổng ra Internet. Xem mục Quick Connect bên dưới. |
 | `tls=internal` | IP hoặc tên miền nội bộ; Caddy tạo CA trên VPS. Bạn tự cài public root certificate vào thiết bị truy cập. Không cần CA bên ngoài. |
 | `tls=http` | Chỉ mở HTTP trên cổng 80; không xin chứng chỉ hoặc chuyển hướng sang HTTPS. Cookie phiên không có thuộc tính `Secure` để đăng nhập hoạt động qua HTTP. Mật khẩu, cookie và dữ liệu truyền qua mạng không được mã hóa; chỉ dùng trong mạng tin cậy hoặc qua VPN/SSH tunnel. |
 
@@ -162,20 +163,24 @@ không có `--prebuilt`, mapping trống mới có nghĩa là build source.
 }
 ```
 
-Nếu bật indexing, thêm `media-indexer`. Dùng cùng release cho các target.
+Nếu bật indexing, thêm `media-indexer`. Với `tls=acme-dns`, thêm `caddy`
+(`ghcr.io/<owner>/<repository>-caddy` cùng tag). Dùng cùng release cho các target.
 Bạn có thể build Dockerfile targets `runtime`, `document-preview-runtime`,
 `media-indexer-runtime` trên máy build rồi push registry của mình. Khi dùng
 registry private, đăng nhập Docker trong ngữ cảnh root trước khi cài:
 `sudo docker login registry.example.com`. Nên dùng digest `@sha256:...` để giữ
-đúng artifact. Base PostgreSQL/Caddy vẫn tải từ Docker Hub theo mặc định.
+đúng artifact. PostgreSQL và Caddy của `tls=acme`, `internal`, `http` vẫn tải
+từ Docker Hub. `tls=acme-dns` dùng image Caddy có module Cloudflare; tunnel
+dùng `cloudflare/cloudflared:2026.9.3`.
 
 ## 4. File cấu hình và vận hành
 
 `/opt/my-drive` chỉ root truy cập. Nó chứa `.env`, `state.json`, Compose,
 Caddyfile, TLS state và scripts runtime. Có thể xóa checkout source sau khi cài;
 hãy giữ một checkout đã review khi muốn build phiên bản mới.
-Không đưa `/opt/my-drive` hoặc data vào Git. `state.json` chứa database secret;
-đây là cấu hình riêng, không phải file để chia sẻ.
+Không đưa `/opt/my-drive` hoặc data vào Git. `state.json` chứa database secret
+và, khi bật Quick Connect, token Cloudflare; đây là cấu hình riêng, không phải
+file để chia sẻ.
 
 ```bash
 sudo my-drive check               # UUID và vị trí mount; cập nhật major:minor khi reboot
@@ -211,37 +216,72 @@ Google Drive import là tùy chọn sau khi cài: tạo OAuth client của riên
 chỉ sửa `.env` vì lần start tiếp sẽ ghi lại nó. Phần quản lý giới hạn/tài khoản
 thành viên thực hiện trong giao diện chủ sở hữu.
 
-## Truy cập nhanh trong mạng nhà bằng DNS nội bộ
+## Quick Connect: truy cập nhanh trong mạng nhà bằng DNS nội bộ
 
-Nếu cài My Drive trên home server và đã truy cập được từ Internet bằng domain,
-có thể để các thiết bị ở nhà kết nối thẳng đến IP LAN của server. Cấu hình này
-dùng cùng domain nên HTTPS, cookie đăng nhập và các request API của trình duyệt
-vẫn cùng origin. DNS công khai giữ nguyên để truy cập từ bên ngoài.
+Quick Connect giữ **một** URL, ví dụ `https://drive.example.com`. Ở nhà, DNS nội
+bộ trả IP LAN của server nên trình duyệt đi thẳng trong LAN và vẫn dùng HTTPS
+công khai. Ở ngoài, DNS công khai trả Cloudflare Tunnel (hoặc IP public nếu bạn
+đang dùng `tls=acme` và mở cổng). Cookie, OAuth, WebSocket và localStorage không
+đổi vì hostname không đổi. Không có hostname `local.` riêng và không có
+JavaScript dò LAN: request từ website public sang địa chỉ nội bộ có thể bị
+trình duyệt chặn hoặc hỏi quyền.
 
-1. Tạo DHCP reservation trên router để home server luôn nhận cùng một IP LAN,
-   ví dụ `192.168.1.20`. Đảm bảo firewall của server cho phép thiết bị trong
-   LAN truy cập reverse proxy ở TCP 80 và 443 theo chế độ TLS đang dùng.
-2. Trong router, Pi-hole hoặc AdGuard Home, tạo local DNS rewrite/host override
-   cho **domain My Drive hiện tại** về IP LAN đó, ví dụ
-   `drive.example.com -> 192.168.1.20`. Cho các thiết bị trong nhà dùng resolver
-   nội bộ này qua DHCP; nếu thiết bị dùng DNS công khai trực tiếp, nó sẽ không
-   nhận được bản ghi LAN.
-3. Xử lý cả DNS IPv6 (AAAA). Nếu home server có IPv6 ổn định và truy cập được
-   trong LAN, tạo bản ghi AAAA nội bộ trỏ đến địa chỉ đó. Nếu không, cấu hình
-   resolver nội bộ trả lời không có AAAA cho domain này thay vì chuyển tiếp
-   AAAA công khai; nếu giữ AAAA công khai, một số thiết bị có thể tiếp tục kết
-   nối qua Internet bằng IPv6.
-4. Kiểm tra trên thiết bị trong nhà bằng `nslookup drive.example.com` hoặc
-   `dig drive.example.com`. Kết quả phải có IP LAN của server. Mở My Drive và
-   thử đăng nhập, tải lên và tải xuống; kiểm tra kết nối HTTPS của trình duyệt
-   đến IP LAN. Nếu thiết bị còn giữ DNS cũ, làm mới DHCP hoặc xóa DNS cache.
-5. Tắt Wi-Fi trên điện thoại hoặc dùng một mạng bên ngoài rồi kiểm tra lại
-   domain. DNS công khai vẫn phải trả về địa chỉ truy cập Internet hiện tại.
+`tls=acme` vẫn phù hợp khi origin nhận được kết nối Internet trên TCP 80/443.
+`tls=acme-dns` dành cho home server không mở port (CGNAT, không port forward):
+Let's Encrypt kiểm tra bản ghi TXT `_acme-challenge`, không cần web server lộ
+ra Internet.
 
-Bộ cài Ubuntu đưa Caddy ra các cổng 80/443; app vẫn chỉ truy cập qua reverse
-proxy và cổng nội bộ 3000 không cần mở cho LAN. Giữ nguyên host/domain trong
-Caddy để chứng chỉ HTTPS hiện tại tiếp tục khớp. Với `tls=internal`, các thiết
-bị vẫn cần tin cậy CA nội bộ như phần cài đặt TLS đã hướng dẫn.
+### Chứng chỉ DNS-01 và tunnel
+
+1. Trong Cloudflare, tạo API token chỉ cho zone của domain, với quyền
+   `Zone.Zone:Read` và `Zone.DNS:Edit`. Không dùng API key toàn account.
+2. Chọn `tls=acme-dns` trong wizard, hoặc thêm các field sau vào JSON riêng tư.
+   Bỏ `cloudflare_tunnel_token` nếu chỉ cần HTTPS trong LAN. Token nằm trong
+   `/opt/my-drive/.env` và `state.json` (chỉ root). Caddyfile chỉ chứa
+   `{env.CLOUDFLARE_API_TOKEN}`; lệnh `cloudflared` không nhận token trên argv.
+
+```json
+"tls": "acme-dns",
+"cloudflare_api_token": "token-zone-dns",
+"cloudflare_tunnel_token": "token-tunnel-tuy-chon"
+```
+3. Bộ cài dùng image Caddy có module `github.com/caddy-dns/cloudflare` (build
+   tại chỗ hoặc `ghcr.io/<owner>/<repository>-caddy`). Caddy stock không giải
+   được DNS-01. Kiểm tra sẵn sàng sau cài có thể chờ thêm vài phút vì CA phải
+   thấy bản ghi TXT.
+4. Khi có tunnel token, tạo Cloudflare Tunnel và một public hostname trùng
+   `host` đã cài. Service URL phải là `http://app:3000`. Bộ cài chạy
+   `cloudflare/cloudflared:2026.9.3` trên một Docker network chỉ có service
+   `app`, nên route của tunnel không gọi được database. Không điền
+   `localhost`, IP LAN, hay `https://` — cổng 3000 không được publish ra host.
+   DNS công khai của hostname sẽ trỏ vào tunnel. Không tạo thêm A record public
+   tới IP nhà.
+
+### DNS nội bộ
+
+1. Tạo DHCP reservation để home server luôn nhận cùng một IP LAN, ví dụ
+   `192.168.1.20`. Firewall của server cho phép thiết bị trong LAN vào TCP 80
+   và 443. Với tunnel, không cần forward hai cổng đó ra Internet.
+2. Trong router, Pi-hole, AdGuard Home, Technitium hoặc dnsmasq, tạo rewrite
+   **đúng tên** `drive.example.com -> 192.168.1.20`. Đừng rewrite wildcard,
+   vì `_acme-challenge.drive.example.com` vẫn phải ra DNS công khai để gia hạn
+   chứng chỉ. Nếu router chặn DNS rebinding (tên public trả IP private), đặt
+   override trên chính resolver đó.
+3. Cho máy trong nhà dùng resolver này qua DHCP. Trình duyệt bật DNS-over-HTTPS
+   sẽ bỏ qua DNS nhà và tiếp tục đi tunnel; tắt DoH trên những máy cần tốc độ LAN.
+4. Xử lý AAAA. Nếu server có IPv6 LAN ổn định, ghi AAAA nội bộ. Nếu không,
+   resolver nội bộ phải trả lời không có AAAA, không chuyển tiếp AAAA public;
+   nếu không, máy ưu tiên IPv6 sẽ đi ra Internet.
+5. Trong nhà, `nslookup drive.example.com` phải ra IP LAN. Đăng nhập, tải lên
+   và tải xuống; khóa ổ trong trình duyệt phải khớp tên miền. Xóa cache DNS nếu
+   máy còn giữ địa chỉ cũ.
+6. Tắt Wi-Fi hoặc dùng mạng khác. DNS public phải ra Cloudflare, không ra IP
+   LAN. `sudo my-drive logs cloudflared` khi tunnel không nối; `sudo my-drive logs proxy`
+   khi DNS-01 hoặc chứng chỉ lỗi.
+
+App vẫn chỉ đứng sau Caddy. Cổng 3000 không mở cho LAN. Với `tls=internal`,
+thiết bị vẫn phải tin CA nội bộ như phần cài đặt TLS đã hướng dẫn. Chế độ TLS
+được chọn lúc cài; bộ cài không đổi `tls` của một state đã có.
 
 ## 5. Backup mã hóa
 
@@ -256,7 +296,7 @@ sudo my-drive backup --backup-root /mnt/backup/my-drive --recipient age1...
 Backup tạm dừng app/indexer để giữ database/file nhất quán, sau đó khởi động
 lại nếu trước đó đang chạy. Output có bundle ứng dụng và file companion
 `my-drive-<id>.deployment.tar.age`. Giữ **cả hai**. Companion mã hóa cấu hình
-installer, database secrets, scripts và private TLS/CA keys. Không tự tạo
+installer, database secrets, token Cloudflare nếu đang dùng Quick Connect, scripts và private TLS/CA keys. Không tự tạo
 private age identity trên VPS và không dùng ổ dữ liệu làm ổ backup.
 Copy backup sang nơi ngoài VPS, kiểm tra và diễn tập restore định kỳ. Chưa có
 backup hợp lệ thì không coi một ổ đĩa là phương án khôi phục.
@@ -343,7 +383,7 @@ sudo my-drive update --source /path/to/reviewed-checkout \
   --backup-root /mnt/backup/my-drive --recipient age1...
 ```
 
-Hoặc ghi JSON mapping `app`/`document-preview`/`media-indexer` vào file riêng và dùng
+Hoặc ghi JSON mapping `app`/`document-preview`/`media-indexer` (và `caddy` nếu cài `tls=acme-dns`) vào file riêng và dùng
 `--images /path/to/release-images.json` thay `--source`. Có thể truyền
 `--backup-root` và `--recipient` để đổi nơi backup hoặc recipient; cấu hình mới
 được lưu sau khi backup thành công. Cập nhật build/pull image trước khi dừng app,
@@ -373,7 +413,9 @@ dụng khác sử dụng nó.
 
 | Triệu chứng | Kiểm tra |
 | --- | --- |
-| HTTPS không lên | `my-drive logs proxy`; DNS A/AAAA, TCP 80/443, firewall, dịch vụ đang chiếm cổng, rate limit ACME. |
+| HTTPS không lên | `my-drive logs proxy`; DNS A/AAAA, TCP 80/443, firewall, dịch vụ đang chiếm cổng, rate limit ACME. Với `tls=acme-dns`: token Zone DNS, TXT `_acme-challenge` không bị DNS nhà nuốt, image Caddy có module Cloudflare. |
+| Ở nhà vẫn chậm / đi tunnel | `nslookup` trên chính thiết bị đó phải ra IP LAN. Tắt DoH của trình duyệt. Xóa AAAA public nếu không có IPv6 LAN. |
+| Tunnel không vào được | `my-drive logs cloudflared`. Public hostname trong Cloudflare phải là `http://app:3000`, cùng tên với `host` lúc cài. |
 | App không ready | `my-drive logs app`, `logs db`; quota/free space, mount UUID, quyền UID 10001. |
 | indexing không chạy | Cần bật profile từ lần cài đầu; preview phải khác filesystem; `logs media-indexer-db-setup` và `logs media-indexer`. |
 | Reboot không lên | `journalctl -u my-drive`, `findmnt`, `/etc/fstab`; khôi phục đúng mount rồi start lại. |
@@ -392,3 +434,6 @@ trên VPS thật; hãy dùng staging trước khi đưa dữ liệu quan trọng
 Quy trình repository APT theo [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/).
 TLS tự động và CA nội bộ theo [Caddy Automatic HTTPS](https://caddyserver.com/docs/automatic-https)
 và [Caddy TLS directive](https://caddyserver.com/docs/caddyfile/directives/tls).
+DNS-01 theo [Caddy DNS challenge](https://caddyserver.com/docs/automatic-https#dns-challenge)
+và [caddy-dns/cloudflare](https://github.com/caddy-dns/cloudflare). Tunnel theo
+[Cloudflare Tunnel run parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/).

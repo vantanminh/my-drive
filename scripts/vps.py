@@ -21,6 +21,11 @@ SOURCE = Path(__file__).resolve().parents[1]
 INSTALL = Path('/opt/my-drive')
 PATH_RE = re.compile(r'/[A-Za-z0-9_./-]+')
 IMAGE_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]+')
+# Match caddy-dns/cloudflare token checks: legacy API tokens, or cfut_/cfat_ tokens.
+API_TOKEN_RE = re.compile(r'(?:[A-Za-z0-9_-]{35,50}|cf(?:ut|at)_[A-Za-z0-9_-]{32,256})')
+TUNNEL_TOKEN_RE = re.compile(r'[A-Za-z0-9+/=_-]{40,4096}')
+CLOUDFLARED_IMAGE = 'cloudflare/cloudflared:2026.9.3'
+QUICK_CONNECT_NETWORK = 'quick-connect'
 
 
 def run(*args, capture=False, env=None):
@@ -53,6 +58,18 @@ def write_env(path, values):
     atomic(path, ''.join(lines))
 
 
+def cloudflare_api_token(token):
+    if not isinstance(token, str) or not API_TOKEN_RE.fullmatch(token):
+        raise ValueError('cloudflare_api_token must be a Cloudflare API token with Zone read and DNS edit')
+    return token
+
+
+def cloudflare_tunnel_token(token):
+    if not isinstance(token, str) or not TUNNEL_TOKEN_RE.fullmatch(token):
+        raise ValueError('cloudflare_tunnel_token must be the tunnel token from the Cloudflare dashboard')
+    return token
+
+
 def valid_host(host):
     try:
         ipaddress.IPv4Address(host)
@@ -83,21 +100,46 @@ def valid_path(raw):
 def validate(config):
     allowed = {'host', 'tls', 'email', 'owner_password', 'storage', 'database',
                'previews', 'media_indexing', 'images', 'quota_gib', 'max_file_gib',
-               'min_free_gib', 'trash_days'}
+               'min_free_gib', 'trash_days', 'cloudflare_api_token',
+               'cloudflare_tunnel_token', 'cloudflare_tunnel'}
     if set(config) - allowed:
         raise ValueError(f'unknown configuration fields: {sorted(set(config) - allowed)}')
     result = dict(config)
     result['host'] = valid_host(str(config['host']))
-    if config.get('tls', 'acme') not in {'acme', 'internal', 'http'}:
-        raise ValueError('tls must be acme, internal, or http')
+    if config.get('tls', 'acme') not in {'acme', 'acme-dns', 'internal', 'http'}:
+        raise ValueError('tls must be acme, acme-dns, internal, or http')
     result.setdefault('tls', 'acme')
-    if result['tls'] == 'acme':
+    if result['tls'] in {'acme', 'acme-dns'}:
         try:
             ipaddress.IPv4Address(result['host'])
         except ValueError:
             pass
         else:
             raise ValueError('use internal TLS for IP-only installation')
+    cloudflare_fields = {'cloudflare_api_token', 'cloudflare_tunnel_token', 'cloudflare_tunnel'}
+    if result['tls'] == 'acme-dns':
+        # Saved installs keep only the tunnel flag. Fresh setup must pass the secrets.
+        sealed = ('cloudflare_tunnel' in config and 'cloudflare_api_token' not in config
+                  and 'cloudflare_tunnel_token' not in config)
+        if sealed:
+            if not isinstance(config['cloudflare_tunnel'], bool):
+                raise ValueError('cloudflare_tunnel must be a boolean')
+            result['cloudflare_tunnel'] = config['cloudflare_tunnel']
+        else:
+            if 'cloudflare_tunnel' in config:
+                raise ValueError('cloudflare_tunnel is derived; pass cloudflare_tunnel_token instead')
+            result['cloudflare_api_token'] = cloudflare_api_token(config.get('cloudflare_api_token'))
+            tunnel = config.get('cloudflare_tunnel_token', '')
+            if not isinstance(tunnel, str):
+                raise ValueError('cloudflare_tunnel_token must be a string')
+            if tunnel:
+                result['cloudflare_tunnel_token'] = cloudflare_tunnel_token(tunnel)
+                result['cloudflare_tunnel'] = True
+            else:
+                result.pop('cloudflare_tunnel_token', None)
+                result['cloudflare_tunnel'] = False
+    elif cloudflare_fields & set(config):
+        raise ValueError('cloudflare credentials require tls=acme-dns')
     if not re.fullmatch(r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', str(config['email'])):
         raise ValueError('a valid owner email is required')
     password = config.get('owner_password') or secrets.token_urlsafe(32)
@@ -124,7 +166,11 @@ def validate(config):
             raise ValueError(f'{field} must be a positive integer <= 1048576')
         result[field] = value
     images = config.get('images', {})
-    needed = {'app', 'document-preview'} | ({'media-indexer'} if result['media_indexing'] else set())
+    needed = {'app', 'document-preview'}
+    if result['media_indexing']:
+        needed.add('media-indexer')
+    if result['tls'] == 'acme-dns':
+        needed.add('caddy')
     if not isinstance(images, dict) or (images and set(images) != needed):
         raise ValueError(f'images must be empty (local build), or define exactly {sorted(needed)}')
     if any(not isinstance(image, str) or not IMAGE_RE.fullmatch(image) for image in images.values()):
@@ -136,14 +182,23 @@ def validate(config):
 def ask(prebuilt=False):
     print('My Drive Ubuntu VPS setup. Configuration stays on this server.')
     host = input('Domain or IPv4 address: ').strip().lower()
-    tls = input('Access: acme HTTPS / internal HTTPS / http only (unencrypted) [acme]: ').strip().lower() or 'acme'
+    tls = input('Access: acme HTTPS / acme-dns HTTPS (Cloudflare DNS-01) / internal HTTPS / http only [acme]: ').strip().lower() or 'acme'
     if tls == 'http':
         print('HTTP does not encrypt traffic. Use only on a trusted network or through a secure tunnel.')
+    if tls == 'acme-dns':
+        print('acme-dns gets a public certificate without opening the server to the Internet. '
+              'At home, point this same hostname at the server LAN address. '
+              'Away from home, an optional Cloudflare Tunnel carries the connection.')
     email = input('Owner email (also ACME contact when enabled): ').strip()
     password = getpass.getpass('Owner password (>=16 bytes; empty = generate): ')
     if password and getpass.getpass('Repeat password: ') != password:
         raise ValueError('passwords do not match')
     config = {'host': host, 'tls': tls, 'email': email, 'owner_password': password}
+    if tls == 'acme-dns':
+        config['cloudflare_api_token'] = getpass.getpass('Cloudflare API token (Zone read + DNS edit): ').strip()
+        tunnel = getpass.getpass('Cloudflare Tunnel token (empty to skip remote tunnel): ').strip()
+        if tunnel:
+            config['cloudflare_tunnel_token'] = tunnel
     for field, default in [('storage', '/srv/my-drive/data'), ('database', '/var/lib/my-drive/postgres'),
                            ('previews', '/var/lib/my-drive/previews')]:
         config[field] = input(f'{field} directory [{default}]: ').strip() or default
@@ -161,6 +216,8 @@ def prebuilt_images(config, prefix, tag):
     images = {'app': f'{prefix}:{tag}', 'document-preview': f'{prefix}-document-preview:{tag}'}
     if config['media_indexing']:
         images['media-indexer'] = f'{prefix}-indexer:{tag}'
+    if config['tls'] == 'acme-dns':
+        images['caddy'] = f'{prefix}-caddy:{tag}'
     return images
 
 
@@ -199,6 +256,19 @@ def compose(*args, capture=False):
                env=compose_environment())
 
 
+def attach_network(service, name):
+    networks = service.get('networks')
+    if networks is None:
+        service['networks'] = ['default', name]
+    elif isinstance(networks, list):
+        if name not in networks:
+            networks.append(name)
+    elif isinstance(networks, dict):
+        networks.setdefault(name, {})
+    else:
+        raise ValueError('unsupported service network configuration')
+
+
 def compose_environment():
     # Shell variables override --env-file in Compose; do not accept accidental overrides.
     env = dict(os.environ)
@@ -227,8 +297,9 @@ def make_compose(model, config):
     proxy_ports = ['80:80']
     if config['tls'] != 'http':
         proxy_ports.append('443:443')
-    services['proxy'] = {
-        'image': 'caddy:2-alpine', 'restart': 'unless-stopped',
+    proxy = {
+        'image': '${MY_DRIVE_CADDY_IMAGE}' if config['tls'] == 'acme-dns' else 'caddy:2-alpine',
+        'restart': 'unless-stopped',
         'ports': proxy_ports,
         'volumes': [{'type': 'bind', 'source': str(INSTALL / 'Caddyfile'), 'target': '/etc/caddy/Caddyfile',
                      'read_only': True, 'bind': {'create_host_path': False}},
@@ -238,17 +309,59 @@ def make_compose(model, config):
                      'bind': {'create_host_path': False}}],
         'logging': {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}},
     }
+    if config['tls'] == 'acme-dns':
+        # The token stays in the env file. The Caddyfile only references this variable.
+        proxy['environment'] = {'CLOUDFLARE_API_TOKEN': '${CLOUDFLARE_API_TOKEN}'}
+    services['proxy'] = proxy
+    if config.get('cloudflare_tunnel'):
+        model.setdefault('networks', {})[QUICK_CONNECT_NETWORK] = {}
+        attach_network(services['app'], QUICK_CONNECT_NETWORK)
+        # Only the app is on this network, so a tunnel route cannot name the database.
+        services['cloudflared'] = {
+            'image': CLOUDFLARED_IMAGE, 'restart': 'unless-stopped',
+            'command': ['tunnel', '--no-autoupdate', 'run'],
+            'environment': {'TUNNEL_TOKEN': '${CLOUDFLARE_TUNNEL_TOKEN}'},
+            'depends_on': {'app': {'condition': 'service_healthy'}},
+            'networks': [QUICK_CONNECT_NETWORK],
+            'logging': {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}},
+        }
     return model
 
 
 def caddyfile(config):
-    global_options = '{\n    admin off\n' + (f"    email {config['email']}\n" if config['tls'] == 'acme' else '') + '}\n'
-    tls = '    tls internal\n' if config['tls'] == 'internal' else ''
+    acme = config['tls'] in {'acme', 'acme-dns'}
+    global_options = '{\n    admin off\n' + (f"    email {config['email']}\n" if acme else '') + '}\n'
+    if config['tls'] == 'internal':
+        tls = '    tls internal\n'
+    elif config['tls'] == 'acme-dns':
+        # Public resolvers see the DNS-01 TXT record even when home DNS rewrites the hostname.
+        tls = '''    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+        resolvers 1.1.1.1 1.0.0.1
+    }
+'''
+    else:
+        tls = ''
     scheme = 'http' if config['tls'] == 'http' else 'https'
     return global_options + f"{scheme}://{config['host']} {{\n" + tls + '''    reverse_proxy app:3000
     header X-Content-Type-Options nosniff
 }
 '''
+
+
+def persist_quick_connect(config, values):
+    """Move Cloudflare secrets into the env file and out of saved installer config."""
+    if config.get('tls') != 'acme-dns':
+        return
+    token = config.pop('cloudflare_api_token', None)
+    if not token:
+        raise ValueError('cloudflare_api_token is required for tls=acme-dns')
+    values['CLOUDFLARE_API_TOKEN'] = token
+    tunnel_token = config.pop('cloudflare_tunnel_token', None)
+    if tunnel_token:
+        values['CLOUDFLARE_TUNNEL_TOKEN'] = tunnel_token
+    elif config.get('cloudflare_tunnel'):
+        raise ValueError('cloudflare tunnel is enabled but no tunnel token was provided')
 
 
 def build_images(config, source):
@@ -271,6 +384,13 @@ def build_images(config, source):
         image = f'my-drive-local-{service}:{tag}'
         run('docker', 'build', '--target', target, '--tag', image, source)
         images[service] = image
+    if config['tls'] == 'acme-dns':
+        image = f'my-drive-local-caddy:{tag}'
+        dockerfile = Path(source) / 'docker/caddy/Dockerfile'
+        if not dockerfile.is_file():
+            raise ValueError('tls=acme-dns requires docker/caddy/Dockerfile in the checkout')
+        run('docker', 'build', '-f', dockerfile, '--tag', image, dockerfile.parent)
+        images['caddy'] = image
     return images
 
 
@@ -330,7 +450,9 @@ def start(state):
         if not indexer_id or run('docker', 'inspect', '-f', '{{.State.Running}}', indexer_id, capture=True).strip() != 'true':
             raise ValueError('media indexer is not running')
     # Validate readiness through the actual proxy, including TLS identity when enabled.
-    args = ['curl', '--fail', '--silent', '--show-error', '--retry', '12', '--retry-delay', '5',
+    # DNS-01 waits until the TXT record is visible to Let's Encrypt before HTTPS listens.
+    retry = '36' if state['config']['tls'] == 'acme-dns' else '12'
+    args = ['curl', '--fail', '--silent', '--show-error', '--retry', retry, '--retry-delay', '5',
             '--retry-all-errors', '--max-time', '10']
     if state['config']['tls'] == 'internal':
         root = INSTALL / 'caddy-data/caddy/pki/authorities/local/root.crt'
@@ -384,6 +506,9 @@ def install(args):
             'MAX_FILE_SIZE': config['max_file_gib'] * 1024**3,
             'MIN_FREE_BYTES': config['min_free_gib'] * 1024**3, 'TRASH_RETENTION_DAYS': config['trash_days'],
         }
+        if 'caddy' in images:
+            values['MY_DRIVE_CADDY_IMAGE'] = images['caddy']
+        persist_quick_connect(config, values)
         write_env(INSTALL / '.env', values)
         scheme = 'http' if config['tls'] == 'http' else 'https'
         atomic(INSTALL / 'owner-credentials.txt', f"URL: {scheme}://{config['host']}\nEmail: {config['email']}\nPassword: {config['owner_password']}\n")
@@ -412,6 +537,7 @@ def install(args):
     compose('config', '--quiet')
     atomic('/usr/local/bin/my-drive', '#!/bin/sh\nexec python3 /opt/my-drive/scripts/vps.py "$@"\n', 0o755)
     mounts = ' '.join(state['config'][field] for field in ('storage', 'database', 'previews'))
+    start_timeout = 900 if state['config']['tls'] == 'acme-dns' else 600
     atomic('/etc/systemd/system/my-drive.service', f'''[Unit]
 Description=My Drive private cloud
 Requires=docker.service
@@ -424,7 +550,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/my-drive start
 ExecStop=/usr/local/bin/my-drive stop
-TimeoutStartSec=600
+TimeoutStartSec={start_timeout}
 TimeoutStopSec=120
 UMask=0077
 
@@ -507,7 +633,8 @@ def main():
     for command in ('start', 'stop', 'status', 'check'):
         sub.add_parser(command)
     logs = sub.add_parser('logs')
-    logs.add_argument('service', nargs='?', choices=['app', 'db', 'proxy', 'document-preview', 'media-indexer', 'media-indexer-db-setup'])
+    logs.add_argument('service', nargs='?', choices=['app', 'db', 'proxy', 'document-preview', 'media-indexer',
+                                                    'media-indexer-db-setup', 'cloudflared'])
     backup_parser = sub.add_parser('backup')
     backup_parser.add_argument('--backup-root', required=True)
     backup_parser.add_argument('--recipient', required=True, help='age PUBLIC recipient (keep private identity offline)')
@@ -572,7 +699,7 @@ def main():
             candidate = validate(candidate)
             images = build_images(candidate, source)  # Build/pull while old app remains available.
             image_env = {'app': 'MY_DRIVE_IMAGE', 'document-preview': 'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE',
-                         'media-indexer': 'MY_DRIVE_INDEXER_IMAGE'}
+                         'media-indexer': 'MY_DRIVE_INDEXER_IMAGE', 'caddy': 'MY_DRIVE_CADDY_IMAGE'}
             if all(state['env'].get(image_env[service]) == image for service, image in images.items()):
                 print('Already up to date; no services were restarted.')
                 return

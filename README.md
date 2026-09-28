@@ -36,16 +36,19 @@ where to store backups and for an age public recipient. See the complete
 [Ubuntu installation and operations guide](docs/DEPLOY_UBUNTU.md) (Vietnamese),
 including backups, recovery and upgrades.
 
-### Faster access from home
+### Quick Connect from home
 
-When My Drive runs on a home server, a local DNS override can point the same
-domain to the server's reserved LAN IP. Browsers then reach Caddy over the LAN
-automatically, while public DNS continues to serve access from outside. Keep
-the domain and HTTPS configuration unchanged; handle its local AAAA record too
-so IPv6 does not route clients over the Internet. The app stays behind Caddy on
-ports 80/443; do not expose its internal port 3000. See the
-[split-DNS setup guide](docs/DEPLOY_UBUNTU.md#truy-cập-nhanh-trong-mạng-nhà-bằng-dns-nội-bộ)
-for router, Pi-hole, and AdGuard Home steps.
+Keep a single URL such as `https://drive.example.com`. On the home LAN, a DNS
+override resolves that name to the server's reserved address, so browsers talk
+to Caddy directly over the LAN with the same publicly trusted certificate.
+Away from home, public DNS reaches the server through a Cloudflare Tunnel when
+the origin is not port-forwarded, or through normal ACME HTTPS when it is.
+Choose `tls=acme-dns` for the tunnel case: Let's Encrypt validates the name
+with a Cloudflare DNS-01 challenge, and an optional tunnel token runs
+`cloudflared` to `http://app:3000`. Cookies, OAuth, and WebSockets stay on one
+origin. The app remains behind Caddy on ports 80/443; do not publish port 3000.
+See the
+[Quick Connect guide](docs/DEPLOY_UBUNTU.md#quick-connect-truy-cập-nhanh-trong-mạng-nhà-bằng-dns-nội-bộ).
 
 ## Current implementation
 
@@ -199,8 +202,9 @@ publishes the `latest`, `master`, and `sha-<commit>` tags. Pushing a version
 tag such as `v1.2.3` publishes `v1.2.3` and `sha-<commit>` tags. Images are
 built for `linux/amd64` and published to GHCR as
 `ghcr.io/<owner>/<repository>`,
-`ghcr.io/<owner>/<repository>-document-preview`, and
-`ghcr.io/<owner>/<repository>-indexer`; the owner and repository come from
+`ghcr.io/<owner>/<repository>-document-preview`,
+`ghcr.io/<owner>/<repository>-indexer`, and, for Quick Connect,
+`ghcr.io/<owner>/<repository>-caddy`; the owner and repository come from
 GitHub and are lowercased for valid GHCR names. The workflow uses the
 repository-provided `GITHUB_TOKEN` and does not need a separate registry
 secret. GHCR package visibility is configured separately. After the first
