@@ -1,0 +1,15 @@
+<Application x:Class="MyDrive.Backup.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Application.Resources>
+    <SolidColorBrush x:Key="Bg" Color="#0E141B" />
+    <SolidColorBrush x:Key="Nav" Color="#101820" />
+    <SolidColorBrush x:Key="Card" Color="#182230" />
+    <SolidColorBrush x:Key="Text" Color="#E8EEF6" />
+    <SolidColorBrush x:Key="Muted" Color="#93A1B5" />
+    <SolidColorBrush x:Key="Accent" Color="#4C8DFF" />
+    <SolidColorBrush x:Key="Line" Color="#2A3648" />
+    <SolidColorBrush x:Key="Danger" Color="#E25C5C" />
+    <SolidColorBrush x:Key="Ok" Color="#3DBE7A" />
+  </Application.Resources>
+</Application>

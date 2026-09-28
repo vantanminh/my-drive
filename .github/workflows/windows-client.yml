@@ -1,0 +1,17 @@
+name: Windows backup client
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Test the backup engine and build the agent
+        run: dotnet build clients/windows/MyDrive.Backup.sln --configuration Release && dotnet test clients/windows/MyDrive.Backup.sln --configuration Release --no-build
