@@ -13,6 +13,31 @@ export type BrowserSession = {
   is_current: boolean;
 };
 
+export type BackupDevice = {
+  id: string;
+  name: string;
+  client_name: string;
+  operating_system: string;
+  client_version: string;
+  permissions: string[];
+  created_at: string;
+  last_active_at: string | null;
+  last_ip: string | null;
+  revoked_at: string | null;
+};
+
+export type DeviceAuthorizationRequest = {
+  user_code: string;
+  client_name: string;
+  device_name: string;
+  operating_system: string;
+  client_version: string;
+  requested_ip: string | null;
+  status: string;
+  created_at: string;
+  expires_at: string;
+};
+
 export type ManagedAccount = {
   id: string;
   email: string;

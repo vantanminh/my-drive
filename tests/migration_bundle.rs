@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 15);
+    assert_eq!(migrator.iter().len(), 16);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -82,4 +82,11 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     let photos_folder = include_str!("../migrations/0013_system_photos_folder.sql");
     assert!(photos_folder.contains("system_role"));
     assert!(photos_folder.contains("drive_entries_one_system_role"));
+
+    let devices = include_str!("../migrations/0016_backup_devices.sql");
+    assert!(devices.contains("CREATE TABLE backup_devices"));
+    assert!(devices.contains("CREATE TABLE device_authorization_requests"));
+    assert!(devices.contains("CREATE TABLE device_credentials"));
+    assert!(devices.contains("access_token_digest BYTEA NOT NULL UNIQUE"));
+    assert!(devices.contains("replace_file_id"));
 }

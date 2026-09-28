@@ -189,6 +189,12 @@ attempts lock the share for 15 minutes. GET
 supports the same byte-range behavior as private downloads. Revocation,
 expiry, trashing a shared folder, or reaching `max_downloads` disables access.
 
+## Windows Backup Client
+
+`clients/windows` is a native backup agent for this server. On first launch it asks for your server URL, opens `/device/authorize` in the browser, and stores the resulting tokens with Windows DPAPI. It does not embed a domain or the account password.
+
+The client keeps a SQLite index of size, modified time, and SHA-256. Unchanged files are skipped. Content the server already stored is linked instead of uploaded. New bytes use the existing resumable upload API and continue from the last committed offset after a restart. Backup keeps running in the Windows service when the window is closed. Revoke a computer from **Account security → Backup devices**. The protocol is documented at `/docs/backup-client.md`.
+
 ## Running a prebuilt Docker image
 
 GitHub Actions validates and builds the Docker targets (`runtime`,

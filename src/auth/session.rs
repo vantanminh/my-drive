@@ -10,7 +10,7 @@ use axum::{
     extract::{FromRequestParts, Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, COOKIE, RETRY_AFTER, SET_COOKIE},
+        header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, RETRY_AFTER, SET_COOKIE},
         request::Parts,
     },
     response::{IntoResponse, Response},
@@ -148,6 +148,7 @@ pub struct AuthenticatedUser {
     pub must_change_password: bool,
     csrf_token_digest: Vec<u8>,
     pub api_key_id: Option<Uuid>,
+    pub device_id: Option<Uuid>,
 }
 
 #[derive(FromRow)]
@@ -689,7 +690,7 @@ pub async fn logout(
 }
 
 pub fn require_csrf(headers: &HeaderMap, user: &AuthenticatedUser, settings: AuthSettings) -> bool {
-    if user.api_key_id.is_some() {
+    if user.api_key_id.is_some() || user.device_id.is_some() {
         return true;
     }
     let Some(cookie_token) = cookie_value(headers, settings.csrf_cookie_name()) else {
@@ -735,6 +736,26 @@ impl AuthenticatedUser {
             must_change_password: false,
             csrf_token_digest: vec![],
             api_key_id: Some(key_id),
+            device_id: None,
+        }
+    }
+
+    pub(crate) fn from_device(
+        id: Uuid,
+        device_id: Uuid,
+        email: String,
+        role: String,
+        must_change_password: bool,
+    ) -> Self {
+        Self {
+            id,
+            session_id: device_id,
+            email,
+            role,
+            must_change_password,
+            csrf_token_digest: Vec::new(),
+            api_key_id: None,
+            device_id: Some(device_id),
         }
     }
 }
@@ -748,6 +769,41 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
     ) -> Result<Self, Self::Rejection> {
         if let Some(user) = parts.extensions.get::<AuthenticatedUser>() {
             return Ok(user.clone());
+        }
+        if let Some(token) = bearer_token(&parts.headers) {
+            if !token.starts_with("mdb_") {
+                return Err(api_error(
+                    StatusCode::UNAUTHORIZED,
+                    "authentication_required",
+                ));
+            }
+            let reported_ip = crate::devices::forwarded_ip(&parts.headers);
+            match crate::devices::authenticate_access_token(state, token, reported_ip.as_deref())
+                .await
+            {
+                Ok(Some(user)) => {
+                    if user.must_change_password {
+                        return Err(api_error(StatusCode::FORBIDDEN, "password_change_required"));
+                    }
+                    if !crate::devices::device_request_allowed(&parts.method, parts.uri.path()) {
+                        return Err(api_error(StatusCode::FORBIDDEN, "insufficient_scope"));
+                    }
+                    return Ok(user);
+                }
+                Ok(None) => {
+                    return Err(api_error(
+                        StatusCode::UNAUTHORIZED,
+                        "authentication_required",
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "device token lookup failed");
+                    return Err(api_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "service_unavailable",
+                    ));
+                }
+            }
         }
         let Some(token) = cookie_value(&parts.headers, state.auth_settings.session_cookie_name())
         else {
@@ -800,6 +856,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     must_change_password: session.must_change_password,
                     csrf_token_digest: session.csrf_token_digest,
                     api_key_id: None,
+                    device_id: None,
                 };
                 if should_update_last_seen
                     && let Err(error) = sqlx::query(
@@ -891,6 +948,16 @@ fn secure_token(size: usize) -> anyhow::Result<(Vec<u8>, String)> {
         .map_err(|_| anyhow::anyhow!("operating system random generator failed"))?;
     let encoded = URL_SAFE_NO_PAD.encode(&raw);
     Ok((raw, encoded))
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ")?;
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        None
+    } else {
+        Some(token)
+    }
 }
 
 fn cookie_value<'a>(headers: &'a HeaderMap, wanted_name: &str) -> Option<&'a str> {
@@ -1019,6 +1086,7 @@ mod tests {
             role: "owner".to_owned(),
             must_change_password: false,
             api_key_id: None,
+            device_id: None,
             csrf_token_digest: Sha256::digest(raw_token).to_vec(),
         };
         let settings = AuthSettings {

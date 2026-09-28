@@ -46,6 +46,7 @@ pub(crate) async fn documentation(Path(path): Path<String>) -> Response {
         "shares.md" => include_str!("../frontend/public/docs/shares.md"),
         "usage.md" => include_str!("../frontend/public/docs/usage.md"),
         "lesson-sync.md" => include_str!("../frontend/public/docs/lesson-sync.md"),
+        "backup-client.md" => include_str!("../frontend/public/docs/backup-client.md"),
         _ => return error(StatusCode::NOT_FOUND, "not_found"),
     };
     ([("content-type", "text/markdown; charset=utf-8")], text).into_response()

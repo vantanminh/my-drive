@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Clock3, KeyRound, LogOut, Monitor, RefreshCw, ShieldCheck, Smartphone, X } from 'lucide-react';
+import { Clock3, KeyRound, Laptop, LogOut, Monitor, RefreshCw, ShieldCheck, Smartphone, X } from 'lucide-react';
 import { api } from '../api';
 import { friendlyError } from '../format';
-import type { BrowserSession, User } from '../types';
+import type { BackupDevice, BrowserSession, User } from '../types';
 import PasswordChangeForm from './PasswordChangeForm';
 
 function formatSessionDate(value: string | null): string {
@@ -18,6 +18,9 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
   const [sessionNotice, setSessionNotice] = useState('');
   const [passwordNotice, setPasswordNotice] = useState('');
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
+  const [devices, setDevices] = useState<BackupDevice[] | null>(null);
+  const [deviceError, setDeviceError] = useState('');
+  const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -33,6 +36,33 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
       });
     return () => controller.abort();
   }, [reloadKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDeviceError('');
+    api.listDevices(controller.signal)
+      .then((result) => setDevices(result.devices))
+      .catch((cause: unknown) => {
+        if (!controller.signal.aborted) setDeviceError(friendlyError(cause));
+      });
+    return () => controller.abort();
+  }, [reloadKey]);
+
+  async function revokeDevice(device: BackupDevice) {
+    const label = device.name || 'this device';
+    if (!window.confirm(`Revoke ${label}? It will stop backing up until you authorize it again. Files already backed up stay on the server.`)) return;
+    setBusyDeviceId(device.id);
+    setDeviceError('');
+    try {
+      await api.revokeDevice(device.id);
+      setDevices((current) => current?.filter((item) => item.id !== device.id) ?? current);
+      setSessionNotice('The backup client was revoked.');
+    } catch (cause: unknown) {
+      setDeviceError(friendlyError(cause));
+    } finally {
+      setBusyDeviceId(null);
+    }
+  }
 
   async function revokeSession(session: BrowserSession) {
     setBusySessionId(session.id);
@@ -175,6 +205,50 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
           )}
         </section>
       </div>
+
+      <section className="security-card backup-devices-card" aria-labelledby="backup-devices-title">
+        <div className="security-card-heading">
+          <span className="security-card-icon"><Laptop size={16} /></span>
+          <div>
+            <h3 id="backup-devices-title">Backup devices</h3>
+            <p>Windows clients authorized to back up this account. Revoking a device does not delete backed-up files.</p>
+          </div>
+        </div>
+        {deviceError ? <div className="security-message security-message-error" role="alert">{deviceError}</div> : null}
+        {devices === null ? (
+          <div className="security-session-empty"><span className="spinner" /> Loading devices…</div>
+        ) : devices.length === 0 ? (
+          <div className="security-session-empty">No backup clients are connected.</div>
+        ) : (
+          <div className="security-session-list">
+            {devices.map((device) => (
+              <article className="security-session" key={device.id}>
+                <div className="security-session-main">
+                  <div className="security-session-name">
+                    <span className="security-session-device"><Laptop size={16} /></span>
+                    <strong>{device.name}</strong>
+                  </div>
+                  <div className="security-session-details">
+                    <span>{device.operating_system} · {device.client_name} {device.client_version}</span>
+                    <span><Clock3 size={13} /> Last active {formatSessionDate(device.last_active_at)}</span>
+                    <span>Added {formatSessionDate(device.created_at)}</span>
+                    {device.last_ip ? <span>IP {device.last_ip}</span> : null}
+                    <span>Permissions {device.permissions.join(', ') || 'backup'}</span>
+                  </div>
+                </div>
+                <button
+                  className="button button-quiet-danger security-session-revoke"
+                  type="button"
+                  disabled={busyDeviceId !== null}
+                  onClick={() => void revokeDevice(device)}
+                >
+                  {busyDeviceId === device.id ? 'Revoking…' : 'Revoke'}
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
     </section>
   );
 }

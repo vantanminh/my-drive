@@ -12,6 +12,10 @@ harness.db-shm
 
 # Frontend build output
 /frontend/node_modules/
+
+# Windows backup client build output
+/clients/windows/**/bin/
+/clients/windows/**/obj/
 /frontend/dist/
 /frontend/tsconfig.tsbuildinfo
 

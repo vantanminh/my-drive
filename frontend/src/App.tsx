@@ -5,6 +5,7 @@ import LoginPage from './components/LoginPage';
 import PublicSharePage from './components/PublicSharePage';
 import DriveApp from './components/DriveApp';
 import PasswordChangePage from './components/PasswordChangePage';
+import DeviceAuthorizePage from './components/DeviceAuthorizePage';
 import { parsePublicRoute, useBrowserHref } from './route';
 import type { User } from './types';
 
@@ -35,6 +36,8 @@ export default function App() {
   }, [publicRoute, user, href]);
 
   if (href.startsWith('/docs/')) return <Suspense fallback={<main className="api-docs">Loading documentation…</main>}><ApiDocsPage href={href} /></Suspense>;
+  const devicePath = href.includes('?') ? href.slice(0, href.indexOf('?')) : href;
+  if (devicePath === '/device/authorize') return <DeviceAuthorizePage />;
   if (publicRoute) return <PublicSharePage token={publicRoute.token} />;
   if (checkingSession) {
     return <main className="app-loading"><span className="spinner" />Opening your drive…</main>;

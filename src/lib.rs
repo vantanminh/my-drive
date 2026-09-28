@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod db;
 mod developer;
+mod devices;
 mod drive;
 mod face_indexer;
 mod faces;
