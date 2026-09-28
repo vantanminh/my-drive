@@ -67,6 +67,71 @@ pub enum StorageError {
 }
 
 impl LocalStorage {
+    /// Provision a persistent server secret on the verified data volume.
+    /// The exclusive file lock prevents concurrent startups from choosing different keys.
+    pub(crate) fn google_drive_token_key(&self) -> Result<[u8; 32], StorageError> {
+        use fs2::FileExt;
+        use rand_core::{OsRng, RngCore};
+        use std::io::{Read, Write};
+
+        self.ensure_mounted()?;
+        let directory = self.root.join(".secrets");
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
+            builder.mode(0o700);
+            builder
+        };
+        match builder.create(&directory) {
+            Ok(()) => sync_directory(&self.root)?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = fs::symlink_metadata(&directory)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(StorageError::UnsafeKey);
+        }
+        let path = directory.join("google-drive-token.key");
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(StorageError::UnsafeKey);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            options.mode(0o600);
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        }
+        let mut file = options.open(&path)?;
+        file.lock_exclusive()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        let length = file.metadata()?.len();
+        let mut key = [0_u8; 32];
+        match length {
+            0 => {
+                OsRng.fill_bytes(&mut key);
+                file.write_all(&key)?;
+                file.sync_all()?;
+                sync_directory(&directory)?;
+            }
+            32 => file.read_exact(&mut key)?,
+            _ => return Err(StorageError::UnsafeKey),
+        }
+        Ok(key)
+    }
+
     pub fn initialize(config: &Config) -> Result<Self, StorageError> {
         let mut storage = Self {
             root: config.storage_root.clone(),
@@ -434,6 +499,64 @@ mod tests {
             cookie_secure: true,
             google_drive: None,
         }
+    }
+
+    #[test]
+    fn google_drive_key_survives_reinitialization_and_concurrent_startups() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = config(temp.path().to_path_buf(), false);
+        let storage = LocalStorage::initialize(&settings).unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let storage = storage.clone();
+                std::thread::spawn(move || storage.google_drive_token_key().unwrap())
+            })
+            .collect();
+        let keys: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(keys.iter().all(|key| *key == keys[0]));
+        assert_ne!(keys[0], [0; 32]);
+        let restarted = LocalStorage::initialize(&settings).unwrap();
+        assert_eq!(restarted.google_drive_token_key().unwrap(), keys[0]);
+        let path = temp.path().join(".secrets/google-drive-token.key");
+        assert_eq!(fs::read(&path).unwrap(), keys[0]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn google_drive_key_rejects_corruption_without_replacing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::initialize(&config(temp.path().to_path_buf(), false)).unwrap();
+        storage.google_drive_token_key().unwrap();
+        let path = temp.path().join(".secrets/google-drive-token.key");
+        fs::write(&path, b"corrupt").unwrap();
+        assert!(storage.google_drive_token_key().is_err());
+        assert_eq!(fs::read(path).unwrap(), b"corrupt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn google_drive_key_rejects_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::initialize(&config(temp.path().to_path_buf(), false)).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(external.path(), temp.path().join(".secrets")).unwrap();
+        assert!(storage.google_drive_token_key().is_err());
+        assert!(!external.path().join("google-drive-token.key").exists());
     }
 
     #[test]

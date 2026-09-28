@@ -84,7 +84,8 @@ pub async fn run() -> anyhow::Result<()> {
     };
     let maintenance_pool = pool.clone();
     let maintenance_storage = storage.clone();
-    let google_drive = config.google_drive.clone();
+    let google_drive = google_drive::initialize_settings(&storage, config.google_drive.clone())
+        .context("initialize Google Drive encryption key")?;
     let document_preview_url = config.document_preview_url.clone();
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server. Google OAuth material stays
@@ -95,7 +96,7 @@ pub async fn run() -> anyhow::Result<()> {
         storage,
         media_preview,
         document_preview_url,
-        google_drive: google_drive.clone(),
+        google_drive: Some(google_drive.clone()),
         auth_settings,
         transfer_settings,
         login_rate_limiter: auth::LoginRateLimiter::default(),
@@ -109,14 +110,12 @@ pub async fn run() -> anyhow::Result<()> {
         maintenance_storage.clone(),
         maintenance_settings,
     ));
-    if let Some(settings) = google_drive {
-        tokio::spawn(google_drive::run_worker(
-            maintenance_pool,
-            maintenance_storage,
-            settings,
-            transfer_settings,
-        ));
-    }
+    tokio::spawn(google_drive::run_worker(
+        maintenance_pool,
+        maintenance_storage,
+        google_drive,
+        transfer_settings,
+    ));
     info!(address = %bind_addr, "My Drive is listening");
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal())

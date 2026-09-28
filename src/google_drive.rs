@@ -56,6 +56,21 @@ const BUSY_PACE_MAX_MS: u128 = 1_200;
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v3/userinfo";
 const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
+
+pub(crate) fn initialize_settings(
+    storage: &LocalStorage,
+    configured: Option<GoogleDriveSettings>,
+) -> Result<GoogleDriveSettings, StorageError> {
+    match configured {
+        Some(settings) => Ok(settings),
+        None => Ok(GoogleDriveSettings {
+            client_id: String::new(),
+            client_secret: String::new(),
+            redirect_uri: String::new(),
+            token_key: storage.google_drive_token_key()?,
+        }),
+    }
+}
 const LIST_FIELDS: &str = "nextPageToken,files(id,name,mimeType,size,md5Checksum,modifiedTime,shortcutDetails(targetId,targetMimeType))";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

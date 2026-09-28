@@ -42,6 +42,10 @@ mkdir -p \
     "$PREVIEW_ROOT" \
     "$BACKUP_ROOT"
 chmod 700 "$WORK_ROOT" "$BACKUP_ROOT"
+mkdir -m 700 "$STORAGE_ROOT/.secrets"
+python3 -c 'import sys; sys.stdout.buffer.write(bytes(range(32)))' >"$STORAGE_ROOT/.secrets/google-drive-token.key"
+chmod 600 "$STORAGE_ROOT/.secrets/google-drive-token.key"
+key_checksum="$(sha256sum "$STORAGE_ROOT/.secrets/google-drive-token.key" | cut -d ' ' -f 1)"
 
 age-keygen -o "$AGE_IDENTITY" >/dev/null 2>&1
 chmod 600 "$AGE_IDENTITY"
@@ -173,6 +177,7 @@ fi
 "${compose[@]}" exec -T db psql -v ON_ERROR_STOP=1 -U mydrive -d mydrive \
     -c "UPDATE restore_marker SET value = 'mutated';"
 printf 'backup-smoke-mutated-payload' >"$STORAGE_ROOT/objects/$object_key"
+printf 'mutated-token-key' >"$STORAGE_ROOT/.secrets/google-drive-token.key"
 rm -f -- "$preview_key"
 
 set +e
@@ -195,6 +200,14 @@ restored_marker="$("${compose[@]}" exec -T db psql -X -A -t -U mydrive -d mydriv
 }
 [[ "$(sudo cat -- "$STORAGE_ROOT/objects/$object_key")" == "$payload" ]] || {
     printf 'storage payload was not restored\n' >&2
+    exit 1
+}
+[[ "$(sudo sha256sum "$STORAGE_ROOT/.secrets/google-drive-token.key" | cut -d ' ' -f 1)" == "$key_checksum" ]] || {
+    printf 'Google Drive encryption key was not restored\n' >&2
+    exit 1
+}
+[[ "$(sudo stat -c '%a' "$STORAGE_ROOT/.secrets/google-drive-token.key")" == 600 ]] || {
+    printf 'Google Drive encryption key permissions were not preserved\n' >&2
     exit 1
 }
 [[ "$(sudo cat -- "$preview_key")" == backup-smoke-original-preview ]] || {

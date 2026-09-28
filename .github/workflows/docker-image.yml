@@ -38,6 +38,9 @@ jobs:
       - name: Run Rust lints
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Check encrypted secret backup compatibility
+        run: python3 scripts/test_storage_archive.py
+
       - name: Build frontend
         working-directory: frontend
         run: npm ci --no-audit --no-fund && npm run build

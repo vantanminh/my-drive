@@ -138,7 +138,6 @@ export default function GoogleDrivePanel({ onClose, isOwner }: { onClose: () => 
       {isOwner && settings ? (
         <details className="google-drive-settings" open={!status?.configured}>
           <summary>Google OAuth settings</summary>
-          {settings.available ? (
             <form onSubmit={(event) => {
               event.preventDefault();
               void run('settings', async () => {
@@ -155,7 +154,6 @@ export default function GoogleDrivePanel({ onClose, isOwner }: { onClose: () => 
               <p>The secret is encrypted on the server. HTTPS is required except for localhost. Saving applies immediately; changing Client ID requires accounts to reconnect.</p>
               <button className="button button-secondary" type="submit" disabled={busy !== ''}>Save OAuth settings</button>
             </form>
-          ) : <p>Set GOOGLE_DRIVE_TOKEN_KEY on the server to a 64-character hexadecimal key, then restart once to enable secure setup here.</p>}
         </details>
       ) : null}
 

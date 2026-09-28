@@ -426,18 +426,22 @@ queued or the indexer is running. The indexer also waits briefly between jobs
 so thumbnail and video work does not stay at full CPU. Pause, resume, and the
 live file and byte counts are on the Google Drive screen.
 
-Leave the feature disabled by omitting all four settings. For WebUI setup,
-set only `GOOGLE_DRIVE_TOKEN_KEY` on the server (generate it with
-`openssl rand -hex 32`), then restart. Sign in as an owner, open **Google Drive →
+No environment setup is needed. Sign in as an owner, open **Google Drive ->
 Google OAuth settings**, and enter the Client ID, Client Secret, and Redirect URI.
+The server automatically generates a cryptographically random encryption key
+and persists it at `STORAGE_ROOT/.secrets/google-drive-token.key` on the data
+volume, with owner-only permissions on Linux. The key is reused across restarts
+and container replacements, and never returned to the browser. OAuth connection
+and sync stay inactive until an owner saves OAuth settings.
+
 Use an HTTPS callback URL (HTTP is allowed only on localhost). The owner-only API
 requires CSRF protection and stores the Client Secret encrypted in PostgreSQL;
 it never returns that secret to the browser. Leave the secret field blank when
 editing to keep the saved secret for the same Client ID. Changes apply without
 restarting, and changing Client ID requires existing accounts to reconnect.
-The server encryption key stays outside the database and WebUI. Preserve it
-with your deployment secrets; changing it also makes saved OAuth settings unreadable,
-so enter the OAuth settings again and reconnect accounts.
+Encrypted backups include the generated key. Preserve the `.secrets` directory
+when moving the data volume; losing the key requires entering OAuth settings
+again and reconnecting accounts.
 
 Alternatively, set all four environment settings together:
 
@@ -449,7 +453,8 @@ GOOGLE_DRIVE_TOKEN_KEY=
 ```
 
 Create an OAuth client with the Drive read-only scope and that exact redirect
-URI. Generate `GOOGLE_DRIVE_TOKEN_KEY` with `openssl rand -hex 32`. The service
+URI. For an optional manual override, generate `GOOGLE_DRIVE_TOKEN_KEY` with
+`openssl rand -hex 32`. The service
 uses it to encrypt refresh tokens before they are stored. Changing the key
 requires each account to connect again.
 
@@ -470,7 +475,7 @@ age-keygen -o "$HOME/.config/my-drive/age-identity"
 ```
 
 Use `age-keygen -y` to derive the public recipient for backup. Backups encrypt
-the PostgreSQL dump, the HDD `objects`, `uploads`, and `trash` tree, the
+the PostgreSQL dump, the HDD `objects`, `uploads`, `trash`, and optional `.secrets` trees, the
 separate SSD `previews` tree, the Compose file, and the protected environment
 file. The published bundle contains only age-encrypted payloads, a manifest,
 and SHA-256 checksums. The backup script stops the app and media indexer while

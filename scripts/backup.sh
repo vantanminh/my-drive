@@ -71,12 +71,17 @@ stop_service_for_operation app
 compose exec -T db sh -ec 'exec pg_dump --format=custom --no-owner --no-acl --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \
     | "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/database.dump.age"
 
+storage_roots=(objects uploads trash)
+if [[ -e "$STORAGE_DATA_ROOT/.secrets" || -L "$STORAGE_DATA_ROOT/.secrets" ]]; then
+    storage_roots+=(.secrets)
+fi
+
 "$TAR_BIN" --numeric-owner --warning=no-file-changed --create --gzip --file=- \
-    --directory "$STORAGE_DATA_ROOT" objects uploads trash \
+    --directory "$STORAGE_DATA_ROOT" "${storage_roots[@]}" \
     | "$AGE_BIN" --recipient "$AGE_RECIPIENT" --output "$staging_dir/storage.tar.gz.age"
 
 "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$STORAGE_DATA_ROOT" \
-    --roots objects uploads trash
+    --roots objects uploads trash .secrets
 
 "$TAR_BIN" --numeric-owner --warning=no-file-changed --create --gzip --file=- \
     --directory "$PREVIEW_DATA_ROOT" \

@@ -35,13 +35,7 @@ struct TestSession {
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
 async fn google_oauth_webui_settings_enforce_authorization_and_encrypt_secrets() {
-    let base = crate::GoogleDriveSettings {
-        client_id: String::new(),
-        client_secret: String::new(),
-        redirect_uri: String::new(),
-        token_key: [7; 32],
-    };
-    let (pool, app, storage) = setup_with_google(Some(base.clone())).await;
+    let (pool, app, storage) = setup_with_google(None).await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM google_drive_settings")
             .fetch_one(&pool)
@@ -136,7 +130,8 @@ async fn google_oauth_webui_settings_enforce_authorization_and_encrypt_secrets()
             .unwrap();
     assert_ne!(ciphertext, secret.as_bytes());
     // A fresh request state reads persisted configuration without a process-local cache.
-    let (second_pool, restarted, second_storage) = setup_with_google(Some(base)).await;
+    let (second_pool, restarted, second_storage) =
+        setup_with_google_storage(None, Some(storage.path().to_path_buf())).await;
     let fetched = request(
         &restarted,
         Method::GET,
@@ -848,6 +843,13 @@ async fn setup() -> (PgPool, Router, tempfile::TempDir) {
 async fn setup_with_google(
     google_drive: Option<crate::GoogleDriveSettings>,
 ) -> (PgPool, Router, tempfile::TempDir) {
+    setup_with_google_storage(google_drive, None).await
+}
+
+async fn setup_with_google_storage(
+    google_drive: Option<crate::GoogleDriveSettings>,
+    storage_root: Option<std::path::PathBuf>,
+) -> (PgPool, Router, tempfile::TempDir) {
     let database_url = std::env::var("TEST_DATABASE_URL")
         .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
     let pool = PgPoolOptions::new()
@@ -860,11 +862,12 @@ async fn setup_with_google(
         .await
         .expect("apply migrations");
     let storage = tempfile::tempdir().expect("create temporary storage");
+    let storage_root = storage_root.unwrap_or_else(|| storage.path().to_path_buf());
     let config = Config {
         database_url: "postgres://not-used-in-test".to_owned(),
         bind_addr: "127.0.0.1:3000".parse::<SocketAddr>().unwrap(),
-        storage_root: storage.path().to_path_buf(),
-        expected_mount: storage.path().to_path_buf(),
+        storage_root: storage_root.clone(),
+        expected_mount: storage_root,
         require_mount: false,
         require_device_match: false,
         expected_device: None,
@@ -882,6 +885,10 @@ async fn setup_with_google(
         google_drive: None,
     };
     let local_storage = LocalStorage::initialize(&config).expect("initialize test storage");
+    let google_drive = Some(
+        crate::google_drive::initialize_settings(&local_storage, google_drive)
+            .expect("initialize Google Drive key"),
+    );
     let app = api::router(AppState {
         pool: pool.clone(),
         storage: local_storage,

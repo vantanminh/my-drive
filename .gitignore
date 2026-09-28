@@ -20,5 +20,8 @@ harness.db-shm
 .env.local
 .env.*.local
 /data/
+/.secrets/
+google-drive-token.key
+__pycache__/
 /uploads/
 *.log

@@ -14,7 +14,8 @@ import uuid
 from pathlib import Path
 
 
-ROOTS = frozenset({"objects", "uploads", "trash", "previews"})
+ROOTS = frozenset({"objects", "uploads", "trash", "previews", ".secrets"})
+OPTIONAL_ROOTS = frozenset({".secrets"})
 ROOT_CHOICES = tuple(sorted(ROOTS))
 OBJECT_KEY = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f-]{36}$")
 STAGING_KEY = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.part$")
@@ -145,7 +146,7 @@ def process_archive(
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
                 if hasattr(os, "O_NOFOLLOW"):
                     flags |= os.O_NOFOLLOW
-                fd = os.open(target, flags, 0o640)
+                fd = os.open(target, flags, 0o600 if parts[0] == ".secrets" else 0o640)
                 remaining = member.size
                 try:
                     with os.fdopen(fd, "wb", closefd=True) as output:
@@ -165,10 +166,10 @@ def process_archive(
                     except OSError:
                         pass
                     raise
-                set_owner_and_mode(target, 0o640)
+                set_owner_and_mode(target, 0o600 if parts[0] == ".secrets" else 0o640)
 
-        if roots_seen != allowed_roots:
-            missing = ", ".join(sorted(allowed_roots - roots_seen))
+        if (allowed_roots - OPTIONAL_ROOTS) - roots_seen:
+            missing = ", ".join(sorted(allowed_roots - OPTIONAL_ROOTS - roots_seen))
             fail(f"archive is missing required storage roots: {missing}")
 
         if destination_root is not None:
@@ -176,7 +177,8 @@ def process_archive(
                 ensure_directory(destination_root, destination_root / root_name)
             for path in sorted(destination_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
                 if path.is_dir() and not path.is_symlink():
-                    set_owner_and_mode(path, 0o750)
+                    relative = path.relative_to(destination_root)
+                    set_owner_and_mode(path, 0o700 if relative.parts[0] == ".secrets" else 0o750)
             set_owner_and_mode(destination_root, 0o750)
         return total_bytes
     except (tarfile.TarError, OSError, EOFError) as exc:
@@ -203,6 +205,8 @@ def validate_storage_tree(
         ]
 
     for root_name, storage_root in roots_to_scan:
+        if root_name in OPTIONAL_ROOTS and not storage_root.exists() and not storage_root.is_symlink():
+            continue
         if not storage_root.is_dir() or storage_root.is_symlink():
             fail(f"storage root is missing or unsafe: {root_name}")
         for current, directories, files in os.walk(storage_root, topdown=True, followlinks=False):

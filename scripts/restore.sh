@@ -25,7 +25,7 @@ for child in objects uploads trash; do
     [[ -d "$STORAGE_DATA_ROOT/$child" && ! -L "$STORAGE_DATA_ROOT/$child" ]] || die "storage root is missing a safe $child directory"
 done
 "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$STORAGE_DATA_ROOT" \
-    --roots objects uploads trash >/dev/null
+    --roots objects uploads trash .secrets >/dev/null
 "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate-tree "$PREVIEW_DATA_ROOT" \
     --roots previews --root-name previews >/dev/null
 
@@ -46,7 +46,7 @@ fi
 "$PYTHON_BIN" "$SCRIPT_DIR/backup_bundle.py" "${target_check_args[@]}"
 
 archive_bytes="$("$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/storage.tar.gz.age" \
-    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --summary --roots objects uploads trash)"
+    | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --summary --roots objects uploads trash .secrets)"
 [[ "$archive_bytes" =~ ^[0-9]+$ ]] || die "could not measure restored storage size"
 preview_archive_bytes="$("$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/previews.tar.gz.age" \
     | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" validate --summary --roots previews)"
@@ -182,7 +182,7 @@ rollback_storage() {
     local child
     [[ -d "$rollback_dir" ]] || return 0
     mkdir -p -- "$restore_stage/.failed-restore" 2>/dev/null || true
-    for child in trash uploads objects; do
+    for child in .secrets trash uploads objects; do
         if [[ -d "$STORAGE_DATA_ROOT/$child" && ! -e "$restore_stage/$child" ]]; then
             mv -- "$STORAGE_DATA_ROOT/$child" "$restore_stage/.failed-restore/$child" || return 1
         fi
@@ -324,7 +324,7 @@ restore_work="$(mktemp -d "$STORAGE_DATA_ROOT/.restore-work.XXXXXXXX")"
 restore_stage="$restore_work/storage"
 "$AGE_BIN" --decrypt --identity "$AGE_IDENTITY" "$backup_dir/storage.tar.gz.age" \
     | "$PYTHON_BIN" "$SCRIPT_DIR/storage_archive.py" extract "$restore_stage" \
-        --roots objects uploads trash >/dev/null
+        --roots objects uploads trash .secrets >/dev/null
 
 preview_restore_work="$(mktemp -d "$preview_parent/.my-drive-preview-work.XXXXXXXX")"
 preview_restore_stage="$preview_restore_work/preview"
@@ -342,10 +342,12 @@ rm -f -- "$ready_rows"
 
 mkdir -- "$rollback_dir"
 storage_cutover_started=1
-for child in objects uploads trash; do
-    mv -- "$STORAGE_DATA_ROOT/$child" "$rollback_dir/$child"
+for child in objects uploads trash .secrets; do
+    if [[ -d "$STORAGE_DATA_ROOT/$child" ]]; then
+        mv -- "$STORAGE_DATA_ROOT/$child" "$rollback_dir/$child"
+    fi
 done
-for child in objects uploads trash; do
+for child in objects uploads trash .secrets; do
     mv -- "$restore_stage/$child" "$STORAGE_DATA_ROOT/$child"
 done
 
