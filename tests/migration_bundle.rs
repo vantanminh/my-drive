@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 14);
+    assert_eq!(migrator.iter().len(), 15);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [

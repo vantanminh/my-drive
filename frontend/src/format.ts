@@ -52,6 +52,7 @@ export function friendlyError(error: unknown): string {
     share_unavailable: 'This shared link has expired or was revoked.',
     service_unavailable: 'The service is temporarily unavailable. Try again shortly.',
     google_drive_unconfigured: 'Google Drive is not configured on this server yet.',
+    invalid_google_settings: 'Check the Client ID, Client Secret, and Redirect URI. Use HTTPS (or HTTP on localhost) and the exact /api/google-drive/callback path.',
     google_drive_not_connected: 'Connect a Google account before choosing folders.',
     reauth_required: 'Google needs you to connect again.',
     too_many_folders: 'You can sync up to 20 Google Drive folders.',

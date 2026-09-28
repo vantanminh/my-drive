@@ -34,6 +34,216 @@ struct TestSession {
 
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+async fn google_oauth_webui_settings_enforce_authorization_and_encrypt_secrets() {
+    let base = crate::GoogleDriveSettings {
+        client_id: String::new(),
+        client_secret: String::new(),
+        redirect_uri: String::new(),
+        token_key: [7; 32],
+    };
+    let (pool, app, storage) = setup_with_google(Some(base.clone())).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM google_drive_settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let owner = insert_user(&pool, "owner", None, None, false).await;
+    let member = insert_user(&pool, "member", Some(owner), Some(100), false).await;
+    let owner_session = insert_session(&pool, owner).await;
+    let member_session = insert_session(&pool, member).await;
+    let path = "/api/google-drive/settings";
+    let secret = "test-secret-123456789";
+    let body = json!({"client_id": "test-client.apps.googleusercontent.com", "client_secret": secret, "redirect_uri": "https://drive.example.test/api/google-drive/callback"});
+    assert_eq!(
+        request(&app, Method::GET, path, None, None, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for method in [Method::GET, Method::POST] {
+        assert_eq!(
+            request(
+                &app,
+                method,
+                path,
+                Some(&member_session),
+                Some(&member_session.csrf_token),
+                Some(body.clone())
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            Method::POST,
+            path,
+            Some(&owner_session),
+            None,
+            Some(body.clone())
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut invalid = body.clone();
+    invalid["redirect_uri"] = json!("http://external.example/api/google-drive/callback");
+    assert_eq!(
+        request(
+            &app,
+            Method::POST,
+            path,
+            Some(&owner_session),
+            Some(&owner_session.csrf_token),
+            Some(invalid)
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let unconfigured = response_json(
+        request(
+            &app,
+            Method::GET,
+            "/api/google-drive",
+            Some(&owner_session),
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unconfigured["configured"], false);
+    let saved = request(
+        &app,
+        Method::POST,
+        path,
+        Some(&owner_session),
+        Some(&owner_session.csrf_token),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::NO_CONTENT);
+    assert_eq!(saved.headers()["cache-control"], "no-store");
+    let ciphertext =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT secret_ciphertext FROM google_drive_settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_ne!(ciphertext, secret.as_bytes());
+    // A fresh request state reads persisted configuration without a process-local cache.
+    let (second_pool, restarted, second_storage) = setup_with_google(Some(base)).await;
+    let fetched = request(
+        &restarted,
+        Method::GET,
+        path,
+        Some(&owner_session),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(fetched.headers()["cache-control"], "no-store");
+    let settings = response_json(fetched).await;
+    assert_eq!(settings["secret_saved"], true);
+    assert_eq!(settings["client_id"], body["client_id"]);
+    assert!(settings.get("client_secret").is_none());
+    assert!(!settings.to_string().contains(secret));
+    let mut keep = body.clone();
+    keep["client_secret"] = json!("");
+    assert_eq!(
+        request(
+            &app,
+            Method::POST,
+            path,
+            Some(&owner_session),
+            Some(&owner_session.csrf_token),
+            Some(keep.clone())
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let connected = request(
+        &app,
+        Method::POST,
+        "/api/google-drive/connect",
+        Some(&owner_session),
+        Some(&owner_session.csrf_token),
+        None,
+    )
+    .await;
+    assert_eq!(connected.status(), StatusCode::OK);
+    let authorize = response_json(connected).await;
+    assert!(
+        authorize["authorize_url"]
+            .as_str()
+            .unwrap()
+            .contains("test-client.apps.googleusercontent.com")
+    );
+    keep["client_id"] = json!("another-client.apps.googleusercontent.com");
+    assert_eq!(
+        request(
+            &app,
+            Method::POST,
+            path,
+            Some(&owner_session),
+            Some(&owner_session.csrf_token),
+            Some(keep.clone())
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    keep["client_secret"] = json!("new-secret-123456789");
+    // A client change invalidates outstanding OAuth requests and existing refresh tokens.
+    sqlx::query("INSERT INTO google_drive_connections (id, owner_id, google_subject, google_email, refresh_nonce, refresh_token) VALUES ($1, $2, 'test-subject', 'google@example.test', $3, $4)")
+        .bind(Uuid::new_v4()).bind(owner).bind(vec![0_u8; 12]).bind(vec![1_u8; 32]).execute(&pool).await.unwrap();
+    assert_eq!(
+        request(
+            &app,
+            Method::POST,
+            path,
+            Some(&owner_session),
+            Some(&owner_session.csrf_token),
+            Some(keep)
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT auth_state FROM google_drive_connections WHERE owner_id = $1"
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "reauth_required"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM google_drive_oauth_states")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("DELETE FROM google_drive_settings")
+        .execute(&pool)
+        .await
+        .unwrap();
+    cleanup_users(&pool, &[member, owner]).await;
+    drop((storage, second_storage));
+    second_pool.close().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
 async fn owner_managed_account_lifecycle_enforces_password_rotation_and_disablement() {
     let (pool, app, storage) = setup().await;
     let owner_id = insert_user(&pool, "owner", None, None, false).await;
@@ -632,6 +842,12 @@ async fn member_quota_counts_used_bytes_and_serializes_concurrent_upload_reserva
 }
 
 async fn setup() -> (PgPool, Router, tempfile::TempDir) {
+    setup_with_google(None).await
+}
+
+async fn setup_with_google(
+    google_drive: Option<crate::GoogleDriveSettings>,
+) -> (PgPool, Router, tempfile::TempDir) {
     let database_url = std::env::var("TEST_DATABASE_URL")
         .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
     let pool = PgPoolOptions::new()
@@ -671,7 +887,7 @@ async fn setup() -> (PgPool, Router, tempfile::TempDir) {
         storage: local_storage,
         media_preview: None,
         document_preview_url: None,
-        google_drive: None,
+        google_drive,
         auth_settings: AuthSettings {
             cookie_secure: false,
             session_ttl_seconds: 3600,

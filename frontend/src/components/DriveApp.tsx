@@ -1766,7 +1766,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
           {section === 'drive' && developerOpen ? <DeveloperPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' && securityOpen ? <AccountSecurityPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
-          {section === 'drive' && googleDriveOpen ? <GoogleDrivePanel onClose={() => showDrive({ panel: null })} /> : null}
+          {section === 'drive' && googleDriveOpen ? <GoogleDrivePanel isOwner={user.role === 'owner'} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' ? (
             user.role === 'owner' ? (
               accountAdminOpen ? (

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Cloud, Folder, Pause, Play, RefreshCw, Unlink, X } from 'lucide-react';
-import { api, type GoogleDriveFolderPage, type GoogleDriveRun, type GoogleDriveStatus } from '../api';
+import { api, type GoogleDriveFolderPage, type GoogleDriveRun, type GoogleDriveStatus, type GoogleDriveSettings } from '../api';
 import { formatSize, friendlyError } from '../format';
 import { clearSearchParam } from '../route';
 
@@ -30,13 +30,31 @@ function progressPercent(run: GoogleDriveRun): number {
   return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
 }
 
-export default function GoogleDrivePanel({ onClose }: { onClose: () => void }) {
+export default function GoogleDrivePanel({ onClose, isOwner }: { onClose: () => void; isOwner: boolean }) {
   const [status, setStatus] = useState<GoogleDriveStatus | null>(null);
   const [folders, setFolders] = useState<GoogleDriveFolderPage | null>(null);
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: 'root', name: 'My Drive' }]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
+  const [settings, setSettings] = useState<GoogleDriveSettings | null>(null);
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [redirectUri, setRedirectUri] = useState(window.location.origin + '/api/google-drive/callback');
+
+  useEffect(() => {
+    if (!isOwner) return;
+    const controller = new AbortController();
+    api.googleDriveSettings(controller.signal).then((next) => {
+      if (controller.signal.aborted) return;
+      setSettings(next);
+      setClientId(next.client_id);
+      setRedirectUri(next.redirect_uri || window.location.origin + '/api/google-drive/callback');
+    }).catch((cause: unknown) => {
+      if (!controller.signal.aborted) setError(friendlyError(cause));
+    });
+    return () => controller.abort();
+  }, [isOwner]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -117,6 +135,30 @@ export default function GoogleDrivePanel({ onClose }: { onClose: () => void }) {
       {error ? <div className="media-index-message media-index-error" role="alert">{error}</div> : null}
       {notice ? <div className="media-index-message media-index-notice" role="status">{notice}</div> : null}
 
+      {isOwner && settings ? (
+        <details className="google-drive-settings" open={!status?.configured}>
+          <summary>Google OAuth settings</summary>
+          {settings.available ? (
+            <form onSubmit={(event) => {
+              event.preventDefault();
+              void run('settings', async () => {
+                await api.googleDriveSaveSettings({ client_id: clientId.trim(), client_secret: clientSecret.trim(), redirect_uri: redirectUri.trim() });
+                setClientSecret('');
+                setSettings(await api.googleDriveSettings());
+                setNotice('Google OAuth settings saved. You can connect your account now. If the Client ID changed, reconnect existing accounts.');
+              });
+            }}>
+              <p>Create a Web application OAuth client in Google Cloud with the Drive API enabled. Add the exact Redirect URI below to its authorized redirect URIs.</p>
+              <label>Client ID<input required value={clientId} onChange={(event) => setClientId(event.target.value)} maxLength={200} autoComplete="off" spellCheck={false} /></label>
+              <label>Client Secret<input type="password" required={!settings.secret_saved || clientId.trim() !== settings.client_id} value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} maxLength={256} autoComplete="new-password" placeholder={settings.secret_saved ? 'Leave blank to keep the saved secret' : 'Enter Client Secret'} /></label>
+              <label>Redirect URI<input type="url" required value={redirectUri} onChange={(event) => setRedirectUri(event.target.value)} maxLength={500} autoComplete="off" spellCheck={false} /></label>
+              <p>The secret is encrypted on the server. HTTPS is required except for localhost. Saving applies immediately; changing Client ID requires accounts to reconnect.</p>
+              <button className="button button-secondary" type="submit" disabled={busy !== ''}>Save OAuth settings</button>
+            </form>
+          ) : <p>Set GOOGLE_DRIVE_TOKEN_KEY on the server to a 64-character hexadecimal key, then restart once to enable secure setup here.</p>}
+        </details>
+      ) : null}
+
       {status && !status.configured ? (
         <p className="google-drive-note">An administrator still needs to add the Google OAuth client settings before accounts can connect.</p>
       ) : null}
@@ -152,7 +194,10 @@ export default function GoogleDrivePanel({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          {status.reauth_required ? <p className="google-drive-note">Google needs this account to be connected again.</p> : null}
+          {status.reauth_required ? <div className="google-drive-toolbar"><p className="google-drive-note">Google needs this account to be connected again.</p><button className="button button-primary" type="button" disabled={busy !== ''} onClick={() => void run('connect', async () => {
+            const result = await api.googleDriveConnect();
+            window.location.assign(result.authorize_url);
+          })}>Reconnect Google Drive</button></div> : null}
 
           <div className="media-index-metrics" aria-label="Imported media indexing">
             <div><span>Images indexed</span><strong>{status.images_indexed}</strong></div>

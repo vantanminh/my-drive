@@ -1725,6 +1725,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .google-drive-bar { height: 6px; margin: 8px 0; overflow: hidden; background: #e7eeea; border-radius: 99px; }
 .google-drive-bar > span { display: block; height: 100%; background: #3d7a5a; }
+.google-drive-settings { margin: 14px 0; padding: 14px; border: 1px solid #dce5df; border-radius: 12px; }
+.google-drive-settings summary { cursor: pointer; font-weight: 600; }
+.google-drive-settings form, .google-drive-settings label { display: grid; gap: 8px; }
+.google-drive-settings form { margin-top: 12px; gap: 12px; }
+.google-drive-settings input { width: 100%; min-width: 0; padding: 10px; border: 1px solid #cbd8d0; border-radius: 8px; font: inherit; }
 
 .context-menu {
   position: fixed;

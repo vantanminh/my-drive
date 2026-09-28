@@ -94,6 +94,13 @@ export type GoogleDriveStatus = {
   sources: GoogleDriveSource[];
 };
 
+export type GoogleDriveSettings = {
+  available: boolean;
+  client_id: string;
+  redirect_uri: string;
+  secret_saved: boolean;
+};
+
 export type GoogleDriveFolderPage = {
   parent_id: string;
   folders: Array<{ id: string; name: string }>;
@@ -338,6 +345,12 @@ export const api = {
     }),
   googleDriveStatus: (signal?: AbortSignal) =>
     request<GoogleDriveStatus>('/api/google-drive', { signal, cache: 'no-store' }),
+  googleDriveSettings: (signal?: AbortSignal) =>
+    request<GoogleDriveSettings>('/api/google-drive/settings', { signal, cache: 'no-store' }),
+  googleDriveSaveSettings: (settings: { client_id: string; client_secret: string; redirect_uri: string }) =>
+    request<void>('/api/google-drive/settings', {
+      method: 'POST', csrf: true, cache: 'no-store', body: JSON.stringify(settings)
+    }),
   googleDriveConnect: () =>
     request<{ authorize_url: string }>('/api/google-drive/connect', {
       method: 'POST',

@@ -53,7 +53,7 @@ pub enum ConfigError {
     )]
     MissingMediaPreviewDevice,
     #[error(
-        "GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI, and GOOGLE_DRIVE_TOKEN_KEY must be set together"
+        "Set GOOGLE_DRIVE_TOKEN_KEY alone for WebUI setup, or together with all three GOOGLE_OAUTH settings"
     )]
     PartialGoogleDrive,
 }
@@ -260,6 +260,16 @@ fn google_drive_settings(
     let token_key = nonempty(vars, "GOOGLE_DRIVE_TOKEN_KEY");
     match (client_id, client_secret, redirect_uri, token_key) {
         (None, None, None, None) => Ok(None),
+        (None, None, None, Some(token_key)) => {
+            let token_key = decode_token_key(token_key)
+                .ok_or(ConfigError::Invalid("GOOGLE_DRIVE_TOKEN_KEY"))?;
+            Ok(Some(GoogleDriveSettings {
+                client_id: String::new(),
+                client_secret: String::new(),
+                redirect_uri: String::new(),
+                token_key,
+            }))
+        }
         (Some(client_id), Some(client_secret), Some(redirect_uri), Some(token_key)) => {
             if !valid_oauth_client_value(client_id, 10, 200) {
                 return Err(ConfigError::Invalid("GOOGLE_OAUTH_CLIENT_ID"));
@@ -284,20 +294,28 @@ fn google_drive_settings(
     }
 }
 
-fn valid_oauth_client_value(value: &str, min: usize, max: usize) -> bool {
+pub(crate) fn valid_oauth_client_value(value: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&value.len())
         && value
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && byte != b'"' && byte != b'\\' && byte != b'&')
 }
 
-fn valid_redirect_uri(value: &str) -> bool {
-    (value.starts_with("https://") || value.starts_with("http://"))
-        && value.contains("/api/google-drive/callback")
-        && (16..=500).contains(&value.len())
-        && !value
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
+pub(crate) fn valid_redirect_uri(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    (16..=500).contains(&value.len())
+        && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == "/api/google-drive/callback"
+        && url.host_str().is_some()
+        && (url.scheme() == "https"
+            || (url.scheme() == "http"
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))))
 }
 
 fn decode_token_key(value: &str) -> Option<[u8; 32]> {
@@ -654,9 +672,20 @@ mod tests {
     }
 
     #[test]
-    fn google_drive_settings_are_optional_and_all_or_nothing() {
+    fn google_drive_settings_allow_key_only_but_reject_partial_oauth() {
         let config = Config::from_vars(&base_vars()).unwrap();
         assert!(config.google_drive.is_none());
+
+        let mut webui = base_vars();
+        webui.insert("GOOGLE_DRIVE_TOKEN_KEY".to_owned(), "ab".repeat(32));
+        let settings = Config::from_vars(&webui).unwrap().google_drive.unwrap();
+        assert!(settings.client_id.is_empty());
+        assert_eq!(settings.token_key, [0xab; 32]);
+        webui.insert("GOOGLE_DRIVE_TOKEN_KEY".to_owned(), "zz".repeat(32));
+        assert!(matches!(
+            Config::from_vars(&webui),
+            Err(ConfigError::Invalid("GOOGLE_DRIVE_TOKEN_KEY"))
+        ));
 
         let mut partial = base_vars();
         partial.insert(
@@ -694,5 +723,26 @@ mod tests {
             Config::from_vars(&vars),
             Err(ConfigError::Invalid("GOOGLE_DRIVE_TOKEN_KEY"))
         ));
+    }
+
+    #[test]
+    fn google_oauth_callback_requires_an_exact_secure_url() {
+        for value in [
+            "https://drive.example.com/api/google-drive/callback",
+            "http://localhost:3000/api/google-drive/callback",
+            "http://127.0.0.1:3000/api/google-drive/callback",
+            "http://[::1]:3000/api/google-drive/callback",
+        ] {
+            assert!(super::valid_redirect_uri(value), "{value}");
+        }
+        for value in [
+            "http://drive.example.com/api/google-drive/callback",
+            "https://drive.example.com/wrong/api/google-drive/callback",
+            "https://drive.example.com/api/google-drive/callback?next=evil",
+            "https://drive.example.com/api/google-drive/callback#fragment",
+            "https://user:password@drive.example.com/api/google-drive/callback",
+        ] {
+            assert!(!super::valid_redirect_uri(value), "{value}");
+        }
     }
 }

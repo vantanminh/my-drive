@@ -426,7 +426,20 @@ queued or the indexer is running. The indexer also waits briefly between jobs
 so thumbnail and video work does not stay at full CPU. Pause, resume, and the
 live file and byte counts are on the Google Drive screen.
 
-Leave the feature disabled by omitting all four settings. Set them together:
+Leave the feature disabled by omitting all four settings. For WebUI setup,
+set only `GOOGLE_DRIVE_TOKEN_KEY` on the server (generate it with
+`openssl rand -hex 32`), then restart. Sign in as an owner, open **Google Drive →
+Google OAuth settings**, and enter the Client ID, Client Secret, and Redirect URI.
+Use an HTTPS callback URL (HTTP is allowed only on localhost). The owner-only API
+requires CSRF protection and stores the Client Secret encrypted in PostgreSQL;
+it never returns that secret to the browser. Leave the secret field blank when
+editing to keep the saved secret for the same Client ID. Changes apply without
+restarting, and changing Client ID requires existing accounts to reconnect.
+The server encryption key stays outside the database and WebUI. Preserve it
+with your deployment secrets; changing it also makes saved OAuth settings unreadable,
+so enter the OAuth settings again and reconnect accounts.
+
+Alternatively, set all four environment settings together:
 
 ```dotenv
 GOOGLE_OAUTH_CLIENT_ID=

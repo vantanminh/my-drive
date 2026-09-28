@@ -567,6 +567,10 @@ enum GoogleApiError {
     Conflict,
     #[error("csrf")]
     Csrf,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("invalid oauth settings")]
+    InvalidSettings,
     #[error("unconfigured")]
     Unconfigured,
     #[error("not connected")]
@@ -592,6 +596,8 @@ impl IntoResponse for GoogleApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict => (StatusCode::CONFLICT, "conflict"),
             Self::Csrf => (StatusCode::FORBIDDEN, "csrf_failed"),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            Self::InvalidSettings => (StatusCode::BAD_REQUEST, "invalid_google_settings"),
             Self::Unconfigured => (StatusCode::SERVICE_UNAVAILABLE, "google_drive_unconfigured"),
             Self::NotConnected => (StatusCode::CONFLICT, "google_drive_not_connected"),
             Self::Reauth => (StatusCode::CONFLICT, "reauth_required"),
@@ -621,11 +627,151 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-fn require_settings(state: &AppState) -> Result<&GoogleDriveSettings, GoogleApiError> {
-    state
+async fn load_settings<'e, E>(
+    executor: E,
+    base: &GoogleDriveSettings,
+) -> Result<GoogleDriveSettings, GoogleApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query_as::<_, (String, String, Vec<u8>, Vec<u8>)>(
+        "SELECT client_id, redirect_uri, secret_nonce, secret_ciphertext FROM google_drive_settings WHERE singleton = TRUE"
+    ).fetch_optional(executor).await.map_err(GoogleApiError::Database)?;
+    if let Some((client_id, redirect_uri, nonce, ciphertext)) = row {
+        let client_secret = open_token(&base.token_key, Uuid::nil(), &nonce, &ciphertext)
+            .map_err(|_| GoogleApiError::Unconfigured)?;
+        Ok(GoogleDriveSettings {
+            client_id,
+            client_secret,
+            redirect_uri,
+            token_key: base.token_key,
+        })
+    } else if base.client_id.is_empty() {
+        Err(GoogleApiError::Unconfigured)
+    } else {
+        Ok(base.clone())
+    }
+}
+
+async fn require_settings(state: &AppState) -> Result<GoogleDriveSettings, GoogleApiError> {
+    let base = state
         .google_drive
         .as_ref()
-        .ok_or(GoogleApiError::Unconfigured)
+        .ok_or(GoogleApiError::Unconfigured)?;
+    load_settings(&state.pool, base).await
+}
+
+#[derive(Serialize)]
+struct SettingsBody {
+    available: bool,
+    client_id: String,
+    redirect_uri: String,
+    secret_saved: bool,
+}
+
+async fn oauth_settings(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, GoogleApiError> {
+    if user.role != "owner" {
+        return Err(GoogleApiError::Forbidden);
+    }
+    let settings = match require_settings(&state).await {
+        Ok(settings) => Some(settings),
+        Err(GoogleApiError::Unconfigured) => None,
+        Err(error) => return Err(error),
+    };
+    Ok(no_store(
+        Json(SettingsBody {
+            available: state.google_drive.is_some(),
+            client_id: settings
+                .as_ref()
+                .map(|s| s.client_id.clone())
+                .unwrap_or_default(),
+            redirect_uri: settings
+                .as_ref()
+                .map(|s| s.redirect_uri.clone())
+                .unwrap_or_default(),
+            secret_saved: settings.is_some(),
+        })
+        .into_response(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct SaveSettings {
+    client_id: String,
+    client_secret: String,
+    redirect_uri: String,
+}
+
+async fn save_oauth_settings(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(body): Json<SaveSettings>,
+) -> Result<Response, GoogleApiError> {
+    if user.role != "owner" {
+        return Err(GoogleApiError::Forbidden);
+    }
+    require_change(&headers, &user, &state)?;
+    let base = state
+        .google_drive
+        .as_ref()
+        .ok_or(GoogleApiError::Unconfigured)?;
+    if !crate::config::valid_oauth_client_value(&body.client_id, 10, 200)
+        || !crate::config::valid_redirect_uri(&body.redirect_uri)
+    {
+        return Err(GoogleApiError::InvalidSettings);
+    }
+    let mut tx = state.pool.begin().await.map_err(GoogleApiError::Database)?;
+    // Serialize configuration changes across server instances.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(WORKER_LOCK_ID + 1)
+        .execute(&mut *tx)
+        .await
+        .map_err(GoogleApiError::Database)?;
+    let previous = match load_settings(&mut *tx, base).await {
+        Ok(settings) => Some(settings),
+        Err(GoogleApiError::Unconfigured) => None,
+        Err(error) => return Err(error),
+    };
+    let secret = if body.client_secret.is_empty() {
+        previous
+            .as_ref()
+            .filter(|s| s.client_id == body.client_id)
+            .map(|s| s.client_secret.clone())
+            .ok_or(GoogleApiError::InvalidSettings)?
+    } else {
+        body.client_secret
+    };
+    if !crate::config::valid_oauth_client_value(&secret, 8, 256) {
+        return Err(GoogleApiError::InvalidSettings);
+    }
+    let client_changed = previous
+        .as_ref()
+        .is_some_and(|s| s.client_id != body.client_id);
+    let (nonce, ciphertext) = seal_token(&base.token_key, Uuid::nil(), &secret)
+        .map_err(|_| GoogleApiError::Unconfigured)?;
+    sqlx::query("INSERT INTO google_drive_settings (singleton, client_id, redirect_uri, secret_nonce, secret_ciphertext) VALUES (TRUE, $1, $2, $3, $4) ON CONFLICT (singleton) DO UPDATE SET client_id = EXCLUDED.client_id, redirect_uri = EXCLUDED.redirect_uri, secret_nonce = EXCLUDED.secret_nonce, secret_ciphertext = EXCLUDED.secret_ciphertext, updated_at = now()")
+        .bind(body.client_id).bind(body.redirect_uri).bind(nonce).bind(ciphertext)
+        .execute(&mut *tx).await.map_err(GoogleApiError::Database)?;
+    sqlx::query("DELETE FROM google_drive_oauth_states")
+        .execute(&mut *tx)
+        .await
+        .map_err(GoogleApiError::Database)?;
+    if client_changed {
+        sqlx::query("UPDATE google_drive_connections SET auth_state = 'reauth_required', updated_at = now()")
+            .execute(&mut *tx).await.map_err(GoogleApiError::Database)?;
+    }
+    sqlx::query("INSERT INTO audit_events (event_type, actor_id) VALUES ('google_drive_settings_updated', $1)")
+        .bind(user.id).execute(&mut *tx).await.map_err(GoogleApiError::Database)?;
+    tx.commit().await.map_err(GoogleApiError::Database)?;
+    token_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    Ok(no_store(StatusCode::NO_CONTENT.into_response()))
 }
 
 fn require_change(
@@ -643,6 +789,10 @@ fn require_change(
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/google-drive", get(status))
+        .route(
+            "/api/google-drive/settings",
+            get(oauth_settings).post(save_oauth_settings),
+        )
         .route("/api/google-drive/connect", post(connect))
         .route("/api/google-drive/callback", get(callback))
         .route("/api/google-drive/disconnect", post(disconnect))
@@ -734,8 +884,12 @@ async fn status(
     State(state): State<AppState>,
     user: AuthenticatedUser,
 ) -> Result<Response, GoogleApiError> {
-    if state.google_drive.is_none() {
-        return Ok(no_store(Json(empty_status(false)).into_response()));
+    match require_settings(&state).await {
+        Ok(_) => {}
+        Err(GoogleApiError::Unconfigured) => {
+            return Ok(no_store(Json(empty_status(false)).into_response()));
+        }
+        Err(error) => return Err(error),
     }
     let connection = fetch_connection(&state.pool, user.id).await?;
     let Some(connection) = connection else {
@@ -869,7 +1023,7 @@ async fn connect(
     user: AuthenticatedUser,
     headers: HeaderMap,
 ) -> Result<Response, GoogleApiError> {
-    let settings = require_settings(&state)?;
+    let settings = require_settings(&state).await?;
     require_change(&headers, &user, &state)?;
     sqlx::query("DELETE FROM google_drive_oauth_states WHERE expires_at <= now()")
         .execute(&state.pool)
@@ -928,7 +1082,7 @@ async fn finish_callback(
     user: &AuthenticatedUser,
     query: CallbackQuery,
 ) -> Result<(), GoogleApiError> {
-    let settings = require_settings(state)?;
+    let settings = require_settings(state).await?;
     if query.error.is_some() {
         return Err(GoogleApiError::Upstream);
     }
@@ -956,7 +1110,7 @@ async fn finish_callback(
     if deleted.rows_affected() != 1 {
         return Err(GoogleApiError::BadRequest);
     }
-    let tokens = exchange_code(settings, &code).await?;
+    let tokens = exchange_code(&settings, &code).await?;
     let refresh = tokens.refresh_token.ok_or(GoogleApiError::Upstream)?;
     let profile = fetch_profile(&tokens.access_token).await?;
     let email = profile.email.ok_or(GoogleApiError::Upstream)?;
@@ -1077,7 +1231,7 @@ async fn disconnect(
     user: AuthenticatedUser,
     headers: HeaderMap,
 ) -> Result<Response, GoogleApiError> {
-    require_settings(&state)?;
+    require_settings(&state).await?;
     require_change(&headers, &user, &state)?;
     if let Some(connection) = fetch_connection(&state.pool, user.id).await? {
         clear_access(connection.id);
@@ -1109,7 +1263,7 @@ async fn set_pause(
     headers: HeaderMap,
     Json(body): Json<PauseBody>,
 ) -> Result<Json<PauseBody>, GoogleApiError> {
-    require_settings(&state)?;
+    require_settings(&state).await?;
     require_change(&headers, &user, &state)?;
     let updated = sqlx::query(
         "UPDATE google_drive_connections SET paused = $2, updated_at = now() WHERE owner_id = $1",
@@ -1179,7 +1333,7 @@ async fn remote_folders(
     user: AuthenticatedUser,
     Query(query): Query<FolderQuery>,
 ) -> Result<Response, GoogleApiError> {
-    let settings = require_settings(&state)?;
+    let settings = require_settings(&state).await?;
     let parent_id = query.parent_id.unwrap_or_else(|| "root".to_owned());
     if !valid_google_id(&parent_id) {
         return Err(GoogleApiError::BadRequest);
@@ -1190,7 +1344,7 @@ async fn remote_folders(
     if connection.auth_state != "active" {
         return Err(GoogleApiError::Reauth);
     }
-    let token = worker_access_token(&state.pool, settings, connection.id, user.id)
+    let token = worker_access_token(&state.pool, &settings, connection.id, user.id)
         .await
         .map_err(|error| match error {
             SyncError::Reauth => GoogleApiError::Reauth,
@@ -1242,7 +1396,7 @@ async fn select_source(
     headers: HeaderMap,
     Json(body): Json<SelectSource>,
 ) -> Result<Response, GoogleApiError> {
-    let settings = require_settings(&state)?;
+    let settings = require_settings(&state).await?;
     require_change(&headers, &user, &state)?;
     if !valid_google_id(&body.google_folder_id) {
         return Err(GoogleApiError::BadRequest);
@@ -1253,7 +1407,7 @@ async fn select_source(
     if connection.auth_state != "active" {
         return Err(GoogleApiError::Reauth);
     }
-    let token = worker_access_token(&state.pool, settings, connection.id, user.id)
+    let token = worker_access_token(&state.pool, &settings, connection.id, user.id)
         .await
         .map_err(|error| match error {
             SyncError::Reauth => GoogleApiError::Reauth,
@@ -1382,7 +1536,7 @@ async fn remove_source(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, GoogleApiError> {
-    require_settings(&state)?;
+    require_settings(&state).await?;
     require_change(&headers, &user, &state)?;
     let mut transaction = state.pool.begin().await.map_err(GoogleApiError::Database)?;
     let source = sqlx::query_scalar::<_, Uuid>(
@@ -1448,7 +1602,7 @@ async fn sync_source(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SyncStarted>, GoogleApiError> {
-    require_settings(&state)?;
+    require_settings(&state).await?;
     require_change(&headers, &user, &state)?;
     let mut transaction = state.pool.begin().await.map_err(GoogleApiError::Database)?;
     let source = sqlx::query_as::<_, (String, Option<Uuid>)>(
@@ -1621,7 +1775,19 @@ pub(crate) async fn run_worker(
                 tracing::warn!(error = %error, "google drive sync lock connection was lost");
                 break;
             }
-            match sync_tick(&pool, &storage, &settings, limits).await {
+            let current_settings = match load_settings(&pool, &settings).await {
+                Ok(current) => current,
+                Err(GoogleApiError::Unconfigured) => {
+                    sleep(IDLE_POLL).await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "google drive settings unavailable");
+                    sleep(IDLE_POLL).await;
+                    continue;
+                }
+            };
+            match sync_tick(&pool, &storage, &current_settings, limits).await {
                 Ok(Tick::Idle) => {
                     consecutive_failures = 0;
                     sleep(IDLE_POLL).await;
@@ -2982,9 +3148,6 @@ async fn worker_access_token(
     connection_id: Uuid,
     owner_id: Uuid,
 ) -> Result<String, SyncError> {
-    if let Some(token) = cached_access(connection_id) {
-        return Ok(token);
-    }
     let row = sqlx::query_as::<_, (Vec<u8>, Vec<u8>, String)>(
         "SELECT refresh_nonce, refresh_token, auth_state FROM google_drive_connections WHERE id = $1",
     )
@@ -2996,6 +3159,9 @@ async fn worker_access_token(
     };
     if auth_state != "active" {
         return Err(SyncError::Reauth);
+    }
+    if let Some(token) = cached_access(connection_id) {
+        return Ok(token);
     }
     let refresh = match open_token(&settings.token_key, owner_id, &nonce, &ciphertext) {
         Ok(refresh) => refresh,
