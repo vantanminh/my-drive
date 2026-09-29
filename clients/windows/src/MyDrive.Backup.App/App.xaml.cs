@@ -4,6 +4,11 @@ namespace MyDrive.Backup.App;
 
 public partial class App : Application
 {
+    public App()
+    {
+        System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
+    }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);

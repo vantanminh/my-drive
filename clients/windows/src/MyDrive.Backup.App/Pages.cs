@@ -426,7 +426,7 @@ public sealed class SettingsView : StackPanel, IRefresh
         return box;
     }
 
-    private static JsonElement Replace(JsonElement element, string property, object value)
+    private static JsonElement Replace(JsonElement element, string property, object? value)
     {
         var map = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(element.GetRawText()) ?? new Dictionary<string, JsonElement>();
         map[property] = value is null
