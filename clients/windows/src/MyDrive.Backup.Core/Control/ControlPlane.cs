@@ -322,10 +322,18 @@ public static class PipeProtocol
         await stream.FlushAsync(cancellationToken);
     }
 
-    public static async Task<JsonElement> RoundTripAsync(string pipeName, object request, CancellationToken cancellationToken)
+    public static PipeOptions ClientOptions => OperatingSystem.IsWindows()
+        ? PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly
+        : PipeOptions.Asynchronous;
+
+    public static async Task<JsonElement> RoundTripAsync(
+        string pipeName,
+        object request,
+        CancellationToken cancellationToken,
+        int connectTimeoutMs = 5000)
     {
-        using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-        await client.ConnectAsync(5000, cancellationToken);
+        using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, ClientOptions);
+        await client.ConnectAsync(connectTimeoutMs, cancellationToken);
         await WriteAsync(client, JsonSerializer.SerializeToElement(request, JsonOpts.Store), cancellationToken);
         return await ReadAsync(client, cancellationToken);
     }

@@ -57,6 +57,46 @@ public sealed class ControlServerTests
         }
     }
 
+    [Fact]
+    public async Task In_process_service_answers_ping_and_keeps_the_single_instance_lock()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "mydrive-control", Guid.NewGuid().ToString("N"));
+        var pipe = "MyDrive.Backup.Tests." + Guid.NewGuid().ToString("N");
+        var host = LocalBackupService.Start(root, pipe);
+        try
+        {
+            var ping = await RoundTripAsync(pipe, new { method = "ping" }, CancellationToken.None);
+            Assert.True(ping.GetProperty("ok").GetBoolean());
+            Assert.Equal(ClientInfo.Version, ping.GetProperty("result").GetProperty("version").GetString());
+
+            var error = Assert.Throws<IOException>(() => LocalBackupService.Start(root, pipe + ".second"));
+            Assert.Contains("already running", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await host.DisposeAsync();
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    [Fact]
+    public void Client_pipe_uses_the_same_user_restriction_as_the_server()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, PipeProtocol.ClientOptions);
+            return;
+        }
+
+        Assert.Equal(PipeOptions.Asynchronous, PipeProtocol.ClientOptions);
+    }
+
     private static async Task<JsonElement> RoundTripAsync(string pipe, object request, CancellationToken cancellationToken)
     {
         IOException? last = null;

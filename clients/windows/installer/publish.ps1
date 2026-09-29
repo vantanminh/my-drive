@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $installerDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $windowsDir = Resolve-Path (Join-Path $installerDir '..')
 $publish = Join-Path $windowsDir 'publish\win-x64'
-$agentPublish = Join-Path $windowsDir 'publish\win-x64-agent'
+$agentPublish = Join-Path $publish 'agent'
 $dist = Join-Path $windowsDir 'dist'
 $clientInfo = Join-Path $windowsDir 'src\MyDrive.Backup.Core\ClientInfo.cs'
 $version = '1.0.0'
@@ -15,9 +15,6 @@ if ($info -match 'Version = "([^"]+)"') {
 
 if (Test-Path $publish) {
     Remove-Item -Recurse -Force $publish
-}
-if (Test-Path $agentPublish) {
-    Remove-Item -Recurse -Force $agentPublish
 }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
@@ -31,24 +28,25 @@ dotnet publish (Join-Path $windowsDir 'src\MyDrive.Backup.App\MyDrive.Backup.App
     -p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Own folder on purpose. A single-file agent copied beside the self-contained app
+# loads that app's hostfxr.dll and exits before it can listen.
 dotnet publish (Join-Path $windowsDir 'src\MyDrive.Backup.Agent\MyDrive.Backup.Agent.csproj') `
     --configuration Release `
     --runtime win-x64 `
     --self-contained true `
     --output $agentPublish `
-    -p:PublishSingleFile=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true `
     -p:DebugType=none `
     -p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Copy-Item (Join-Path $agentPublish 'MyDrive.Backup.Agent.exe') (Join-Path $publish 'MyDrive.Backup.Agent.exe') -Force
 if (-not (Test-Path (Join-Path $publish 'MyDrive.Backup.exe'))) {
     throw 'The desktop app was not published.'
 }
-if (-not (Test-Path (Join-Path $publish 'MyDrive.Backup.Agent.exe'))) {
-    throw 'The backup agent was not published next to the desktop app.'
+if (-not (Test-Path (Join-Path $agentPublish 'MyDrive.Backup.Agent.exe'))) {
+    throw 'The backup agent was not published in its own folder.'
+}
+if (-not (Test-Path (Join-Path $agentPublish 'hostfxr.dll'))) {
+    throw 'The backup agent was published without its own runtime.'
 }
 
 $isccCandidates = @()
