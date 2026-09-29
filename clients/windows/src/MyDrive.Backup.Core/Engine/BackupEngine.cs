@@ -62,7 +62,10 @@ public sealed class BackupEngine : IDisposable
     private readonly Func<ServerProfile, IDriveApi> _apis;
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly HashSet<string> _force = new(StringComparer.Ordinal);
-    private readonly Queue<double> _speeds = new();
+    private readonly TransferMeter _meter = new();
+    private readonly ClientUpdateService _updates;
+    private readonly object _liveGate = new();
+    private readonly Dictionary<string, long> _liveBytes = new(StringComparer.Ordinal);
     private readonly object _state = new();
     private AuthorizationState _authorization = new();
     private string? _deviceCode;
@@ -70,9 +73,7 @@ public sealed class BackupEngine : IDisposable
     private bool _backupAll;
     private bool _unreachable;
     private bool _watchersDirty = true;
-    private long _sessionBytes;
-    private long _windowBytes;
-    private DateTimeOffset _windowStart;
+    private DateTimeOffset _lastLiveSave;
     private IDriveApi? _api;
     private string? _apiUrl;
     private bool _disposed;
@@ -84,11 +85,13 @@ public sealed class BackupEngine : IDisposable
         INotifier? notifier = null,
         INetworkMonitor? network = null,
         IContentHasher? hasher = null,
-        Func<ServerProfile, IDriveApi>? apis = null)
+        Func<ServerProfile, IDriveApi>? apis = null,
+        ClientUpdateService? updates = null)
     {
         _database = database;
         _secrets = secrets;
         _clock = clock ?? new SystemClock();
+        _updates = updates ?? new ClientUpdateService(_database, _clock);
         _notifier = notifier ?? new NullNotifier();
         _network = network ?? new NetworkMonitor();
         _hasher = hasher ?? new Sha256Hasher();
@@ -96,7 +99,6 @@ public sealed class BackupEngine : IDisposable
             ServerAddress.Normalize(profile.Url, profile.AllowInsecure),
             profile.AllowInsecure,
             secrets));
-        _windowStart = _clock.UtcNow;
         _database.AddLog("Info", "Backup engine started");
     }
 
@@ -124,31 +126,62 @@ public sealed class BackupEngine : IDisposable
     {
         var settings = _database.GetSettings();
         var stats = _database.QueueStats();
-        var speed = CurrentSpeed();
+        var reading = _meter.Read(_clock.UtcNow);
+        var transfers = _database.ListQueue();
+        lock (_liveGate)
+        {
+            foreach (var item in transfers)
+            {
+                if (item.State == QueueState.Uploading
+                    && _liveBytes.TryGetValue(item.Id, out var sent)
+                    && sent > item.BytesSent)
+                {
+                    item.BytesSent = sent;
+                }
+            }
+        }
+
         return new EngineSnapshot
         {
             Running = true,
             Paused = _database.GetFlag("paused"),
             PauseReason = _database.GetFlag("paused") ? "Paused" : null,
             NetworkStatus = Describe(_network.Snapshot()),
-            ActiveUploads = _database.ListQueue().Count(item => item.State == QueueState.Uploading),
+            ActiveUploads = transfers.Count(item => item.State == QueueState.Uploading),
             QueueSize = stats.Queue,
             Failed = stats.Failed,
             Retrying = stats.Retrying,
             Workers = TransferLimits.UploadsFor(settings.ConcurrentUploads),
-            SessionUploadedBytes = Interlocked.Read(ref _sessionBytes),
+            SessionUploadedBytes = reading.SessionBytes,
             RemainingBytes = stats.Remaining,
-            BytesPerSecond = speed,
-            SpeedHistory = _speeds.ToArray(),
+            BytesPerSecond = reading.BytesPerSecond,
+            SpeedHistory = reading.History,
+            TransferSpeeds = reading.TransferSpeeds,
             Server = _database.GetServer(),
             Overview = _database.Overview(),
             Jobs = _database.ListJobs().Select(SnapshotJob).ToArray(),
-            Transfers = _database.ListQueue(),
+            Transfers = transfers,
             AuthState = _authorization.State,
             AuthDetail = _authorization.Detail,
             AuthUserCode = _authorization.UserCode,
+            ClientVersion = _updates.Snapshot.ClientVersion,
+            AvailableVersion = _updates.Snapshot.AvailableVersion,
+            UpdateState = _updates.Snapshot.State,
+            UpdateDetail = _updates.Snapshot.Detail,
         };
     }
+
+    public Action? ExitForUpdate
+    {
+        get => _updates.ExitProcess;
+        set => _updates.ExitProcess = value;
+    }
+
+    public Task<UpdateSnapshot> CheckForUpdateAsync(CancellationToken cancellationToken) =>
+        _updates.CheckAsync(_database.GetSettings().AutoInstallUpdates, cancellationToken);
+
+    public Task<UpdateSnapshot> InstallUpdateAsync(CancellationToken cancellationToken) =>
+        _updates.InstallAsync(cancellationToken);
 
     public AuthorizationState Authorization => _authorization;
 
@@ -430,6 +463,7 @@ public sealed class BackupEngine : IDisposable
             {
                 RefreshWatchers();
                 await RunOnceAsync(cancellationToken);
+                _updates.MaybeCheck(_database.GetSettings(), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -538,7 +572,6 @@ public sealed class BackupEngine : IDisposable
         }
 
         await DrainAsync(settings, api, capabilities, server, report, cancellationToken);
-        SampleSpeed();
         if (report.Uploaded > 0)
         {
             Notify("Backup completed", $"{ByteFormat.Format(report.Bytes)}\n{report.Uploaded} files\n\nCompleted successfully");
@@ -739,7 +772,7 @@ public sealed class BackupEngine : IDisposable
             {
                 _database.AddActivity("Uploaded", file.RelativePath, "Linked existing content", job.Id);
                 report.AddUploaded(file.Size);
-                Interlocked.Add(ref _sessionBytes, file.Size);
+                _meter.CorrectSession(file.Size);
             }
 
             return;
@@ -907,6 +940,7 @@ public sealed class BackupEngine : IDisposable
         RunReport report,
         CancellationToken cancellationToken)
     {
+        var noted = new long[1];
         try
         {
             var job = _database.GetJob(item.JobId);
@@ -995,17 +1029,40 @@ public sealed class BackupEngine : IDisposable
                     break;
                 }
 
+                var before = item.BytesSent;
+                noted[0] = 0;
                 try
                 {
-                    item.BytesSent = await api.PatchAsync(item.RemoteUploadId, item.BytesSent, buffer, count, cancellationToken);
+                    var next = await api.PatchAsync(
+                        item.RemoteUploadId,
+                        before,
+                        buffer,
+                        count,
+                        cancellationToken,
+                        sent => NoteUpload(item, before, noted, sent));
+                    var acknowledged = Math.Max(0, next - before);
+                    if (noted[0] == 0)
+                    {
+                        _meter.Add(_clock.UtcNow, acknowledged, item.Id);
+                    }
+                    else if (noted[0] != acknowledged)
+                    {
+                        _meter.CorrectSession(acknowledged - noted[0]);
+                    }
+
+                    noted[0] = 0;
+                    item.BytesSent = next;
+                    PublishLive(item, next, force: true);
                 }
                 catch (ApiException ex) when (ex.Status == 409 && ex.Offset is long serverOffset)
                 {
+                    _meter.CorrectSession(-noted[0]);
+                    noted[0] = 0;
                     item.BytesSent = serverOffset;
+                    PublishLive(item, serverOffset, force: true);
                 }
 
                 _database.SaveQueue(item);
-                Interlocked.Add(ref _windowBytes, count);
                 await PaceAsync(count, limit, cancellationToken);
             }
 
@@ -1026,9 +1083,9 @@ public sealed class BackupEngine : IDisposable
             item.Error = null;
             item.BytesSent = item.FileSize;
             _database.SaveQueue(item);
+            ForgetLive(item.Id);
             _database.AddActivity("Uploaded", item.RelativePath, null, item.JobId);
             report.AddUploaded(item.FileSize);
-            Interlocked.Add(ref _sessionBytes, item.FileSize);
             var current = _database.GetJob(item.JobId);
             if (current != null)
             {
@@ -1039,13 +1096,63 @@ public sealed class BackupEngine : IDisposable
         }
         catch (OperationCanceledException)
         {
+            _meter.CorrectSession(-noted[0]);
             item.State = QueueState.Waiting;
             _database.SaveQueue(item);
             throw;
         }
         catch (Exception ex)
         {
+            _meter.CorrectSession(-noted[0]);
+            ForgetLive(item.Id);
             HandleFailure(item, settings, capabilities, ex, report);
+        }
+    }
+
+    private void NoteUpload(UploadItem item, long before, long[] noted, int sent)
+    {
+        if (sent <= 0)
+        {
+            return;
+        }
+
+        noted[0] += sent;
+        _meter.Add(_clock.UtcNow, sent, item.Id);
+        PublishLive(item, before + noted[0], force: false);
+    }
+
+    private void PublishLive(UploadItem item, long sent, bool force)
+    {
+        var save = force;
+        lock (_liveGate)
+        {
+            _liveBytes[item.Id] = sent;
+            var now = _clock.UtcNow;
+            if (!save && now - _lastLiveSave >= TimeSpan.FromMilliseconds(200))
+            {
+                _lastLiveSave = now;
+                save = true;
+            }
+            else if (save)
+            {
+                _lastLiveSave = now;
+            }
+        }
+
+        if (!save)
+        {
+            return;
+        }
+
+        item.BytesSent = sent;
+        _database.SaveQueue(item);
+    }
+
+    private void ForgetLive(string id)
+    {
+        lock (_liveGate)
+        {
+            _liveBytes.Remove(id);
         }
     }
 
@@ -1306,27 +1413,6 @@ public sealed class BackupEngine : IDisposable
         _notifier.Notify(title, body);
         _database.EnqueueNotification(title, body);
     }
-
-    private void SampleSpeed()
-    {
-        var now = _clock.UtcNow;
-        var elapsed = (now - _windowStart).TotalSeconds;
-        if (elapsed < 1)
-        {
-            return;
-        }
-
-        var bytes = Interlocked.Exchange(ref _windowBytes, 0);
-        _windowStart = now;
-        var speed = bytes / elapsed;
-        _speeds.Enqueue(speed);
-        while (_speeds.Count > 30)
-        {
-            _speeds.Dequeue();
-        }
-    }
-
-    private double CurrentSpeed() => _speeds.Count == 0 ? 0 : _speeds.Average();
 
     private IDriveApi ApiFor(ServerProfile server)
     {

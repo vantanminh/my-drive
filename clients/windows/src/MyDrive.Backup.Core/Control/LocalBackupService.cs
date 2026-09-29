@@ -41,6 +41,7 @@ public sealed class LocalBackupService : IAsyncDisposable
                 ? new DpapiSecretStore(directory)
                 : new AesSecretStore(directory);
             engine = new BackupEngine(database, secrets);
+            engine.ExitForUpdate = () => cancellation.Cancel();
             var control = new ControlServer(engine, pipeName, settingsApplied);
             var run = Task.WhenAll(
                 engine.RunAsync(cancellation.Token),

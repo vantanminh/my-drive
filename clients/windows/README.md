@@ -7,6 +7,7 @@ There is no built-in hostname and no password field. Access and refresh tokens s
 ## What it does
 
 - Discovers `GET /.well-known/cloud-client` and speaks API version `1` only.
+- Checks for a newer `windows-client-vX.Y.Z` release and can install it from Settings.
 - Signs in with the OAuth device-code flow. Revoke the computer from **Account security → Backup devices**.
 - Watches folders continuously, or runs hourly, daily, weekly, every few minutes, or when you press **Backup Now**.
 - Skips a file when its size and modified time are unchanged. If the content hash is already on the server, the bytes are linked instead of uploaded.
@@ -17,7 +18,9 @@ The protocol is documented at `/docs/backup-client.md`.
 
 ## Install
 
-On Windows, download `MyDriveBackup-Setup.exe` from the GitHub Release named **Windows Backup Client** ([releases page](https://github.com/vantanminh/my-drive/releases/latest)) and run it again to replace the installed copy. GitHub Actions builds that file for every push to `master` and for version tags. The master build recreates the release, so the release time matches the build and the notes include the commit. It installs for the current user, creates a Start menu shortcut, and does not require a separate .NET install. Windows may show an unknown-publisher warning because the installer is not code-signed.
+On Windows, download `MyDriveBackup-Setup.exe` from the GitHub Release named **Windows Backup Client** ([releases page](https://github.com/vantanminh/my-drive/releases/latest)). The client version is `<Version>` in `clients/windows/Directory.Build.props`. Each published client gets its own release tag, `windows-client-vX.Y.Z`. Bump that version when you change the client; the Windows workflow refuses to publish client changes on top of a version that already exists.
+
+From version 1.1.0 the installed app checks GitHub for a newer `windows-client-v` release. **Settings → Updates** has **Check for updates** and **Install updates automatically**. With both on, a newer setup downloads and installs for the current user, then the app reopens. You do not have to download each new setup by hand. The first install is still the setup file. It does not require a separate .NET install. Windows may show an unknown-publisher warning because the installer is not code-signed.
 
 Pull requests upload the same installer as the `MyDriveBackup-Setup` workflow artifact so the package can be tried before it is released. The artifact is on the workflow run, not on the Releases page.
 

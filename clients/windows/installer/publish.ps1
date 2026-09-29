@@ -6,17 +6,21 @@ $windowsDir = Resolve-Path (Join-Path $installerDir '..')
 $publish = Join-Path $windowsDir 'publish\win-x64'
 $agentPublish = Join-Path $publish 'agent'
 $dist = Join-Path $windowsDir 'dist'
-$clientInfo = Join-Path $windowsDir 'src\MyDrive.Backup.Core\ClientInfo.cs'
-$version = '1.0.0'
-$info = Get-Content -Raw -Path $clientInfo
-if ($info -match 'Version = "([^"]+)"') {
-    $version = $Matches[1]
+$propsPath = Join-Path $windowsDir 'Directory.Build.props'
+$props = Get-Content -Raw -Path $propsPath
+if ($props -notmatch '<Version>(\d+\.\d+\.\d+)</Version>') {
+    throw "clients/windows/Directory.Build.props is missing a numeric <Version>."
 }
+$version = $Matches[1]
 
 if (Test-Path $publish) {
     Remove-Item -Recurse -Force $publish
 }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+if ($env:GITHUB_ENV) {
+    "CLIENT_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
+}
 
 Write-Host "Publishing My Drive Backup $version"
 dotnet publish (Join-Path $windowsDir 'src\MyDrive.Backup.App\MyDrive.Backup.App.csproj') `

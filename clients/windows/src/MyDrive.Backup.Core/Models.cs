@@ -30,6 +30,8 @@ public sealed class ClientSettings
     public bool Notifications { get; set; } = true;
     public string Language { get; set; } = "auto";
     public string Theme { get; set; } = "system";
+    public bool CheckForUpdates { get; set; } = true;
+    public bool AutoInstallUpdates { get; set; } = true;
     public int RetryLimit { get; set; } = 8;
     public int StabilitySeconds { get; set; } = 5;
     public bool BackupHiddenFiles { get; set; }
@@ -195,6 +197,7 @@ public sealed class EngineSnapshot
     public long RemainingBytes { get; set; }
     public double BytesPerSecond { get; set; }
     public IReadOnlyList<double> SpeedHistory { get; set; } = [];
+    public IReadOnlyDictionary<string, double> TransferSpeeds { get; set; } = new Dictionary<string, double>();
     public ServerProfile? Server { get; set; }
     public StorageQuota? Storage { get; set; }
     public BackupOverview Overview { get; set; } = new();
@@ -203,6 +206,10 @@ public sealed class EngineSnapshot
     public string? AuthState { get; set; }
     public string? AuthDetail { get; set; }
     public string? AuthUserCode { get; set; }
+    public string ClientVersion { get; set; } = ClientInfo.Version;
+    public string? AvailableVersion { get; set; }
+    public string UpdateState { get; set; } = "idle";
+    public string? UpdateDetail { get; set; }
 }
 
 public sealed class JobSnapshot
