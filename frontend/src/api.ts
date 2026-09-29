@@ -1,7 +1,9 @@
 import type {
   AccountStorage,
   Album,
+  BackupDevice,
   BrowserSession,
+  DeviceAuthorizationRequest,
   CreatedShare,
   CreatedManagedAccount,
   Entry,
@@ -263,6 +265,33 @@ export const api = {
   revokeOtherSessions: () =>
     request<void>('/api/auth/sessions/revoke-others', {
       method: 'POST',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  listDevices: (signal?: AbortSignal) =>
+    request<{ devices: BackupDevice[] }>('/api/devices', { signal, cache: 'no-store' }),
+  revokeDevice: (id: string) =>
+    request<void>('/api/devices/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  deviceRequest: (userCode: string, signal?: AbortSignal) =>
+    request<DeviceAuthorizationRequest>('/api/device/pending?user_code=' + encodeURIComponent(userCode), {
+      signal,
+      cache: 'no-store'
+    }),
+  approveDevice: (userCode: string) =>
+    request<{ status: string; device_id: string; device_name: string }>('/api/device/authorize', {
+      method: 'POST',
+      json: { user_code: userCode },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  denyDevice: (userCode: string) =>
+    request<{ status: string }>('/api/device/deny', {
+      method: 'POST',
+      json: { user_code: userCode },
       csrf: true,
       cache: 'no-store'
     }),

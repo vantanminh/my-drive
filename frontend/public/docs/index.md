@@ -13,6 +13,7 @@ This documentation is public and requires no login. Append `.md` to any document
 - [Public share links and revocation](/docs/shares.md)
 - [Usage, logs and administration](/docs/usage.md)
 - [Upload lessons and export links to CSV / Google Sheets](/docs/lesson-sync.md)
+- [Windows Backup Client](/docs/backup-client.md)
 
 ## First request
 

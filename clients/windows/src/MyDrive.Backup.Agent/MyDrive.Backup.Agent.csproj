@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MyDrive.Backup.Agent</RootNamespace>
+    <AssemblyName>MyDrive.Backup.Agent</AssemblyName>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>mydrive-backup-agent</UserSecretsId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\MyDrive.Backup.Core\MyDrive.Backup.Core.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+  </ItemGroup>
+</Project>

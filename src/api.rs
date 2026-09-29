@@ -52,6 +52,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(crate::media_admin::router())
         .merge(crate::admin_accounts::router())
         .merge(crate::google_drive::router())
+        .merge(crate::devices::router())
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found))
         .route("/s/{token}", get(serve_frontend_index))
@@ -69,6 +70,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/settings/developer", get(serve_frontend_index))
         .route("/docs/{*path}", get(crate::developer::documentation))
         .route("/security", get(serve_frontend_index))
+        .route("/device/authorize", get(serve_frontend_index))
         .route("/google-drive", get(serve_frontend_index))
         .fallback_service(static_files)
         .layer(middleware::from_fn_with_state(

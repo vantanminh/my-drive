@@ -278,6 +278,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .account-security-header h2 { margin: 7px 0 4px; color: #1b2b34; font-family: 'Aptos Display', 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 18px; font-weight: 650; letter-spacing: -.025em; }
 .account-security-header p { margin: 0; color: #7d8a94; font-size: 11px; }
 .account-security-grid { display: grid; grid-template-columns: minmax(265px, .85fr) minmax(330px, 1.15fr); align-items: start; gap: 12px; margin-top: 17px; }
+.backup-devices-card { margin-top: 12px; }
+.device-authorize-card { max-width: 460px; }
+.device-auth-account { margin: 0; color: #52616a; font-size: 13px; }
+.device-code-input { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.device-auth-summary { display: flex; gap: 12px; align-items: flex-start; padding: 12px; border-radius: 12px; background: #f3f8f6; color: #1f8f68; }
+.device-auth-summary div { display: flex; flex-direction: column; gap: 3px; color: #52616a; font-size: 12px; }
+.device-auth-summary strong { color: #1b2b34; font-size: 14px; }
+.device-auth-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .security-card { min-width: 0; padding: 15px; background: #fff; border: 1px solid #e7ecea; border-radius: 10px; }
 .security-card-heading { display: flex; align-items: flex-start; gap: 10px; }
 .security-card-icon { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; color: #3c795b; background: #eaf3ed; border-radius: 8px; }

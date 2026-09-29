@@ -14,7 +14,7 @@ use axum::{
         },
     },
     response::{IntoResponse, Response},
-    routing::{get, head, post},
+    routing::{get, head, patch, post},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use http_body_util::BodyExt;
@@ -44,7 +44,7 @@ const MAX_VIDEO_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TEXT_PREVIEW_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_OFFICE_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_DOCUMENT_PDF_BYTES: u64 = 64 * 1024 * 1024;
-const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id";
+const UPLOAD_COLUMNS: &str = "target_parent_id, filename, expected_size, received_size, staging_key, state, expires_at, storage_object_id, final_file_id, replace_file_id, original_modified_at";
 static DOCUMENT_PREVIEW_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(3))
@@ -65,6 +65,8 @@ pub(crate) enum TransferError {
     AuthenticationRequired,
     #[error("request conflicts with current state")]
     Conflict,
+    #[error("uploaded bytes do not match the declared checksum")]
+    ChecksumMismatch,
     #[error("upload offset does not match")]
     OffsetConflict(u64),
     #[error("upload session has expired or is closed")]
@@ -107,6 +109,7 @@ impl IntoResponse for TransferError {
                 None,
             ),
             Self::Conflict => (StatusCode::CONFLICT, "conflict", None, None),
+            Self::ChecksumMismatch => (StatusCode::CONFLICT, "checksum_mismatch", None, None),
             Self::OffsetConflict(offset) => {
                 (StatusCode::CONFLICT, "offset_mismatch", Some(offset), None)
             }
@@ -205,6 +208,10 @@ struct CreateUpload {
     filename: String,
     expected_size: u64,
     parent_id: Option<Uuid>,
+    #[serde(default)]
+    file_id: Option<Uuid>,
+    #[serde(default)]
+    original_modified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize)]
@@ -218,6 +225,10 @@ struct UploadCreated {
 struct UploadFinalized {
     file_id: Uuid,
     status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checksum_sha256: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -231,6 +242,8 @@ struct UploadSession {
     expires_at: DateTime<Utc>,
     storage_object_id: Option<Uuid>,
     final_file_id: Option<Uuid>,
+    replace_file_id: Option<Uuid>,
+    original_modified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(FromRow)]
@@ -279,12 +292,14 @@ pub(crate) fn router() -> Router<AppState> {
 
 pub(crate) fn router_at(prefix: &str) -> Router<AppState> {
     let p = |path: &str| format!("{prefix}{}", path.strip_prefix("/api").unwrap());
-    Router::new()
+    // PATCH bodies are the resumable upload stream. Keep the small JSON limit on
+    // the metadata routes and allow the documented 64 MiB chunk size here.
+    let metadata = Router::new()
         .route(&p("/api/uploads"), post(create_upload))
         .route(&p("/api/photos/uploads"), post(create_photo_upload))
         .route(
             &p("/api/uploads/{id}"),
-            head(head_upload).patch(patch_upload).delete(cancel_upload),
+            head(head_upload).delete(cancel_upload),
         )
         .route(&p("/api/uploads/{id}/finalize"), post(finalize_upload))
         .route(
@@ -299,7 +314,11 @@ pub(crate) fn router_at(prefix: &str) -> Router<AppState> {
             &p("/api/files/{id}/thumbnail"),
             get(thumbnail_file).head(thumbnail_head),
         )
-        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(DefaultBodyLimit::max(16 * 1024));
+    let chunks = Router::new()
+        .route(&p("/api/uploads/{id}"), patch(patch_upload))
+        .layer(DefaultBodyLimit::max(MAX_PATCH_BYTES as usize));
+    metadata.merge(chunks)
 }
 
 async fn create_photo_upload(
@@ -356,13 +375,25 @@ async fn create_upload(
     Json(request): Json<CreateUpload>,
 ) -> Result<Response, TransferError> {
     drive::require_request_csrf(&headers, &user, state.auth_settings)?;
-    let filename = drive::normalize_name(&request.filename)?;
+    let mut filename = drive::normalize_name(&request.filename)?;
     if request.expected_size > state.transfer_settings.max_file_size {
         return Err(TransferError::PayloadTooLarge);
     }
     let expected_size =
         i64::try_from(request.expected_size).map_err(|_| TransferError::PayloadTooLarge)?;
-    if let Some(parent_id) = request.parent_id {
+    let mut parent_id = request.parent_id;
+    if let Some(file_id) = request.file_id {
+        let target = load_replace_target(&state.pool, user.id, file_id).await?;
+        if parent_id.is_some() && parent_id != target.parent_id {
+            return Err(TransferError::BadRequest);
+        }
+        if !filename.eq_ignore_ascii_case(&target.name) {
+            return Err(TransferError::BadRequest);
+        }
+        filename = target.name;
+        parent_id = target.parent_id;
+    }
+    if let Some(parent_id) = parent_id {
         drive::ensure_active_entry(&state, user.id, parent_id, true).await?;
     }
     let ttl = i64::try_from(state.transfer_settings.upload_session_ttl_seconds)
@@ -448,16 +479,19 @@ async fn create_upload(
         .map_err(TransferError::Storage)?;
     let insert = sqlx::query(
         "INSERT INTO upload_sessions \
-            (id, owner_id, target_parent_id, filename, expected_size, staging_key, state, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)",
+            (id, owner_id, target_parent_id, filename, expected_size, staging_key, state, expires_at, \
+             replace_file_id, original_modified_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9)",
     )
     .bind(id)
     .bind(user.id)
-    .bind(request.parent_id)
+    .bind(parent_id)
     .bind(filename)
     .bind(expected_size)
     .bind(staging_key)
     .bind(expires_at)
+    .bind(request.file_id)
+    .bind(request.original_modified_at)
     .execute(&mut *transaction)
     .await;
     if let Err(error) = insert {
@@ -693,10 +727,7 @@ async fn finalize_upload(
     if session.state == "completed" {
         let file_id = session.final_file_id.ok_or(TransferError::Inconsistent)?;
         transaction.rollback().await.map_err(map_database_error)?;
-        return Ok(Json(UploadFinalized {
-            file_id,
-            status: "completed",
-        }));
+        return Ok(Json(completed_upload(file_id, None, None)));
     }
     if session.state == "failed" || session.state == "expired" {
         return Err(TransferError::Gone);
@@ -710,8 +741,6 @@ async fn finalize_upload(
             drive::ensure_active_entry(&state, user.id, parent_id, true).await?;
         }
         let storage_object_id = Uuid::new_v4();
-        let file_id = Uuid::new_v4();
-        let version_id = Uuid::new_v4();
         let storage_key = crate::storage::LocalStorage::storage_key(storage_object_id);
         sqlx::query(
             "INSERT INTO storage_objects (id, storage_key, size_bytes, state) \
@@ -723,39 +752,77 @@ async fn finalize_upload(
         .execute(&mut *transaction)
         .await
         .map_err(map_database_error)?;
-        sqlx::query(
-            "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) \
-             VALUES ($1, $2, $3, 'file', $4)",
-        )
-        .bind(file_id)
-        .bind(user.id)
-        .bind(session.target_parent_id)
-        .bind(&session.filename)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_database_error)?;
-        sqlx::query("INSERT INTO files (id) VALUES ($1)")
-            .bind(file_id)
+        let file_id = if let Some(existing_file_id) = session.replace_file_id {
+            confirm_replace_locked(&mut transaction, user.id, existing_file_id, &session).await?;
+            let version_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO file_versions \
+                    (id, file_id, storage_object_id, size_bytes, original_modified_at) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(version_id)
+            .bind(existing_file_id)
+            .bind(storage_object_id)
+            .bind(session.expected_size)
+            .bind(session.original_modified_at)
             .execute(&mut *transaction)
             .await
             .map_err(map_database_error)?;
-        sqlx::query(
-            "INSERT INTO file_versions (id, file_id, storage_object_id, size_bytes) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(version_id)
-        .bind(file_id)
-        .bind(storage_object_id)
-        .bind(session.expected_size)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_database_error)?;
-        sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+            sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+                .bind(version_id)
+                .bind(existing_file_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_database_error)?;
+            sqlx::query(
+                "UPDATE drive_entries SET updated_at = now() WHERE id = $1 AND owner_id = $2",
+            )
+            .bind(existing_file_id)
+            .bind(user.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+            existing_file_id
+        } else {
+            let file_id = Uuid::new_v4();
+            let version_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) \
+                 VALUES ($1, $2, $3, 'file', $4)",
+            )
+            .bind(file_id)
+            .bind(user.id)
+            .bind(session.target_parent_id)
+            .bind(&session.filename)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+            sqlx::query("INSERT INTO files (id) VALUES ($1)")
+                .bind(file_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_database_error)?;
+            sqlx::query(
+                "INSERT INTO file_versions \
+                    (id, file_id, storage_object_id, size_bytes, original_modified_at) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
             .bind(version_id)
             .bind(file_id)
+            .bind(storage_object_id)
+            .bind(session.expected_size)
+            .bind(session.original_modified_at)
             .execute(&mut *transaction)
             .await
             .map_err(map_database_error)?;
+            sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+                .bind(version_id)
+                .bind(file_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_database_error)?;
+            file_id
+        };
         sqlx::query(
             "UPDATE upload_sessions \
                 SET state = 'finalizing', storage_object_id = $1, final_file_id = $2, updated_at = now() \
@@ -822,6 +889,20 @@ async fn finalize_upload(
     if actual_size != u64::try_from(object.size_bytes).map_err(|_| TransferError::Inconsistent)? {
         return Err(TransferError::Inconsistent);
     }
+    if let Some(expected) = declared_checksum(&headers)?
+        && expected != checksum
+    {
+        reject_mismatched_upload(
+            &state,
+            user.id,
+            id,
+            file_id,
+            storage_object_id,
+            &object.storage_key,
+        )
+        .await?;
+        return Err(TransferError::ChecksumMismatch);
+    }
 
     let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
     let current_session = fetch_upload_for_update(&mut transaction, user.id, id).await?;
@@ -830,10 +911,7 @@ async fn finalize_upload(
             .final_file_id
             .ok_or(TransferError::Inconsistent)?;
         transaction.rollback().await.map_err(map_database_error)?;
-        return Ok(Json(UploadFinalized {
-            file_id: completed_file_id,
-            status: "completed",
-        }));
+        return Ok(Json(completed_upload(completed_file_id, None, None)));
     }
     if current_session.state != "finalizing"
         || current_session.final_file_id != Some(file_id)
@@ -846,7 +924,7 @@ async fn finalize_upload(
             SET checksum_sha256 = $1, mime_detected = $2, state = 'ready' \
           WHERE id = $3 AND state IN ('pending', 'ready')",
     )
-    .bind(checksum)
+    .bind(&checksum)
     .bind(detected_media_type)
     .bind(storage_object_id)
     .execute(&mut *transaction)
@@ -885,10 +963,187 @@ async fn finalize_upload(
     .await
     .map_err(map_database_error)?;
     transaction.commit().await.map_err(map_database_error)?;
-    Ok(Json(UploadFinalized {
+    let version_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT current_version_id FROM files WHERE id = $1 AND current_version_id IS NOT NULL",
+    )
+    .bind(file_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    Ok(Json(completed_upload(file_id, version_id, Some(checksum))))
+}
+
+fn completed_upload(
+    file_id: Uuid,
+    version_id: Option<Uuid>,
+    checksum_sha256: Option<String>,
+) -> UploadFinalized {
+    UploadFinalized {
         file_id,
         status: "completed",
-    }))
+        version_id,
+        checksum_sha256,
+    }
+}
+
+fn declared_checksum(headers: &HeaderMap) -> Result<Option<String>, TransferError> {
+    let Some(value) = headers.get("x-content-sha256") else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| TransferError::BadRequest)?;
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit()) {
+        Ok(Some(value))
+    } else {
+        Err(TransferError::BadRequest)
+    }
+}
+
+#[derive(FromRow)]
+struct ReplaceTarget {
+    parent_id: Option<Uuid>,
+    name: String,
+}
+
+async fn load_replace_target(
+    pool: &sqlx::PgPool,
+    owner_id: Uuid,
+    file_id: Uuid,
+) -> Result<ReplaceTarget, TransferError> {
+    sqlx::query_as(
+        "SELECT entry.parent_id, entry.name \
+           FROM drive_entries AS entry \
+           JOIN files AS file ON file.id = entry.id \
+          WHERE entry.id = $1 AND entry.owner_id = $2 AND entry.kind = 'file' AND entry.deleted_at IS NULL",
+    )
+    .bind(file_id)
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(TransferError::NotFound)
+}
+
+async fn confirm_replace_locked(
+    transaction: &mut Transaction<'_, Postgres>,
+    owner_id: Uuid,
+    file_id: Uuid,
+    session: &UploadSession,
+) -> Result<(), TransferError> {
+    let target = sqlx::query_as::<_, ReplaceTarget>(
+        "SELECT entry.parent_id, entry.name \
+           FROM drive_entries AS entry \
+          WHERE entry.id = $1 AND entry.owner_id = $2 AND entry.kind = 'file' AND entry.deleted_at IS NULL \
+          FOR UPDATE",
+    )
+    .bind(file_id)
+    .bind(owner_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(TransferError::NotFound)?;
+    if target.parent_id != session.target_parent_id || target.name != session.filename {
+        return Err(TransferError::Conflict);
+    }
+    Ok(())
+}
+
+async fn reject_mismatched_upload(
+    state: &AppState,
+    owner_id: Uuid,
+    upload_id: Uuid,
+    file_id: Uuid,
+    storage_object_id: Uuid,
+    storage_key: &str,
+) -> Result<(), TransferError> {
+    let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
+    let session = fetch_upload_for_update(&mut transaction, owner_id, upload_id).await?;
+    if session.state == "failed" {
+        transaction.rollback().await.map_err(map_database_error)?;
+        return Ok(());
+    }
+    if session.state != "finalizing"
+        || session.final_file_id != Some(file_id)
+        || session.storage_object_id != Some(storage_object_id)
+    {
+        return Err(TransferError::Conflict);
+    }
+    let new_version = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT current_version_id FROM files WHERE id = $1 FOR UPDATE",
+    )
+    .bind(file_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?
+    .flatten();
+    sqlx::query(
+        "UPDATE upload_sessions \
+            SET state = 'failed', storage_object_id = NULL, final_file_id = NULL, updated_at = now() \
+          WHERE id = $1 AND owner_id = $2 AND state = 'finalizing'",
+    )
+    .bind(upload_id)
+    .bind(owner_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    if session.replace_file_id.is_some() {
+        let previous = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM file_versions WHERE file_id = $1 AND id IS DISTINCT FROM $2 \
+              ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(file_id)
+        .bind(new_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+        sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+            .bind(previous)
+            .bind(file_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        if let Some(version_id) = new_version {
+            sqlx::query("DELETE FROM file_versions WHERE id = $1 AND file_id = $2")
+                .bind(version_id)
+                .bind(file_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_database_error)?;
+        }
+    } else if new_version.is_some() {
+        sqlx::query("UPDATE files SET current_version_id = NULL WHERE id = $1")
+            .bind(file_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        sqlx::query("DELETE FROM file_versions WHERE file_id = $1")
+            .bind(file_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        sqlx::query("DELETE FROM files WHERE id = $1")
+            .bind(file_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        sqlx::query("DELETE FROM drive_entries WHERE id = $1 AND owner_id = $2 AND kind = 'file'")
+            .bind(file_id)
+            .bind(owner_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+    }
+    sqlx::query("DELETE FROM storage_objects WHERE id = $1")
+        .bind(storage_object_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+    transaction.commit().await.map_err(map_database_error)?;
+    if let Err(error) = state.storage.remove_object(storage_key).await {
+        tracing::error!(error = %error, "could not remove a checksum-mismatched object");
+    }
+    Ok(())
 }
 
 async fn cancel_upload(
