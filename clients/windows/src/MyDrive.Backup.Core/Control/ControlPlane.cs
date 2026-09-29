@@ -159,6 +159,7 @@ public sealed class ControlServer
         status.Storage = _engine.LastStorage;
         status.AuthState = _engine.Authorization.State;
         status.AuthDetail = _engine.Authorization.Detail ?? _engine.Authorization.VerificationUri;
+        status.AuthUserCode = _engine.Authorization.UserCode;
         return status;
     }
 

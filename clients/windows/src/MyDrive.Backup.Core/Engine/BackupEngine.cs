@@ -146,6 +146,7 @@ public sealed class BackupEngine : IDisposable
             Transfers = _database.ListQueue(),
             AuthState = _authorization.State,
             AuthDetail = _authorization.Detail,
+            AuthUserCode = _authorization.UserCode,
         };
     }
 
@@ -455,6 +456,11 @@ public sealed class BackupEngine : IDisposable
         var report = new RunReport();
         var settings = _database.GetSettings();
         var server = _database.GetServer();
+        if (server != null)
+        {
+            await TryPollAuthorizationAsync(server, cancellationToken);
+        }
+
         if (_database.GetFlag("paused"))
         {
             report.Paused = true;
@@ -512,7 +518,6 @@ public sealed class BackupEngine : IDisposable
             return report;
         }
 
-        await PollAuthorizationAsync(api, server, cancellationToken);
         _database.ResetInterrupted();
         await ApplyDueDeletionsAsync(api, cancellationToken);
         var forced = TakeForce();
@@ -1084,6 +1089,24 @@ public sealed class BackupEngine : IDisposable
         _database.AddLog("Warning", $"Retrying {item.RelativePath} after {delay.TotalSeconds:0}s ({item.Error})");
     }
 
+    private async Task TryPollAuthorizationAsync(ServerProfile server, CancellationToken cancellationToken)
+    {
+        if (_authorization.State != "pending" || string.IsNullOrEmpty(_deviceCode))
+        {
+            return;
+        }
+
+        try
+        {
+            await PollAuthorizationAsync(ApiFor(server), server, cancellationToken);
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException or IOException or TimeoutException)
+        {
+            _nextPoll = _clock.UtcNow.AddSeconds(5);
+            _database.AddLog("Warning", "Device authorization is still waiting: " + ex.Message);
+        }
+    }
+
     private async Task PollAuthorizationAsync(IDriveApi api, ServerProfile server, CancellationToken cancellationToken)
     {
         if (_authorization.State != "pending" || string.IsNullOrEmpty(_deviceCode) || _clock.UtcNow < _nextPoll)
@@ -1099,23 +1122,28 @@ public sealed class BackupEngine : IDisposable
             _secrets.Save(SecretKeys.Refresh(server.Url), poll.Tokens.RefreshToken);
             server.Connected = true;
             server.DeviceId = poll.Tokens.DeviceId;
+            server.LastError = null;
+            _deviceCode = null;
+            DropApi();
             try
             {
-                server.AccountEmail = (await api.GetAccountAsync(cancellationToken)).Email;
+                server.AccountEmail = (await ApiFor(server).GetAccountAsync(cancellationToken)).Email;
             }
-            catch (ApiException)
+            catch (Exception ex) when (ex is ApiException or HttpRequestException or IOException or TimeoutException)
             {
+                _database.AddLog("Warning", "Device authorized, but the account profile was not loaded: " + ex.Message);
             }
 
             _database.SaveServer(server);
-            _deviceCode = null;
-            DropApi();
             _authorization = new AuthorizationState
             {
                 State = "authorized",
                 Detail = server.AccountEmail,
             };
             _database.AddLog("Info", "Device authorized");
+            Notify("Device authorized", string.IsNullOrEmpty(server.AccountEmail)
+                ? "This PC can back up to your account."
+                : server.AccountEmail);
             return;
         }
 

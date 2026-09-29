@@ -202,6 +202,7 @@ public sealed class EngineSnapshot
     public IReadOnlyList<UploadItem> Transfers { get; set; } = [];
     public string? AuthState { get; set; }
     public string? AuthDetail { get; set; }
+    public string? AuthUserCode { get; set; }
 }
 
 public sealed class JobSnapshot
