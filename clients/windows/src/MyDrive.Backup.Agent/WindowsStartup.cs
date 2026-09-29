@@ -5,44 +5,9 @@ namespace MyDrive.Backup.Agent;
 
 internal static class WindowsStartup
 {
-    private const string RunName = "MyDriveBackup";
-
     public static void Apply(ClientSettings settings) => Apply(settings.StartWithWindows);
 
-    public static void Apply(bool enabled)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        try
-        {
-            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", writable: true);
-            if (key == null)
-            {
-                return;
-            }
-
-            if (!enabled)
-            {
-                key.DeleteValue(RunName, throwOnMissingValue: false);
-                return;
-            }
-
-            var executable = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(executable))
-            {
-                return;
-            }
-
-            key.SetValue(RunName, $"\"{executable}\"");
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException)
-        {
-            Console.Error.WriteLine("Could not update the Windows startup setting.");
-        }
-    }
+    public static void Apply(bool enabled) => CurrentUserStartup.Apply(enabled);
 
     public static int TryInstallService()
     {

@@ -11,6 +11,7 @@ if (!string.IsNullOrWhiteSpace(dataArgument))
 
 Directory.CreateDirectory(ClientInfo.DataDirectory);
 var logPath = Path.Combine(ClientInfo.DataDirectory, "agent.log");
+AgentLog.Write(logPath, "Backup service process started.");
 
 if (args.Contains("--install-service"))
 {

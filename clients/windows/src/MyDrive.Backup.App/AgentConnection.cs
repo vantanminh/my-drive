@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IO.Pipes;
 using System.Text.Json;
 using MyDrive.Backup;
 
@@ -10,15 +9,12 @@ public sealed class BackupServiceUnavailableException(string message) : InvalidO
 public static class AgentConnection
 {
     private static readonly SemaphoreSlim StartGate = new(1, 1);
+    private static Process? _launched;
+    private static LocalBackupService? _embedded;
 
-    public static async Task<JsonElement> CallAsync(object request, CancellationToken cancellationToken = default)
+    public static Task<JsonElement> CallAsync(object request, CancellationToken cancellationToken = default)
     {
-        await EnsureAgentAsync(cancellationToken);
-        using var client = new NamedPipeClientStream(".", ClientInfo.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-        await client.ConnectAsync(4000, cancellationToken);
-        var payload = JsonSerializer.SerializeToElement(request, JsonOpts.Store);
-        await PipeProtocol.WriteAsync(client, payload, cancellationToken);
-        return await PipeProtocol.ReadAsync(client, cancellationToken);
+        return CallCoreAsync(request, cancellationToken);
     }
 
     public static async Task EnsureAgentAsync(CancellationToken cancellationToken)
@@ -41,7 +37,7 @@ public static class AgentConnection
                 LaunchAgent();
             }
 
-            if (await WaitForServiceAsync(cancellationToken, TimeSpan.FromSeconds(12)))
+            if (await WaitForServiceAsync(cancellationToken, TimeSpan.FromSeconds(20)))
             {
                 return;
             }
@@ -49,6 +45,12 @@ public static class AgentConnection
             await StopAgentsAsync();
             LaunchAgent();
             if (await WaitForServiceAsync(cancellationToken, TimeSpan.FromSeconds(15)))
+            {
+                return;
+            }
+
+            await StopAgentsAsync();
+            if (await StartEmbeddedAsync(cancellationToken))
             {
                 return;
             }
@@ -61,7 +63,91 @@ public static class AgentConnection
         }
     }
 
+    private static async Task<JsonElement> CallCoreAsync(object request, CancellationToken cancellationToken)
+    {
+        await EnsureAgentAsync(cancellationToken);
+        return await PipeProtocol.RoundTripAsync(ClientInfo.PipeName, request, cancellationToken);
+    }
+
     private static async Task<bool> WaitForServiceAsync(CancellationToken cancellationToken, TimeSpan budget)
+    {
+        var started = Environment.TickCount64;
+        var limit = (long)budget.TotalMilliseconds;
+        while (Environment.TickCount64 - started < limit)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (await ProbeAsync(cancellationToken))
+            {
+                return true;
+            }
+
+            if (LaunchedProcessExited())
+            {
+                return false;
+            }
+
+            if (!AgentIsRunning() && Environment.TickCount64 - started > 1000)
+            {
+                return false;
+            }
+
+            await Task.Delay(200, cancellationToken);
+        }
+
+        return false;
+    }
+
+    private static async Task<bool> ProbeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(800));
+            var response = await PipeProtocol.RoundTripAsync(
+                ClientInfo.PipeName,
+                new { method = "ping" },
+                timeout.Token,
+                connectTimeoutMs: 400);
+            return response.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True;
+        }
+        catch (Exception ex) when (ex is TimeoutException or IOException or InvalidOperationException or OperationCanceledException or EndOfStreamException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> StartEmbeddedAsync(CancellationToken cancellationToken)
+    {
+        if (_embedded != null)
+        {
+            return await WaitForPipeAsync(cancellationToken, TimeSpan.FromSeconds(5));
+        }
+
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            try
+            {
+                _embedded = LocalBackupService.Start(settingsApplied: settings =>
+                    CurrentUserStartup.Apply(settings.StartWithWindows, FindAgent()));
+                AppendLog("Backup service is running inside the app.");
+                break;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 7)
+                {
+                    AppendLog("In-process backup service could not start: " + ex.Message);
+                    return false;
+                }
+
+                await Task.Delay(250, cancellationToken);
+            }
+        }
+
+        return await WaitForPipeAsync(cancellationToken, TimeSpan.FromSeconds(8));
+    }
+
+    private static async Task<bool> WaitForPipeAsync(CancellationToken cancellationToken, TimeSpan budget)
     {
         var started = Environment.TickCount64;
         var limit = (long)budget.TotalMilliseconds;
@@ -79,43 +165,70 @@ public static class AgentConnection
         return false;
     }
 
-    private static async Task<bool> ProbeAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromMilliseconds(400));
-            var response = await PipeProtocol.RoundTripAsync(ClientInfo.PipeName, new { method = "ping" }, timeout.Token);
-            return response.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True;
-        }
-        catch (Exception ex) when (ex is TimeoutException or IOException or InvalidOperationException or OperationCanceledException or EndOfStreamException)
-        {
-            return false;
-        }
-    }
-
     private static void LaunchAgent()
     {
+        ReleaseLaunched();
         var executable = FindAgent();
         if (executable == null)
         {
-            throw new BackupServiceUnavailableException("The backup service was not found next to this app.");
+            AppendLog("Backup service executable was not found.");
+            return;
         }
 
         try
         {
-            Process.Start(new ProcessStartInfo
+            Directory.CreateDirectory(ClientInfo.DataDirectory);
+            var start = new ProcessStartInfo
             {
                 FileName = executable,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
                 WorkingDirectory = Path.GetDirectoryName(executable) ?? AppContext.BaseDirectory,
-            });
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            start.ArgumentList.Add("--data=" + ClientInfo.DataDirectory);
+            var process = Process.Start(start);
+            if (process == null)
+            {
+                AppendLog("Backup service process did not start.");
+                return;
+            }
+
+            process.OutputDataReceived += (_, args) => AppendLog(args.Data);
+            process.ErrorDataReceived += (_, args) => AppendLog(args.Data);
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            _launched = process;
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            throw new BackupServiceUnavailableException("The backup service could not be launched.");
+            AppendLog("Backup service could not be launched: " + ex.Message);
+        }
+    }
+
+    private static bool LaunchedProcessExited()
+    {
+        var process = _launched;
+        if (process == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                return false;
+            }
+
+            AppendLog("Backup service process exited with code " + process.ExitCode + ".");
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
         }
     }
 
@@ -144,6 +257,7 @@ public static class AgentConnection
 
     private static async Task StopAgentsAsync()
     {
+        ReleaseLaunched();
         var stopped = false;
         try
         {
@@ -174,6 +288,27 @@ public static class AgentConnection
         }
     }
 
+    private static void ReleaseLaunched()
+    {
+        var process = _launched;
+        _launched = null;
+        if (process == null)
+        {
+            return;
+        }
+
+        try
+        {
+            process.CancelOutputRead();
+            process.CancelErrorRead();
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        process.Dispose();
+    }
+
     private static string FailureMessage()
     {
         var detail = TailLog();
@@ -192,7 +327,7 @@ public static class AgentConnection
             }
 
             var lines = File.ReadAllLines(path);
-            return string.Join(" ", lines.TakeLast(2));
+            return string.Join(" ", lines.TakeLast(4));
         }
         catch (IOException)
         {
@@ -200,12 +335,33 @@ public static class AgentConnection
         }
     }
 
+    private static void AppendLog(string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        try
+        {
+            var directory = ClientInfo.DataDirectory;
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "agent.log"), $"{DateTimeOffset.Now:O} {line}{Environment.NewLine}");
+        }
+        catch (IOException)
+        {
+        }
+    }
+
     private static string? FindAgent()
     {
-        var file = Path.Combine(AppContext.BaseDirectory, "MyDrive.Backup.Agent.exe");
-        if (File.Exists(file))
+        foreach (var relative in new[] { Path.Combine("agent", "MyDrive.Backup.Agent.exe"), "MyDrive.Backup.Agent.exe" })
         {
-            return file;
+            var file = Path.Combine(AppContext.BaseDirectory, relative);
+            if (File.Exists(file))
+            {
+                return file;
+            }
         }
 
         foreach (var configuration in new[] { "Debug", "Release" })
