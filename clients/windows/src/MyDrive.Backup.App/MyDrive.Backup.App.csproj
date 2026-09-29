@@ -7,8 +7,14 @@
     <RootNamespace>MyDrive.Backup.App</RootNamespace>
     <AssemblyName>MyDrive.Backup</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\MyDrive.Backup.Core\MyDrive.Backup.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
   </ItemGroup>
 </Project>
