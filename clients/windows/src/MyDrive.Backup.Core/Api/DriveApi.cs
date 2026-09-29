@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -76,7 +77,7 @@ public interface IDriveApi
 
     Task<long> HeadOffsetAsync(string uploadId, CancellationToken cancellationToken);
 
-    Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken);
+    Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken, Action<int>? onProgress = null);
 
     Task<FinalizeResult> FinalizeAsync(string uploadId, string sha256, CancellationToken cancellationToken);
 
@@ -344,10 +345,12 @@ public sealed class DriveApiClient : IDriveApi, IDisposable
         return OffsetHeader(response) ?? 0;
     }
 
-    public async Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken)
+    public async Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken, Action<int>? onProgress = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Patch, "/api/uploads/" + uploadId);
-        var content = new ByteArrayContent(data, 0, count);
+        var content = onProgress == null
+            ? (HttpContent)new ByteArrayContent(data, 0, count)
+            : new ProgressByteContent(data, count, onProgress);
         content.Headers.ContentType = new MediaTypeHeaderValue("application/offset+octet-stream");
         content.Headers.ContentLength = count;
         request.Content = content;
@@ -597,6 +600,44 @@ public static class ServerAddress
     }
 }
 
+internal sealed class ProgressByteContent : HttpContent
+{
+    private readonly byte[] _data;
+    private readonly int _count;
+    private readonly Action<int> _onProgress;
+
+    public ProgressByteContent(byte[] data, int count, Action<int> onProgress)
+    {
+        _data = data;
+        _count = count;
+        _onProgress = onProgress;
+    }
+
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+        WriteAsync(stream, CancellationToken.None);
+
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken) =>
+        WriteAsync(stream, cancellationToken);
+
+    private async Task WriteAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        var sent = 0;
+        while (sent < _count)
+        {
+            var size = Math.Min(64 * 1024, _count - sent);
+            await stream.WriteAsync(_data.AsMemory(sent, size), cancellationToken).ConfigureAwait(false);
+            sent += size;
+            _onProgress(size);
+        }
+    }
+
+    protected override bool TryComputeLength(out long length)
+    {
+        length = _count;
+        return true;
+    }
+}
+
 public sealed class RefreshingDriveApi : IDriveApi
 {
     private readonly Uri _server;
@@ -656,8 +697,8 @@ public sealed class RefreshingDriveApi : IDriveApi
     public Task<long> HeadOffsetAsync(string uploadId, CancellationToken cancellationToken) =>
         Call(api => api.HeadOffsetAsync(uploadId, cancellationToken), cancellationToken);
 
-    public Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken) =>
-        Call(api => api.PatchAsync(uploadId, offset, data, count, cancellationToken), cancellationToken);
+    public Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken, Action<int>? onProgress = null) =>
+        Call(api => api.PatchAsync(uploadId, offset, data, count, cancellationToken, onProgress), cancellationToken);
 
     public Task<FinalizeResult> FinalizeAsync(string uploadId, string sha256, CancellationToken cancellationToken) =>
         Call(api => api.FinalizeAsync(uploadId, sha256, cancellationToken), cancellationToken);

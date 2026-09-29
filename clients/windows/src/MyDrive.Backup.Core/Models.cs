@@ -195,6 +195,7 @@ public sealed class EngineSnapshot
     public long RemainingBytes { get; set; }
     public double BytesPerSecond { get; set; }
     public IReadOnlyList<double> SpeedHistory { get; set; } = [];
+    public IReadOnlyDictionary<string, double> TransferSpeeds { get; set; } = new Dictionary<string, double>();
     public ServerProfile? Server { get; set; }
     public StorageQuota? Storage { get; set; }
     public BackupOverview Overview { get; set; } = new();

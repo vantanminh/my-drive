@@ -264,6 +264,64 @@ public sealed class EngineTests
     }
 
     [Fact]
+    public async Task Upload_progress_is_visible_before_the_file_finishes()
+    {
+        using var fixture = await Fixture.Create(fileCount: 0);
+        var path = Path.Combine(fixture.Root, "movie.bin");
+        var payload = new byte[256 * 1024];
+        payload[0] = 1;
+        payload[^1] = 2;
+        File.WriteAllBytes(path, payload);
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-10));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Api.BeforePatch = async (progress, token) =>
+        {
+            progress?.Invoke(64 * 1024);
+            started.TrySetResult();
+            await release.Task.WaitAsync(token);
+        };
+
+        var run = fixture.Run();
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var live = fixture.Engine.Status();
+        Assert.True(live.BytesPerSecond > 0);
+        Assert.Equal(64 * 1024, live.SessionUploadedBytes);
+        Assert.Equal(1, live.ActiveUploads);
+        Assert.Contains(live.SpeedHistory, value => value > 0);
+        var transfer = Assert.Single(live.Transfers, item => item.State == QueueState.Uploading);
+        Assert.True(transfer.BytesSent >= 64 * 1024);
+        Assert.True(live.TransferSpeeds.TryGetValue(transfer.Id, out var fileSpeed) && fileSpeed > 0);
+
+        release.TrySetResult();
+        var report = await run.WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(1, report.Uploaded);
+        var done = fixture.Engine.Status();
+        Assert.Equal(payload.Length, done.SessionUploadedBytes);
+        Assert.Equal(0, done.ActiveUploads);
+    }
+
+    [Fact]
+    public void Speed_history_follows_the_last_thirty_seconds()
+    {
+        var meter = new TransferMeter();
+        var start = new DateTimeOffset(2026, 9, 29, 12, 0, 0, TimeSpan.Zero);
+        meter.Add(start, 1000, "a");
+        meter.Add(start.AddSeconds(1), 3000, "a");
+        meter.Add(start.AddSeconds(29), 500, "b");
+        var reading = meter.Read(start.AddSeconds(29));
+        Assert.Equal(4500, reading.SessionBytes);
+        Assert.Equal(1000, reading.History[0]);
+        Assert.Equal(3000, reading.History[1]);
+        Assert.Equal(500, reading.History[29]);
+        Assert.True(reading.BytesPerSecond > 0);
+        Assert.True(reading.TransferSpeeds["b"] > 0);
+        Assert.False(reading.TransferSpeeds.ContainsKey("a"));
+        meter.CorrectSession(-500);
+        Assert.Equal(4000, meter.Read(start.AddSeconds(29)).SessionBytes);
+    }
+
+    [Fact]
     public async Task Files_still_being_written_wait_until_they_are_stable()
     {
         using var fixture = await Fixture.Create(fileCount: 0);
@@ -538,6 +596,33 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public async Task Patch_reports_bytes_as_they_are_written()
+    {
+        var reported = 0;
+        var handler = new StreamHandler(async (request, token) =>
+        {
+            var buffer = new byte[8 * 1024];
+            await using var stream = await request.Content!.ReadAsStreamAsync(token);
+            while (true)
+            {
+                var count = await stream.ReadAsync(buffer, token);
+                if (count == 0)
+                {
+                    break;
+                }
+            }
+
+            var response = new HttpResponseMessage(HttpStatusCode.NoContent);
+            response.Headers.TryAddWithoutValidation("Upload-Offset", "200000");
+            return response;
+        });
+        var client = new DriveApiClient(new Uri("https://cloud.example"), () => "mdb_token", false, handler);
+        var offset = await client.PatchAsync("upload-1", 0, new byte[200_000], 200_000, CancellationToken.None, sent => reported += sent);
+        Assert.Equal(200_000, reported);
+        Assert.Equal(200_000, offset);
+    }
+
+    [Fact]
     public async Task Control_requests_require_confirmation_for_destructive_actions()
     {
         var root = Path.Combine(Path.GetTempPath(), "mydrive-control", Guid.NewGuid().ToString("N"));
@@ -566,6 +651,12 @@ public sealed class ProtocolTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             Task.FromResult(handle(request));
+    }
+
+    private sealed class StreamHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handle) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            handle(request, cancellationToken);
     }
 }
 
@@ -610,6 +701,7 @@ internal sealed class FakeDrive : IDriveApi
     public int PollCalls;
     public DevicePoll PollResult { get; set; } = new() { Pending = true, IntervalSeconds = 5 };
     public int FailAfterPatches = int.MaxValue;
+    public Func<Action<int>?, CancellationToken, Task>? BeforePatch { get; set; }
     public List<(long Offset, int Count)> Patches { get; } = [];
     public Dictionary<string, StoredFile> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Session> _sessions = new(StringComparer.Ordinal);
@@ -679,8 +771,17 @@ internal sealed class FakeDrive : IDriveApi
     public Task<long> HeadOffsetAsync(string uploadId, CancellationToken cancellationToken) =>
         Task.FromResult(_sessions[uploadId].Offset);
 
-    public Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken)
+    public async Task<long> PatchAsync(string uploadId, long offset, byte[] data, int count, CancellationToken cancellationToken, Action<int>? onProgress = null)
     {
+        if (BeforePatch != null)
+        {
+            await BeforePatch(onProgress, cancellationToken);
+        }
+        else
+        {
+            onProgress?.Invoke(count);
+        }
+
         var seen = Interlocked.Increment(ref _patches);
         if (seen > FailAfterPatches)
         {
@@ -695,7 +796,7 @@ internal sealed class FakeDrive : IDriveApi
 
         session.Offset += count;
         Patches.Add((offset, count));
-        return Task.FromResult(session.Offset);
+        return session.Offset;
     }
 
     public Task<FinalizeResult> FinalizeAsync(string uploadId, string sha256, CancellationToken cancellationToken)

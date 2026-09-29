@@ -8,7 +8,7 @@ namespace MyDrive.Backup.App;
 
 public partial class MainWindow : Window
 {
-    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(2) };
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly Dictionary<string, (RadioButton Button, IRefresh Page)> _pages = new();
     private readonly Dictionary<string, Func<IRefresh>> _factories = new();
     private SetupView _setup;

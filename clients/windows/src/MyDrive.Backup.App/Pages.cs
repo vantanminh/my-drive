@@ -308,6 +308,8 @@ public sealed class TransfersView : StackPanel, IRefresh
     private readonly Polyline _chart = new() { StrokeThickness = 2.4 };
     private readonly Canvas _canvas = new() { Height = 120 };
     private readonly StackPanel _rows = new();
+    private readonly Dictionary<string, TransferRow> _cards = new(StringComparer.Ordinal);
+    private Border? _empty;
     private double[] _lastSpeeds = [];
 
     public TransfersView()
@@ -336,20 +338,58 @@ public sealed class TransfersView : StackPanel, IRefresh
         _active.Text = MainWindow.LongOf(status, "activeUploads").ToString("N0");
         _queue.Text = MainWindow.LongOf(status, "queueSize").ToString("N0");
         _sent.Text = ByteFormat.Format(MainWindow.LongOf(status, "sessionUploadedBytes"));
-        _rows.Children.Clear();
+        var speeds = status.TryGetProperty("transferSpeeds", out var map) ? map : default;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         var any = false;
         if (status.TryGetProperty("transfers", out var transfers) && transfers.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in transfers.EnumerateArray())
             {
                 any = true;
-                _rows.Children.Add(TransferCard(item, speed));
+                var id = MainWindow.TextOf(item, "id");
+                if (string.IsNullOrEmpty(id))
+                {
+                    id = MainWindow.TextOf(item, "relativePath");
+                }
+
+                seen.Add(id);
+                var fileSpeed = speeds.ValueKind == JsonValueKind.Object
+                    && speeds.TryGetProperty(id, out var own)
+                    && own.TryGetDouble(out var perFile)
+                    && perFile > 0
+                    ? perFile
+                    : speed;
+                if (_cards.TryGetValue(id, out var row))
+                {
+                    row.Update(item, fileSpeed);
+                }
+                else
+                {
+                    row = new TransferRow(item, fileSpeed);
+                    _cards[id] = row;
+                    _rows.Children.Add(row.Card);
+                }
             }
+        }
+
+        foreach (var id in _cards.Keys.Where(key => !seen.Contains(key)).ToArray())
+        {
+            _rows.Children.Remove(_cards[id].Card);
+            _cards.Remove(id);
         }
 
         if (!any)
         {
-            _rows.Children.Add(Ui.Empty(UiText.Get("noTransfers"), UiText.Get("noTransfersBody")));
+            if (_empty == null)
+            {
+                _empty = Ui.Empty(UiText.Get("noTransfers"), UiText.Get("noTransfersBody"));
+                _rows.Children.Add(_empty);
+            }
+        }
+        else if (_empty != null)
+        {
+            _rows.Children.Remove(_empty);
+            _empty = null;
         }
 
         if (status.TryGetProperty("speedHistory", out var history) && history.ValueKind == JsonValueKind.Array)
@@ -359,32 +399,66 @@ public sealed class TransfersView : StackPanel, IRefresh
         }
     }
 
-    private static Border TransferCard(JsonElement item, double speed)
+    private sealed class TransferRow
     {
-        var size = MainWindow.LongOf(item, "fileSize");
-        var sent = MainWindow.LongOf(item, "bytesSent");
-        var percent = size <= 0 ? 0 : sent * 100d / size;
-        var stack = new StackPanel();
-        var name = new TextBlock { Text = MainWindow.TextOf(item, "relativePath"), FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
-        name.SetResourceReference(TextBlock.ForegroundProperty, "Text");
-        stack.Children.Add(name);
-        stack.Children.Add(Ui.MutedText($"{MainWindow.TextOf(item, "state")}  ·  {ByteFormat.Format(sent)} / {ByteFormat.Format(size)}"));
-        var bar = new ProgressBar { Value = percent, Margin = new Thickness(0, 10, 0, 0) };
-        Ui.ApplyStyle(bar, "Meter");
-        stack.Children.Add(bar);
-        var error = MainWindow.TextOf(item, "error");
-        if (!string.IsNullOrEmpty(error))
+        private readonly TextBlock _name;
+        private readonly TextBlock _detail;
+        private readonly ProgressBar _bar;
+        private readonly TextBlock _extra;
+        private string _error = "";
+        private string _state = "";
+
+        public TransferRow(JsonElement item, double speed)
         {
-            var failure = new TextBlock { Text = error, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
-            failure.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
-            stack.Children.Add(failure);
-        }
-        else if (MainWindow.TextOf(item, "state") == "Uploading")
-        {
-            stack.Children.Add(Ui.MutedText($"{ByteFormat.FormatSpeed(speed)}  ·  {UiText.Get("eta")} {ByteFormat.FormatEta(size - sent, speed)}"));
+            _name = new TextBlock { FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+            _name.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+            _detail = Ui.MutedText("");
+            _bar = new ProgressBar { Margin = new Thickness(0, 10, 0, 0) };
+            Ui.ApplyStyle(_bar, "Meter");
+            _extra = Ui.MutedText("");
+            var stack = new StackPanel();
+            stack.Children.Add(_name);
+            stack.Children.Add(_detail);
+            stack.Children.Add(_bar);
+            stack.Children.Add(_extra);
+            Card = Ui.Card(stack);
+            Update(item, speed);
         }
 
-        return Ui.Card(stack);
+        public Border Card { get; }
+
+        public void Update(JsonElement item, double speed)
+        {
+            var size = MainWindow.LongOf(item, "fileSize");
+            var sent = MainWindow.LongOf(item, "bytesSent");
+            var state = MainWindow.TextOf(item, "state");
+            var error = MainWindow.TextOf(item, "error");
+            _name.Text = MainWindow.TextOf(item, "relativePath");
+            _detail.Text = $"{state}  ·  {ByteFormat.Format(sent)} / {ByteFormat.Format(size)}";
+            _bar.Value = size <= 0 ? 0 : sent * 100d / size;
+            if (error != _error || state != _state)
+            {
+                _error = error;
+                _state = state;
+                _extra.SetResourceReference(TextBlock.ForegroundProperty, string.IsNullOrEmpty(error) ? "Muted" : "Danger");
+            }
+
+            if (!string.IsNullOrEmpty(error))
+            {
+                _extra.Text = error;
+            }
+            else if (state == "Uploading")
+            {
+                var eta = ByteFormat.FormatEta(size - sent, speed);
+                _extra.Text = string.IsNullOrEmpty(eta)
+                    ? ByteFormat.FormatSpeed(speed)
+                    : $"{ByteFormat.FormatSpeed(speed)}  ·  {UiText.Get("eta")} {eta}";
+            }
+            else
+            {
+                _extra.Text = "";
+            }
+        }
     }
 
     private static TextBlock MetricValue() => new() { FontSize = 22, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0), Text = "—" };
