@@ -17,9 +17,9 @@ The protocol is documented at `/docs/backup-client.md`.
 
 ## Install
 
-On Windows, download `MyDriveBackup-Setup.exe` from the GitHub Release named **Windows Backup Client** and run it. That file is built by GitHub Actions for every push to `master` and for version tags. It installs for the current user, creates a Start menu shortcut, and does not require a separate .NET install. Windows may show an unknown-publisher warning because the installer is not code-signed.
+On Windows, download `MyDriveBackup-Setup.exe` from the GitHub Release named **Windows Backup Client** ([releases page](https://github.com/vantanminh/my-drive/releases/latest)) and run it again to replace the installed copy. GitHub Actions builds that file for every push to `master` and for version tags. The master build recreates the release, so the release time matches the build and the notes include the commit. It installs for the current user, creates a Start menu shortcut, and does not require a separate .NET install. Windows may show an unknown-publisher warning because the installer is not code-signed.
 
-Pull requests upload the same installer as the `MyDriveBackup-Setup` workflow artifact so the package can be tried before it is released.
+Pull requests upload the same installer as the `MyDriveBackup-Setup` workflow artifact so the package can be tried before it is released. The artifact is on the workflow run, not on the Releases page.
 
 ## Build
 
@@ -35,6 +35,6 @@ The tray app targets `net8.0-windows` and is built on Windows:
 dotnet build clients/windows/MyDrive.Backup.Windows.sln -c Release
 ```
 
-Publish the agent and the app into the same folder. The app starts `MyDrive.Backup.Agent.exe` if the service is not already listening on the `MyDrive.Backup` pipe. Closing the window leaves the agent running. **Start with Windows** registers the agent for the current user. `--install-service` is an optional `sc.exe` registration and must not be combined with a second copy of the agent.
+Publish puts the app in `publish/win-x64` and the agent, with its own runtime, in `publish/win-x64/agent`. The agent is a Windows GUI binary: starting it does not open a command window. The app launches `agent\MyDrive.Backup.Agent.exe` with no window if nothing is answering the `MyDrive.Backup` pipe. If that process exits or never listens, the app runs the same service itself. Closing the window leaves a separate agent running. **Start with Windows** registers the agent for the current user. `--install-service` is an optional `sc.exe` registration and must not be combined with a second copy of the agent. Service output is written to `%LocalAppData%\MyDriveBackup\agent.log`.
 
 HTTP is rejected unless you explicitly allow an insecure development or LAN URL. Certificate validation stays enabled.

@@ -19,35 +19,82 @@ public sealed class ControlServer
 
     public async Task ServeAsync(CancellationToken cancellationToken)
     {
-        using var server = new NamedPipeServerStream(
-            _pipeName,
-            PipeDirection.InOut,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
+        var inflight = new List<Task>();
         while (!cancellationToken.IsCancellationRequested)
         {
+            NamedPipeServerStream server;
             try
             {
-                await server.WaitForConnectionAsync(cancellationToken);
-                var request = await PipeProtocol.ReadAsync(server, cancellationToken);
-                var response = await HandleAsync(request, cancellationToken);
-                await PipeProtocol.WriteAsync(server, response, cancellationToken);
+                server = CreatePipe();
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(150, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            try
+            {
+                await server.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                await server.DisposeAsync().ConfigureAwait(false);
                 break;
             }
-            catch (IOException)
+            catch (Exception)
             {
+                await server.DisposeAsync().ConfigureAwait(false);
+                continue;
             }
-            finally
-            {
-                if (server.IsConnected)
-                {
-                    server.Disconnect();
-                }
-            }
+
+            inflight.Add(ServeClientAsync(server, cancellationToken));
+            inflight.RemoveAll(task => task.IsCompleted);
+        }
+
+        try
+        {
+            await Task.WhenAll(inflight).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A client that disconnects early must not stop the listener.
+        }
+    }
+
+    private NamedPipeServerStream CreatePipe()
+    {
+        var options = PipeOptions.Asynchronous;
+        if (OperatingSystem.IsWindows())
+        {
+            options |= PipeOptions.CurrentUserOnly;
+        }
+
+        return new NamedPipeServerStream(
+            _pipeName,
+            PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte,
+            options);
+    }
+
+    private async Task ServeClientAsync(NamedPipeServerStream server, CancellationToken cancellationToken)
+    {
+        using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        readTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+        try
+        {
+            var request = await PipeProtocol.ReadAsync(server, readTimeout.Token).ConfigureAwait(false);
+            var response = await HandleAsync(request, cancellationToken).ConfigureAwait(false);
+            await PipeProtocol.WriteAsync(server, response, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // An empty probe, or a client that closes before the response, only drops this connection.
+        }
+        finally
+        {
+            await server.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -58,6 +105,7 @@ public sealed class ControlServer
             var method = request.TryGetProperty("method", out var methodElement) ? methodElement.GetString() : null;
             object result = method switch
             {
+                "ping" => new { version = ClientInfo.Version },
                 "status" => StatusPayload(),
                 "jobs.list" => _engine.Jobs(),
                 "jobs.upsert" => Upsert(request),
@@ -275,10 +323,18 @@ public static class PipeProtocol
         await stream.FlushAsync(cancellationToken);
     }
 
-    public static async Task<JsonElement> RoundTripAsync(string pipeName, object request, CancellationToken cancellationToken)
+    public static PipeOptions ClientOptions => OperatingSystem.IsWindows()
+        ? PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly
+        : PipeOptions.Asynchronous;
+
+    public static async Task<JsonElement> RoundTripAsync(
+        string pipeName,
+        object request,
+        CancellationToken cancellationToken,
+        int connectTimeoutMs = 5000)
     {
-        using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-        await client.ConnectAsync(5000, cancellationToken);
+        using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, ClientOptions);
+        await client.ConnectAsync(connectTimeoutMs, cancellationToken);
         await WriteAsync(client, JsonSerializer.SerializeToElement(request, JsonOpts.Store), cancellationToken);
         return await ReadAsync(client, cancellationToken);
     }

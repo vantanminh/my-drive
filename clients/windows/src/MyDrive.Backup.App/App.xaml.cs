@@ -1,9 +1,12 @@
 using System.Windows;
+using System.Windows.Media;
 
 namespace MyDrive.Backup.App;
 
 public partial class App : Application
 {
+    private DateTime _lastDialogUtc = DateTime.MinValue;
+
     public App()
     {
         System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
@@ -14,19 +17,40 @@ public partial class App : Application
         base.OnStartup(e);
         DispatcherUnhandledException += (_, args) =>
         {
+            if (args.Exception is BackupServiceUnavailableException unavailable && MainWindow is MainWindow window)
+            {
+                window.ShowServiceProblem(unavailable.Message);
+                args.Handled = true;
+                return;
+            }
+
+            if (DateTime.UtcNow - _lastDialogUtc < TimeSpan.FromSeconds(8))
+            {
+                args.Handled = true;
+                return;
+            }
+
+            _lastDialogUtc = DateTime.UtcNow;
             MessageBox.Show(args.Exception.Message, "My Drive Backup", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
         };
-        foreach (var key in new[] { "Bg", "Nav", "Card", "Text", "Muted", "Accent", "Line", "Danger", "Ok" })
+
+        var keys = new List<object>();
+        foreach (var key in Resources.Keys)
         {
-            if (Resources[key] is System.Windows.Media.SolidColorBrush brush)
+            keys.Add(key);
+        }
+
+        foreach (var key in keys)
+        {
+            if (Resources[key] is SolidColorBrush { IsFrozen: true } brush)
             {
                 Resources[key] = brush.Clone();
             }
         }
 
-        var window = new MainWindow();
-        MainWindow = window;
-        window.Show();
+        var main = new MainWindow();
+        MainWindow = main;
+        main.Show();
     }
 }

@@ -1,126 +1,282 @@
 using System.Diagnostics;
-using static MyDrive.Backup.App.Ui;
-using System.Globalization;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Shapes;
 using MyDrive.Backup;
 
 namespace MyDrive.Backup.App;
 
 public sealed class DashboardView : StackPanel, IRefresh
 {
-    private readonly TextBlock _account = Body();
+    private readonly Border _hero = CardHost();
+    private readonly TextBlock _pill = new() { FontSize = 12, FontWeight = FontWeights.SemiBold };
+    private readonly TextBlock _heroTitle = new() { FontSize = 26, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 14, 0, 0), TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _heroBody = new() { FontSize = 14, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _folders = MetricValue();
+    private readonly TextBlock _files = MetricValue();
+    private readonly TextBlock _size = MetricValue();
+    private readonly TextBlock _last = MetricValue();
     private readonly TextBlock _storage = Body();
-    private readonly TextBlock _overview = Body();
+    private readonly ProgressBar _meter = new() { Margin = new Thickness(0, 12, 0, 0) };
     private readonly TextBlock _activity = Body();
 
     public DashboardView()
     {
-        Children.Add(Title(UiText.Get("dashboard")));
-        Children.Add(Card(UiText.Get("account"), _account));
-        Children.Add(Card(UiText.Get("storage"), _storage));
-        Children.Add(Card(UiText.Get("protected"), _overview));
-        Children.Add(Card(UiText.Get("uploading"), _activity));
+        var pillHost = new Border { CornerRadius = new CornerRadius(99), Padding = new Thickness(10, 4, 10, 4), HorizontalAlignment = HorizontalAlignment.Left, Child = _pill };
+        pillHost.SetResourceReference(Border.BackgroundProperty, "OkSoft");
+        _pill.SetResourceReference(TextBlock.ForegroundProperty, "Ok");
+        _heroTitle.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        _heroBody.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        var hero = new StackPanel();
+        hero.Children.Add(pillHost);
+        hero.Children.Add(_heroTitle);
+        hero.Children.Add(_heroBody);
+        _hero.Child = hero;
+        _hero.SetResourceReference(Border.BackgroundProperty, "AccentSoft");
+        _hero.Padding = new Thickness(22, 20, 22, 20);
+        Children.Add(_hero);
+
+        var metrics = new UniformGrid { Columns = 2 };
+        metrics.Children.Add(Metric(UiText.Get("protected"), _folders));
+        metrics.Children.Add(Metric(UiText.Get("files"), _files));
+        metrics.Children.Add(Metric(UiText.Get("backupSize"), _size));
+        metrics.Children.Add(Metric(UiText.Get("last"), _last));
+        Children.Add(metrics);
+
+        Ui.ApplyStyle(_meter, "Meter");
+        var storage = new StackPanel();
+        storage.Children.Add(Label(UiText.Get("storage")));
+        storage.Children.Add(_storage);
+        storage.Children.Add(_meter);
+        Children.Add(Card(storage));
+
+        var activity = new StackPanel();
+        activity.Children.Add(Label(UiText.Get("uploading")));
+        activity.Children.Add(_activity);
+        Children.Add(Card(activity));
     }
 
     public void Update(JsonElement status)
     {
-        var server = Object(status, "server");
-        var storage = Object(status, "storage");
-        var overview = Object(status, "overview");
+        var server = MainWindow.Object(status, "server");
+        var storage = MainWindow.Object(status, "storage");
+        var overview = MainWindow.Object(status, "overview");
+        var connected = MainWindow.Bool(server, "connected");
+        var paused = MainWindow.Bool(status, "paused");
+        var active = MainWindow.LongOf(status, "activeUploads");
+        string pill;
+        string title;
+        string body;
+        string tone;
+        if (!connected)
+        {
+            pill = UiText.Get("heroSignIn");
+            title = UiText.Get("connect");
+            body = UiText.Get("heroBodySignIn");
+            tone = "Warning";
+        }
+        else if (paused)
+        {
+            pill = UiText.Get("heroPaused");
+            title = string.IsNullOrEmpty(MainWindow.TextOf(status, "pauseReason")) ? UiText.Get("heroPaused") : MainWindow.TextOf(status, "pauseReason");
+            body = UiText.Get("heroBodyPaused");
+            tone = "Warning";
+        }
+        else if (active > 0)
+        {
+            pill = UiText.Get("heroUploading");
+            title = UiText.Get("heroUploading");
+            body = UiText.Get("heroBodyUploading");
+            tone = "Accent";
+        }
+        else
+        {
+            pill = UiText.Get("heroProtected");
+            title = UiText.Get("ready");
+            body = UiText.Get("heroBodyProtected");
+            tone = "Ok";
+        }
+
+        _pill.Text = pill;
+        _pill.SetResourceReference(TextBlock.ForegroundProperty, tone);
+        if (_pill.Parent is Border pillHost)
+        {
+            pillHost.SetResourceReference(Border.BackgroundProperty, tone + "Soft");
+        }
+
+        _hero.SetResourceReference(Border.BackgroundProperty, tone == "Accent" ? "AccentSoft" : tone + "Soft");
+        _heroTitle.Text = title;
         var email = MainWindow.TextOf(server, "accountEmail");
         var host = MainWindow.TextOf(server, "name");
-        _account.Text = $"Account: {(string.IsNullOrEmpty(email) ? "—" : email)}\nServer: {(string.IsNullOrEmpty(host) ? "—" : host)}";
+        _heroBody.Text = body + (string.IsNullOrEmpty(email) && string.IsNullOrEmpty(host) ? "" : $"\n{email}  {host}".Trim());
+
+        _folders.Text = MainWindow.LongOf(overview, "protectedFolders").ToString("N0");
+        _files.Text = MainWindow.LongOf(overview, "filesBackedUp").ToString("N0");
+        _size.Text = ByteFormat.Format(MainWindow.LongOf(overview, "backupBytes"));
+        var last = MainWindow.TextOf(overview, "lastBackupAt");
+        _last.Text = string.IsNullOrEmpty(last) ? "—" : last;
+
         if (storage.ValueKind != JsonValueKind.Object)
         {
-            _storage.Text = "Storage quota: —";
+            _storage.Text = "—";
+            _meter.Value = 0;
         }
         else if (MainWindow.Bool(storage, "unlimited"))
         {
-            _storage.Text = $"Storage quota: {UiText.Get("unlimited")}\nUsed: {ByteFormat.Format(MainWindow.LongOf(storage, "usedBytes"))}";
+            _storage.Text = $"{UiText.Get("unlimited")} · {UiText.Get("used")} {ByteFormat.Format(MainWindow.LongOf(storage, "usedBytes"))}";
+            _meter.Value = 0;
         }
         else
         {
             var used = MainWindow.LongOf(storage, "usedBytes");
             var quota = MainWindow.LongOf(storage, "quotaBytes");
             var percent = storage.TryGetProperty("percentUsed", out var value) && value.TryGetDouble(out var number) ? number : 0;
-            _storage.Text = $"Storage:\n{ByteFormat.Format(used)} / {ByteFormat.Format(quota)}\n\n{percent:0}% used";
+            _storage.Text = $"{ByteFormat.Format(used)} / {ByteFormat.Format(quota)} · {percent:0}%";
+            _meter.Value = Math.Clamp(percent, 0, 100);
         }
 
-        var last = MainWindow.TextOf(overview, "lastBackupAt");
-        _overview.Text =
-            $"Protected folders: {MainWindow.LongOf(overview, "protectedFolders")}\n\nFiles backed up: {MainWindow.LongOf(overview, "filesBackedUp"):N0}\n\nBackup size:\n{ByteFormat.Format(MainWindow.LongOf(overview, "backupBytes"))}\n\nLast backup:\n{(string.IsNullOrEmpty(last) ? "—" : last)}";
         var speed = status.TryGetProperty("bytesPerSecond", out var rate) && rate.TryGetDouble(out var perSecond) ? perSecond : 0;
         var remaining = MainWindow.LongOf(status, "remainingBytes");
         _activity.Text =
-            $"Uploading: {MainWindow.LongOf(status, "activeUploads")} files\n\nSpeed:\n{ByteFormat.FormatSpeed(speed)}\n\nRemaining:\n{ByteFormat.Format(remaining)}\n\nEstimated time:\n{ByteFormat.FormatEta(remaining, speed)}";
+            $"{UiText.Get("uploading")}: {active:N0}\n{UiText.Get("speed")}: {ByteFormat.FormatSpeed(speed)}\n{UiText.Get("remaining")}: {ByteFormat.Format(remaining)}\n{UiText.Get("eta")}: {OrDash(ByteFormat.FormatEta(remaining, speed))}";
     }
 
-    private static JsonElement Object(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) ? value : default;
+    private static string OrDash(string value) => string.IsNullOrEmpty(value) ? "—" : value;
+
+    private static Border CardHost() => new()
+    {
+        CornerRadius = new CornerRadius(18),
+        Padding = new Thickness(18),
+        Margin = new Thickness(0, 0, 8, 12),
+        BorderThickness = new Thickness(1),
+    };
+
+    private static TextBlock MetricValue() => new()
+    {
+        FontSize = 28,
+        FontWeight = FontWeights.SemiBold,
+        Margin = new Thickness(0, 8, 0, 0),
+        Text = "—",
+    };
+
+    private static Border Metric(string label, TextBlock value)
+    {
+        value.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        var stack = new StackPanel();
+        stack.Children.Add(Label(label));
+        stack.Children.Add(value);
+        var card = CardHost();
+        card.SetResourceReference(Border.BackgroundProperty, "Card");
+        card.SetResourceReference(Border.BorderBrushProperty, "Line");
+        card.Child = stack;
+        return card;
+    }
+
+    private static TextBlock Label(string text)
+    {
+        var block = new TextBlock { Text = text, FontSize = 12.5 };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        return block;
+    }
+
+    private static TextBlock Body()
+    {
+        var block = new TextBlock { TextWrapping = TextWrapping.Wrap, LineHeight = 22 };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        return block;
+    }
+
+    private static Border Card(UIElement child)
+    {
+        var card = CardHost();
+        card.Margin = new Thickness(0, 4, 0, 12);
+        card.SetResourceReference(Border.BackgroundProperty, "Card");
+        card.SetResourceReference(Border.BorderBrushProperty, "Line");
+        card.Child = child;
+        return card;
+    }
 }
 
 public sealed class BackupsView : DockPanel, IRefresh
 {
     private readonly StackPanel _jobs = new();
+    private string _signature = "";
 
     public BackupsView()
     {
-        var bar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 16) };
-        bar.Children.Add(Title(UiText.Get("backups")));
-        var add = UiButton(UiText.Get("addFolder"));
-        add.Margin = new Thickness(16, 0, 0, 0);
-        add.Click += async (_, _) => await AddJobAsync();
+        var bar = new DockPanel { Margin = new Thickness(0, 0, 0, 16), LastChildFill = false };
+        var add = Ui.Button(UiText.Get("addFolder"), "PrimaryButton", AddJobAsync);
+        add.Margin = new Thickness(0);
         bar.Children.Add(add);
+        DockPanel.SetDock(bar, Dock.Top);
         Children.Add(bar);
-        var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = _jobs };
-        Children.Add(scroll);
+        Children.Add(new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = _jobs, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
         LastChildFill = true;
     }
 
     public void Update(JsonElement status)
     {
-        _jobs.Children.Clear();
-        if (!status.TryGetProperty("jobs", out var jobs) || jobs.ValueKind != JsonValueKind.Array)
+        var signature = status.TryGetProperty("jobs", out var jobs) ? jobs.GetRawText() : "";
+        if (signature == _signature && _jobs.Children.Count > 0)
         {
+            return;
+        }
+
+        _signature = signature;
+        _jobs.Children.Clear();
+        if (jobs.ValueKind != JsonValueKind.Array || jobs.GetArrayLength() == 0)
+        {
+            _jobs.Children.Add(Ui.Empty(UiText.Get("noJobs"), UiText.Get("noJobsBody")));
             return;
         }
 
         foreach (var job in jobs.EnumerateArray())
         {
-            var id = MainWindow.TextOf(job, "id");
-            var paused = MainWindow.Bool(job, "paused");
-            var block = new StackPanel();
-            block.Children.Add(Body($"{MainWindow.TextOf(job, "name")}          {(paused ? "Paused" : "Running")}"));
-            block.Children.Add(Muted($"{MainWindow.TextOf(job, "sourcePath")}\n{MainWindow.TextOf(job, "destination")}\n{MainWindow.TextOf(job, "mode")}"));
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
-            var now = UiButton(UiText.Get("backupNow"));
-            now.Click += async (_, _) => await AgentConnection.CallAsync(new { method = "backup.now", id });
-            var pause = UiButton(paused ? UiText.Get("resume") : UiText.Get("pause"));
-            pause.Click += async (_, _) => await AgentConnection.CallAsync(new { method = paused ? "resume" : "pause", id });
-            var remove = UiButton("Remove");
-            remove.Click += async (_, _) =>
-            {
-                if (System.Windows.MessageBox.Show("Removing a backup job does not delete files already stored on the server.", "My Drive Backup", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
-                {
-                    return;
-                }
-
-                await AgentConnection.CallAsync(new { method = "jobs.delete", id, confirm = true });
-            };
-            row.Children.Add(now);
-            row.Children.Add(pause);
-            row.Children.Add(remove);
-            block.Children.Add(row);
-            _jobs.Children.Add(Card(block));
+            _jobs.Children.Add(JobCard(job));
         }
+    }
+
+    private static Border JobCard(JsonElement job)
+    {
+        var id = MainWindow.TextOf(job, "id");
+        var paused = MainWindow.Bool(job, "paused");
+        var stack = new StackPanel();
+        var header = new DockPanel();
+        var pill = Ui.Pill(paused ? UiText.Get("paused") : UiText.Get("running"), paused ? "Warning" : "Ok");
+        DockPanel.SetDock(pill, Dock.Right);
+        header.Children.Add(pill);
+        var name = new TextBlock { Text = MainWindow.TextOf(job, "name"), FontSize = 18, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
+        name.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        header.Children.Add(name);
+        stack.Children.Add(header);
+        stack.Children.Add(Ui.MutedText(MainWindow.TextOf(job, "sourcePath")));
+        var mode = MainWindow.TextOf(job, "mode");
+        var modeLabel = UiText.Get(mode is "continuous" or "scheduled" or "manual" ? mode : "continuous");
+        stack.Children.Add(Ui.MutedText($"{UiText.Get("destination")}: {MainWindow.TextOf(job, "destination")}  ·  {modeLabel}"));
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
+        row.Children.Add(Ui.Button(UiText.Get("backupNow"), "PrimaryButton", () => Ui.TryCall(new { method = "backup.now", id })));
+        row.Children.Add(Ui.Button(paused ? UiText.Get("resume") : UiText.Get("pause"), "SecondaryButton", () => Ui.TryCall(new { method = paused ? "resume" : "pause", id })));
+        row.Children.Add(Ui.Button(UiText.Get("remove"), "QuietButton", () => RemoveAsync(id)));
+        stack.Children.Add(row);
+        return Ui.Card(stack);
+    }
+
+    private static async Task RemoveAsync(string id)
+    {
+        if (MessageBox.Show(UiText.Get("removeConfirm"), "My Drive Backup", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+        {
+            return;
+        }
+
+        await Ui.TryCall(new { method = "jobs.delete", id, confirm = true });
     }
 
     private static async Task AddJobAsync()
     {
-        using var dialog = new System.Windows.Forms.FolderBrowserDialog { Description = UiText.Get("choose") };
+        using var dialog = new System.Windows.Forms.FolderBrowserDialog { Description = UiText.Get("choose"), UseDescriptionForTitle = true };
         if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
         {
             return;
@@ -128,7 +284,7 @@ public sealed class BackupsView : DockPanel, IRefresh
 
         var name = new System.IO.DirectoryInfo(dialog.SelectedPath).Name;
         var destination = "Backups/" + Environment.MachineName + "/" + name;
-        await AgentConnection.CallAsync(new
+        await Ui.TryCall(new
         {
             method = "jobs.upsert",
             job = new
@@ -143,59 +299,110 @@ public sealed class BackupsView : DockPanel, IRefresh
     }
 }
 
-public sealed class TransfersView : DockPanel, IRefresh
+public sealed class TransfersView : StackPanel, IRefresh
 {
-    private readonly TextBlock _summary = Body();
+    private readonly TextBlock _speed = MetricValue();
+    private readonly TextBlock _active = MetricValue();
+    private readonly TextBlock _queue = MetricValue();
+    private readonly TextBlock _sent = MetricValue();
+    private readonly Polyline _chart = new() { StrokeThickness = 2.4 };
+    private readonly Canvas _canvas = new() { Height = 120 };
     private readonly StackPanel _rows = new();
-    private readonly System.Windows.Shapes.Polyline _chart = new() { StrokeThickness = 2 };
+    private double[] _lastSpeeds = [];
 
     public TransfersView()
     {
-        Children.Add(Title(UiText.Get("transfers")));
-        Children.Add(_summary);
-        _chart.Stroke = Brushes.DodgerBlue;
-        var canvas = new Canvas { Height = 80, Margin = new Thickness(0, 8, 0, 12) };
-        canvas.Children.Add(_chart);
-        canvas.SizeChanged += (_, _) => Draw(canvas, _lastSpeeds);
-        Children.Add(canvas);
-        Children.Add(new ScrollViewer { Content = _rows, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        LastChildFill = true;
-    }
+        var metrics = new UniformGrid { Columns = 4 };
+        metrics.Children.Add(Mini(UiText.Get("speed"), _speed));
+        metrics.Children.Add(Mini(UiText.Get("uploading"), _active));
+        metrics.Children.Add(Mini(UiText.Get("queue"), _queue));
+        metrics.Children.Add(Mini(UiText.Get("session"), _sent));
+        Children.Add(metrics);
 
-    private double[] _lastSpeeds = [];
+        _chart.SetResourceReference(Shape.StrokeProperty, "Accent");
+        _canvas.Children.Add(_chart);
+        _canvas.SizeChanged += (_, _) => Draw(_canvas, _lastSpeeds);
+        var chartCard = new StackPanel();
+        chartCard.Children.Add(Caption(UiText.Get("speedChart")));
+        chartCard.Children.Add(_canvas);
+        Children.Add(Ui.Card(chartCard));
+        Children.Add(_rows);
+    }
 
     public void Update(JsonElement status)
     {
         var speed = status.TryGetProperty("bytesPerSecond", out var rate) && rate.TryGetDouble(out var perSecond) ? perSecond : 0;
-        _summary.Text =
-            $"Upload speed: {ByteFormat.FormatSpeed(speed)}\nCurrent uploads: {MainWindow.LongOf(status, "activeUploads")}\nQueue size: {MainWindow.LongOf(status, "queueSize")}\nUploaded data: {ByteFormat.Format(MainWindow.LongOf(status, "sessionUploadedBytes"))}\nRemaining data: {ByteFormat.Format(MainWindow.LongOf(status, "remainingBytes"))}\nWorkers: {MainWindow.LongOf(status, "workers")}\nNetwork: {MainWindow.TextOf(status, "networkStatus")}\nFailed uploads: {MainWindow.LongOf(status, "failed")}\nRetrying: {MainWindow.LongOf(status, "retrying")}";
+        _speed.Text = ByteFormat.FormatSpeed(speed);
+        _active.Text = MainWindow.LongOf(status, "activeUploads").ToString("N0");
+        _queue.Text = MainWindow.LongOf(status, "queueSize").ToString("N0");
+        _sent.Text = ByteFormat.Format(MainWindow.LongOf(status, "sessionUploadedBytes"));
         _rows.Children.Clear();
+        var any = false;
         if (status.TryGetProperty("transfers", out var transfers) && transfers.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in transfers.EnumerateArray())
             {
-                var size = MainWindow.LongOf(item, "fileSize");
-                var sent = MainWindow.LongOf(item, "bytesSent");
-                var percent = size <= 0 ? 0 : sent * 100 / size;
-                var line = $"{MainWindow.TextOf(item, "relativePath")}      {MainWindow.TextOf(item, "state")}";
-                if (MainWindow.TextOf(item, "state") == "Uploading" && size > 0)
-                {
-                    line += $"\n{ByteFormat.Format(sent)} / {ByteFormat.Format(size)}\n{percent}%\n{ByteFormat.FormatSpeed(speed)}\nETA: {ByteFormat.FormatEta(size - sent, speed)}";
-                }
-
-                if (!string.IsNullOrEmpty(MainWindow.TextOf(item, "error")))
-                {
-                    line += "\n" + MainWindow.TextOf(item, "error");
-                }
-
-                _rows.Children.Add(Body(line));
+                any = true;
+                _rows.Children.Add(TransferCard(item, speed));
             }
+        }
+
+        if (!any)
+        {
+            _rows.Children.Add(Ui.Empty(UiText.Get("noTransfers"), UiText.Get("noTransfersBody")));
         }
 
         if (status.TryGetProperty("speedHistory", out var history) && history.ValueKind == JsonValueKind.Array)
         {
             _lastSpeeds = history.EnumerateArray().Select(item => item.TryGetDouble(out var number) ? number : 0).ToArray();
+            Draw(_canvas, _lastSpeeds);
         }
+    }
+
+    private static Border TransferCard(JsonElement item, double speed)
+    {
+        var size = MainWindow.LongOf(item, "fileSize");
+        var sent = MainWindow.LongOf(item, "bytesSent");
+        var percent = size <= 0 ? 0 : sent * 100d / size;
+        var stack = new StackPanel();
+        var name = new TextBlock { Text = MainWindow.TextOf(item, "relativePath"), FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+        name.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        stack.Children.Add(name);
+        stack.Children.Add(Ui.MutedText($"{MainWindow.TextOf(item, "state")}  ·  {ByteFormat.Format(sent)} / {ByteFormat.Format(size)}"));
+        var bar = new ProgressBar { Value = percent, Margin = new Thickness(0, 10, 0, 0) };
+        Ui.ApplyStyle(bar, "Meter");
+        stack.Children.Add(bar);
+        var error = MainWindow.TextOf(item, "error");
+        if (!string.IsNullOrEmpty(error))
+        {
+            var failure = new TextBlock { Text = error, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+            failure.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+            stack.Children.Add(failure);
+        }
+        else if (MainWindow.TextOf(item, "state") == "Uploading")
+        {
+            stack.Children.Add(Ui.MutedText($"{ByteFormat.FormatSpeed(speed)}  ·  {UiText.Get("eta")} {ByteFormat.FormatEta(size - sent, speed)}"));
+        }
+
+        return Ui.Card(stack);
+    }
+
+    private static TextBlock MetricValue() => new() { FontSize = 22, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0), Text = "—" };
+
+    private static Border Mini(string label, TextBlock value)
+    {
+        value.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        var stack = new StackPanel();
+        stack.Children.Add(Caption(label));
+        stack.Children.Add(value);
+        return Ui.Card(stack);
+    }
+
+    private static TextBlock Caption(string text)
+    {
+        var block = new TextBlock { Text = text, FontSize = 12.5 };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        return block;
     }
 
     private void Draw(Canvas canvas, double[] speeds)
@@ -210,8 +417,8 @@ public sealed class TransfersView : DockPanel, IRefresh
         for (var i = 0; i < speeds.Length; i++)
         {
             var x = canvas.ActualWidth * i / Math.Max(1, speeds.Length - 1);
-            var y = canvas.ActualHeight - (speeds[i] / max * (canvas.ActualHeight - 4));
-            _chart.Points.Add(new System.Windows.Point(x, y));
+            var y = canvas.ActualHeight - (speeds[i] / max * (canvas.ActualHeight - 8)) - 4;
+            _chart.Points.Add(new Point(x, y));
         }
     }
 }
@@ -220,23 +427,25 @@ public sealed class ActivityView : DockPanel, IRefresh
 {
     private readonly StackPanel _rows = new();
     private string _filter = "All";
+    private string _signature = "";
+    private bool _loading;
 
     public ActivityView()
     {
-        var filters = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 12) };
+        var filters = new WrapPanel { Margin = new Thickness(0, 0, 0, 14) };
         foreach (var filter in new[] { "All", "Uploaded", "Skipped", "Failed", "Deleted" })
         {
-            var button = UiButton(UiText.Get(filter.ToLowerInvariant()));
             var selected = filter;
-            button.Click += async (_, _) =>
+            var button = Ui.Button(UiText.Get(filter.ToLowerInvariant()), filter == "All" ? "PrimaryButton" : "SecondaryButton", async () =>
             {
                 _filter = selected;
+                _signature = "";
                 await ReloadAsync();
-            };
+            });
             filters.Children.Add(button);
         }
 
-        Children.Add(Title(UiText.Get("activity")));
+        DockPanel.SetDock(filters, Dock.Top);
         Children.Add(filters);
         Children.Add(new ScrollViewer { Content = _rows, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         LastChildFill = true;
@@ -246,237 +455,431 @@ public sealed class ActivityView : DockPanel, IRefresh
 
     private async Task ReloadAsync()
     {
-        var response = await AgentConnection.CallAsync(new { method = "activity", filter = _filter });
-        _rows.Children.Clear();
-        if (!response.GetProperty("ok").GetBoolean())
+        if (_loading)
         {
             return;
         }
 
-        foreach (var entry in response.GetProperty("result").EnumerateArray())
+        _loading = true;
+        try
         {
-            var reason = MainWindow.TextOf(entry, "reason");
-            _rows.Children.Add(Body($"{MainWindow.TextOf(entry, "at")}\n{MainWindow.TextOf(entry, "kind")}\n{MainWindow.TextOf(entry, "path")}" + (string.IsNullOrEmpty(reason) ? "" : $"\nReason: {reason}")));
+            var response = await AgentConnection.CallAsync(new { method = "activity", filter = _filter });
+            if (!response.GetProperty("ok").GetBoolean())
+            {
+                return;
+            }
+
+            var payload = response.GetProperty("result").GetRawText();
+            if (payload == _signature)
+            {
+                return;
+            }
+
+            _signature = payload;
+            _rows.Children.Clear();
+            if (response.GetProperty("result").GetArrayLength() == 0)
+            {
+                _rows.Children.Add(Ui.Empty(UiText.Get("noActivity"), UiText.Get("noActivityBody")));
+                return;
+            }
+
+            foreach (var entry in response.GetProperty("result").EnumerateArray())
+            {
+                var stack = new StackPanel();
+                var kind = MainWindow.TextOf(entry, "kind");
+                stack.Children.Add(Ui.Pill(string.IsNullOrEmpty(kind) ? UiText.Get("all") : kind, kind == "Failed" ? "Danger" : "Accent"));
+                var path = new TextBlock { Text = MainWindow.TextOf(entry, "path"), FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+                path.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+                stack.Children.Add(path);
+                var reason = MainWindow.TextOf(entry, "reason");
+                stack.Children.Add(Ui.MutedText(MainWindow.TextOf(entry, "at") + (string.IsNullOrEmpty(reason) ? "" : "\n" + reason)));
+                _rows.Children.Add(Ui.Card(stack));
+            }
+        }
+        catch (BackupServiceUnavailableException ex)
+        {
+            Ui.Report?.Invoke(ex);
+        }
+        catch (Exception ex) when (ex is TimeoutException or IOException or InvalidOperationException)
+        {
+        }
+        finally
+        {
+            _loading = false;
         }
     }
 }
 
 public sealed class SettingsView : StackPanel, IRefresh
 {
-    private readonly Action _refresh;
+    private readonly Func<Task> _refresh;
     private JsonElement _settings;
     private JsonElement _status;
+    private TextBlock? _account;
+    private bool _loaded;
+    private bool _loading;
+    private string _language = "";
 
-    public SettingsView(Func<Task> refresh)
-    {
-        _refresh = () => _ = refresh();
-        Children.Add(Title(UiText.Get("settings")));
-    }
+    public SettingsView(Func<Task> refresh) => _refresh = refresh;
 
     public void Update(JsonElement status)
     {
         _status = status;
+        if (_loaded && _account != null && _language == UiText.Language)
+        {
+            _account.Text = AccountText();
+            return;
+        }
+
         _ = LoadAsync();
     }
 
     private async Task LoadAsync()
     {
-        var response = await AgentConnection.CallAsync(new { method = "settings.get" });
-        if (!response.GetProperty("ok").GetBoolean())
+        if (_loading)
         {
             return;
         }
 
-        _settings = response.GetProperty("result");
-        Children.Clear();
-        Children.Add(Title(UiText.Get("settings")));
-        var server = _status.ValueKind == JsonValueKind.Object && _status.TryGetProperty("server", out var value) ? value : default;
-        Children.Add(Section("Account",
-            $"Account: {MainWindow.TextOf(server, "accountEmail")}\nServer URL: {MainWindow.TextOf(server, "url")}\nServer name: {MainWindow.TextOf(server, "name")}\nConnection: {(MainWindow.Bool(server, "connected") ? "Connected" : "Disconnected")}\nAPI version: {MainWindow.TextOf(server, "apiVersion")}\nDevice: {MainWindow.TextOf(server, "deviceId")}"));
-        var serverBox = new TextBox { Text = MainWindow.TextOf(server, "url"), Margin = new Thickness(0, 8, 0, 8) };
-        var insecure = new CheckBox { Content = UiText.Get("insecure") + " — HTTP is only for a development or LAN server", IsChecked = MainWindow.Bool(server, "allowInsecure") };
-        var actions = new StackPanel { Orientation = Orientation.Horizontal };
-        actions.Children.Add(ActionButton(UiText.Get("test"), async () => Show(await AgentConnection.CallAsync(new { method = "server.test", url = serverBox.Text, allowInsecure = insecure.IsChecked == true }))));
-        actions.Children.Add(ActionButton(UiText.Get("changeServer"), async () =>
+        _loading = true;
+        try
         {
-            if (System.Windows.MessageBox.Show("Changing the server pauses backup jobs for the current server. Account, backup jobs, and data for that server may not apply to the new server.", "My Drive Backup", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
+            var response = await Ui.TryCall(new { method = "settings.get" });
+            if (response == null || !response.Value.GetProperty("ok").GetBoolean())
             {
                 return;
             }
 
-            Show(await AgentConnection.CallAsync(new { method = "server.set", url = serverBox.Text, allowInsecure = insecure.IsChecked == true, confirm = true }));
-        }));
-        actions.Children.Add(ActionButton(UiText.Get("disconnect"), async () =>
-        {
-            if (System.Windows.MessageBox.Show("Disconnect this device from the server? Cloud files stay on the server.", "My Drive Backup", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
-            {
-                return;
-            }
+            _settings = response.Value.GetProperty("result");
+            _language = UiText.Language;
+            Children.Clear();
+            _account = new TextBlock { Text = AccountText(), TextWrapping = TextWrapping.Wrap, LineHeight = 22, Margin = new Thickness(0, 0, 0, 8) };
+            _account.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+            var account = new StackPanel();
+            account.Children.Add(Heading(UiText.Get("sectionAccount")));
+            account.Children.Add(_account);
+            Children.Add(Ui.Card(account));
 
-            Show(await AgentConnection.CallAsync(new { method = "auth.logout", confirm = true }));
-        }));
-        Children.Add(serverBox);
-        Children.Add(insecure);
-        Children.Add(actions);
+            var server = _status.ValueKind == JsonValueKind.Object && _status.TryGetProperty("server", out var value) ? value : default;
+            var serverBox = new TextBox { Text = MainWindow.TextOf(server, "url") };
+            Ui.ApplyStyle(serverBox, "Field");
+            var insecure = new CheckBox { Content = UiText.Get("allowHttp"), IsChecked = MainWindow.Bool(server, "allowInsecure") };
+            Ui.ApplyStyle(insecure, "Check");
+            var actions = new WrapPanel();
+            actions.Children.Add(Ui.Button(UiText.Get("test"), "SecondaryButton", async () => Show(await Ui.TryCall(new { method = "server.test", url = serverBox.Text, allowInsecure = insecure.IsChecked == true }))));
+            actions.Children.Add(Ui.Button(UiText.Get("changeServer"), "SecondaryButton", async () =>
+            {
+                if (!Confirm(UiText.Get("changeConfirm")))
+                {
+                    return;
+                }
 
-        Children.Add(Section("Backup", "Default destination, schedule, and deletion policy. Removing a job keeps the cloud copy."));
-        Children.Add(Editor("Default destination", "defaultDestination"));
-        Children.Add(Choice("Deletion policy", "deletionPolicy", ["keep", "trash", "delay"]));
-        Children.Add(Section("Filters", "Included extensions, excluded extensions, excluded folders, glob patterns, and size limits are stored on each backup job. System files and symbolic links stay off unless you enable them here."));
-        Children.Add(Check("Backup hidden files", "backupHiddenFiles"));
-        Children.Add(Check("Backup Windows system files", "backupSystemFiles"));
-        Children.Add(Check("Follow symbolic links", "followSymlinks"));
-        Children.Add(Section("Transfer", "Concurrent uploads, chunk size, speed limit, and retries."));
-        Children.Add(Choice("Concurrent uploads", "concurrentUploads", ["1", "2", "3", "4", "5", "8"]));
-        Children.Add(Choice("Chunk size", "chunkSizeMb", ["8", "16", "32", "64"]));
-        Children.Add(Choice("Upload limit", "uploadLimitBytesPerSecond", ["", "10485760", "20971520", "52428800"]));
-        Children.Add(Section("Network", "Backup does not use a metered connection unless you allow it. An unknown metered state does not block backup."));
-        Children.Add(Check("Backup on Wi-Fi", "backupOnWifi"));
-        Children.Add(Check("Backup on Ethernet", "backupOnEthernet"));
-        Children.Add(Check("Backup on metered network", "backupOnMetered"));
-        Children.Add(Section("Application", "The backup service keeps running after this window closes."));
-        Children.Add(Check("Start backup service with Windows", "startWithWindows"));
-        Children.Add(Check("Run in background", "runInBackground"));
-        Children.Add(Check("Notifications", "notifications"));
-        Children.Add(Choice("Language", "language", ["auto", "en", "vi"]));
-        Children.Add(Choice("Theme", "theme", ["system", "light", "dark"]));
-        Children.Add(Section("Advanced", "The local database does not store access tokens. Rebuild and verify never delete cloud data."));
-        var advanced = new StackPanel { Orientation = Orientation.Horizontal };
-        advanced.Children.Add(ActionButton("Open logs", async () =>
-        {
-            var logs = await AgentConnection.CallAsync(new { method = "logs.list" });
-            var text = logs.GetProperty("ok").GetBoolean()
-                ? string.Join("\n", logs.GetProperty("result").EnumerateArray().Select(entry => $"{MainWindow.TextOf(entry, "at")} {MainWindow.TextOf(entry, "level")} {MainWindow.TextOf(entry, "message")}"))
-                : MainWindow.TextOf(logs, "message");
-            System.Windows.MessageBox.Show(string.IsNullOrEmpty(text) ? "No log entries." : text, "Logs");
-        }));
-        advanced.Children.Add(ActionButton("Export logs", async () =>
-        {
-            var dialog = new Microsoft.Win32.SaveFileDialog { FileName = "mydrive-backup.log", Filter = "Log|*.log" };
-            if (dialog.ShowDialog() != true)
+                await ShowAndRefresh(await Ui.TryCall(new { method = "server.set", url = serverBox.Text, allowInsecure = insecure.IsChecked == true, confirm = true }));
+            }));
+            actions.Children.Add(Ui.Button(UiText.Get("disconnect"), "QuietButton", async () =>
             {
-                return;
-            }
+                if (!Confirm(UiText.Get("disconnectConfirm")))
+                {
+                    return;
+                }
 
-            var exported = await AgentConnection.CallAsync(new { method = "logs.export" });
-            await File.WriteAllTextAsync(dialog.FileName, exported.GetProperty("result").GetProperty("text").GetString() ?? "");
-        }));
-        advanced.Children.Add(ActionButton("Clear logs", async () =>
-        {
-            if (Confirm("Clear the local troubleshooting log?"))
+                await ShowAndRefresh(await Ui.TryCall(new { method = "auth.logout", confirm = true }));
+            }));
+            var serverCard = new StackPanel();
+            serverCard.Children.Add(Heading(UiText.Get("server")));
+            serverCard.Children.Add(Caption(UiText.Get("setupHint")));
+            serverCard.Children.Add(serverBox);
+            serverCard.Children.Add(insecure);
+            serverCard.Children.Add(actions);
+            Children.Add(Ui.Card(serverCard));
+
+            Children.Add(Section(UiText.Get("sectionBackup"), UiText.Get("backupDefaultsBody"),
+                Editor(UiText.Get("defaultDestination"), "defaultDestination"),
+                Choice(UiText.Get("deletionPolicy"), "deletionPolicy", false,
+                    ("keep", UiText.Get("keep")),
+                    ("trash", UiText.Get("trash")),
+                    ("delay", UiText.Get("delay")))));
+            Children.Add(Section(UiText.Get("sectionFilters"), UiText.Get("filtersBody"),
+                Check(UiText.Get("hidden"), "backupHiddenFiles"),
+                Check(UiText.Get("system"), "backupSystemFiles"),
+                Check(UiText.Get("symlinks"), "followSymlinks")));
+            Children.Add(Section(UiText.Get("sectionTransfer"), UiText.Get("transferBody"),
+                Choice(UiText.Get("concurrent"), "concurrentUploads", true, ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("5", "5"), ("8", "8")),
+                Choice(UiText.Get("chunk"), "chunkSizeMb", true, ("8", "8 MB"), ("16", "16 MB"), ("32", "32 MB"), ("64", "64 MB")),
+                Choice(UiText.Get("limit"), "uploadLimitBytesPerSecond", true, ("", UiText.Get("unlimited")), ("10485760", "10 MB/s"), ("20971520", "20 MB/s"), ("52428800", "50 MB/s"))));
+            Children.Add(Section(UiText.Get("sectionNetwork"), UiText.Get("networkBody"),
+                Check(UiText.Get("wifi"), "backupOnWifi"),
+                Check(UiText.Get("ethernet"), "backupOnEthernet"),
+                Check(UiText.Get("metered"), "backupOnMetered")));
+            Children.Add(Section(UiText.Get("sectionApp"), UiText.Get("appBody"),
+                Check(UiText.Get("startWithWindows"), "startWithWindows"),
+                Check(UiText.Get("background"), "runInBackground"),
+                Check(UiText.Get("notifications"), "notifications"),
+                Choice(UiText.Get("language"), "language", false, ("auto", "Auto"), ("en", "English"), ("vi", "Tiếng Việt")),
+                Choice(UiText.Get("theme"), "theme", false, ("system", "System"), ("light", "Light"), ("dark", "Dark"))));
+
+            var advanced = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
+            advanced.Children.Add(Ui.Button(UiText.Get("openLogs"), "SecondaryButton", OpenLogsAsync));
+            advanced.Children.Add(Ui.Button(UiText.Get("exportLogs"), "SecondaryButton", ExportLogsAsync));
+            advanced.Children.Add(Ui.Button(UiText.Get("clearLogs"), "SecondaryButton", async () =>
             {
-                Show(await AgentConnection.CallAsync(new { method = "logs.clear", confirm = true }));
-            }
-        }));
-        advanced.Children.Add(ActionButton("Rebuild local index", async () =>
-        {
-            if (Confirm("Rebuilding the local index does not delete cloud backups. The next scan compares files again."))
+                if (Confirm(UiText.Get("clearConfirm")))
+                {
+                    await ShowAndRefresh(await Ui.TryCall(new { method = "logs.clear", confirm = true }));
+                }
+            }));
+            advanced.Children.Add(Ui.Button(UiText.Get("rebuild"), "SecondaryButton", async () =>
             {
-                Show(await AgentConnection.CallAsync(new { method = "index.rebuild", confirm = true }));
-            }
-        }));
-        advanced.Children.Add(ActionButton("Verify backup integrity", async () =>
-        {
-            if (Confirm("This re-reads local files and compares checksums. It does not delete cloud data."))
+                if (Confirm(UiText.Get("rebuildConfirm")))
+                {
+                    await ShowAndRefresh(await Ui.TryCall(new { method = "index.rebuild", confirm = true }));
+                }
+            }));
+            advanced.Children.Add(Ui.Button(UiText.Get("verify"), "SecondaryButton", async () =>
             {
-                Show(await AgentConnection.CallAsync(new { method = "integrity.verify", confirm = true }));
-            }
-        }));
-        Children.Add(advanced);
-        var save = UiButton("Save settings");
-        save.Margin = new Thickness(0, 16, 0, 0);
-        save.Click += async (_, _) =>
+                if (Confirm(UiText.Get("verifyConfirm")))
+                {
+                    await ShowAndRefresh(await Ui.TryCall(new { method = "integrity.verify", confirm = true }));
+                }
+            }));
+            var advancedCard = new StackPanel();
+            advancedCard.Children.Add(Heading(UiText.Get("sectionAdvanced")));
+            advancedCard.Children.Add(Ui.MutedText(UiText.Get("advancedBody")));
+            advancedCard.Children.Add(advanced);
+            Children.Add(Ui.Card(advancedCard));
+
+            var save = Ui.Button(UiText.Get("saveSettings"), "PrimaryButton", async () =>
+            {
+                Show(await Ui.TryCall(new { method = "settings.set", settings = JsonSerializer.Deserialize<JsonElement>(_settings.GetRawText()) }));
+                await _refresh();
+            });
+            save.Margin = new Thickness(0, 4, 0, 0);
+            save.HorizontalAlignment = HorizontalAlignment.Left;
+            Children.Add(save);
+            _loaded = true;
+        }
+        finally
         {
-            Show(await AgentConnection.CallAsync(new { method = "settings.set", settings = JsonSerializer.Deserialize<JsonElement>(_settings.GetRawText()) }));
-            _refresh();
-        };
-        Children.Add(save);
+            _loading = false;
+        }
     }
 
-    private FrameworkElement Editor(string label, string property)
+    private string AccountText()
     {
-        var box = new TextBox { Text = MainWindow.TextOf(_settings, property), Margin = new Thickness(0, 4, 0, 8) };
+        var server = _status.ValueKind == JsonValueKind.Object && _status.TryGetProperty("server", out var value) ? value : default;
+        var email = MainWindow.TextOf(server, "accountEmail");
+        return string.Join("\n", new[]
+        {
+            $"{UiText.Get("account")}: {(string.IsNullOrEmpty(email) ? "—" : email)}",
+            $"{UiText.Get("server")}: {OrDash(MainWindow.TextOf(server, "url"))}",
+            $"{UiText.Get("connectedTo")}: {(MainWindow.Bool(server, "connected") ? UiText.Get("authorized") : "—")}",
+            $"API {OrDash(MainWindow.TextOf(server, "apiVersion"))}",
+        });
+    }
+
+    private static string OrDash(string value) => string.IsNullOrEmpty(value) ? "—" : value;
+
+    private UIElement Editor(string label, string property)
+    {
+        var box = new TextBox { Text = MainWindow.TextOf(_settings, property) };
+        Ui.ApplyStyle(box, "Field");
         box.TextChanged += (_, _) => _settings = Replace(_settings, property, box.Text);
         return Labeled(label, box);
     }
 
-    private FrameworkElement Choice(string label, string property, string[] options)
+    private UIElement Choice(string label, string property, bool numeric, params (string Value, string Label)[] options)
     {
-        var box = new ComboBox { Margin = new Thickness(0, 4, 0, 8) };
+        var box = new ComboBox();
+        Ui.ApplyStyle(box, "Choice");
         foreach (var option in options)
         {
-            box.Items.Add(string.IsNullOrEmpty(option) ? "Unlimited" : option);
+            box.Items.Add(new ComboBoxItem { Content = option.Label, Tag = option.Value });
         }
 
-        var current = _settings.TryGetProperty(property, out var value) ? value.ToString() : "";
-        box.SelectedItem = string.IsNullOrEmpty(current) ? "Unlimited" : current;
-            box.SelectionChanged += (_, _) =>
+        var current = Stored(_settings, property);
+        foreach (ComboBoxItem item in box.Items)
+        {
+            if ((item.Tag as string ?? "") == current)
             {
-                var selected = box.SelectedItem as string ?? "";
-                _settings = Replace(_settings, property, selected == "Unlimited" ? null : selected);
-            };
+                box.SelectedItem = item;
+                break;
+            }
+        }
+
+        box.SelectedItem ??= box.Items[0];
+        box.SelectionChanged += (_, _) =>
+        {
+            if (box.SelectedItem is not ComboBoxItem item)
+            {
+                return;
+            }
+
+            var selected = item.Tag as string ?? "";
+            object? written = selected.Length == 0
+                ? null
+                : numeric && long.TryParse(selected, out var number) ? number : selected;
+            _settings = Replace(_settings, property, written);
+        };
         return Labeled(label, box);
     }
 
     private CheckBox Check(string label, string property)
     {
-        var box = new CheckBox { Content = label, IsChecked = MainWindow.Bool(_settings, property), Margin = new Thickness(0, 4, 0, 4) };
+        var box = new CheckBox { Content = label, IsChecked = MainWindow.Bool(_settings, property) };
+        Ui.ApplyStyle(box, "Check");
         box.Checked += (_, _) => _settings = Replace(_settings, property, true);
         box.Unchecked += (_, _) => _settings = Replace(_settings, property, false);
         return box;
     }
 
+    private static string Stored(JsonElement settings, string property)
+    {
+        if (settings.ValueKind != JsonValueKind.Object || !settings.TryGetProperty(property, out var value))
+        {
+            return "";
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? "",
+            JsonValueKind.Number => value.ToString(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => "",
+        };
+    }
+
     private static JsonElement Replace(JsonElement element, string property, object? value)
     {
-        var map = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(element.GetRawText()) ?? new Dictionary<string, JsonElement>();
+        var map = element.ValueKind == JsonValueKind.Object
+            ? JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(element.GetRawText()) ?? new Dictionary<string, JsonElement>()
+            : new Dictionary<string, JsonElement>();
         map[property] = value is null
             ? JsonDocument.Parse("null").RootElement.Clone()
             : JsonSerializer.SerializeToElement(value);
         return JsonSerializer.SerializeToElement(map);
     }
 
-    private void Show(JsonElement response)
+    private void Show(JsonElement? response)
     {
-        if (!response.GetProperty("ok").GetBoolean())
+        if (response == null || response.Value.GetProperty("ok").GetBoolean())
         {
-            System.Windows.MessageBox.Show(MainWindow.TextOf(response, "message"), "My Drive Backup", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
         }
 
-        _refresh();
+        MessageBox.Show(MainWindow.TextOf(response.Value, "message"), "My Drive Backup", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    private async Task ShowAndRefresh(JsonElement? response)
+    {
+        Show(response);
+        if (response != null)
+        {
+            await _refresh();
+        }
+    }
+
+    private async Task OpenLogsAsync()
+    {
+        var logs = await Ui.TryCall(new { method = "logs.list" });
+        if (logs == null)
+        {
+            return;
+        }
+
+        var text = logs.Value.GetProperty("ok").GetBoolean()
+            ? string.Join("\n", logs.Value.GetProperty("result").EnumerateArray().Select(entry => $"{MainWindow.TextOf(entry, "at")} {MainWindow.TextOf(entry, "level")} {MainWindow.TextOf(entry, "message")}"))
+            : MainWindow.TextOf(logs.Value, "message");
+        MessageBox.Show(string.IsNullOrEmpty(text) ? UiText.Get("noLogs") : text, UiText.Get("logsTitle"));
+    }
+
+    private async Task ExportLogsAsync()
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog { FileName = "mydrive-backup.log", Filter = "Log|*.log" };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var exported = await Ui.TryCall(new { method = "logs.export" });
+        if (exported == null || !exported.Value.GetProperty("ok").GetBoolean())
+        {
+            return;
+        }
+
+        await File.WriteAllTextAsync(dialog.FileName, exported.Value.GetProperty("result").GetProperty("text").GetString() ?? "");
     }
 
     private static bool Confirm(string message) =>
-        System.Windows.MessageBox.Show(message, "My Drive Backup", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK;
+        MessageBox.Show(message, "My Drive Backup", MessageBoxButton.OKCancel, MessageBoxImage.Warning) == MessageBoxResult.OK;
+
+    private static Border Section(string title, string body, params UIElement[] extra)
+    {
+        var stack = new StackPanel();
+        stack.Children.Add(Heading(title));
+        stack.Children.Add(Ui.MutedText(body));
+        foreach (var item in extra)
+        {
+            stack.Children.Add(item);
+        }
+
+        return Ui.Card(stack);
+    }
+
+    private static TextBlock Heading(string text)
+    {
+        var block = new TextBlock { Text = text, FontSize = 16, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        return block;
+    }
+
+    private static TextBlock Caption(string text)
+    {
+        var block = new TextBlock { Text = text, FontSize = 12.5 };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        return block;
+    }
+
+    private static StackPanel Labeled(string label, UIElement child)
+    {
+        var stack = new StackPanel();
+        stack.Children.Add(Caption(label));
+        stack.Children.Add(child);
+        return stack;
+    }
 }
 
 public sealed class SetupView : StackPanel, IRefresh
 {
-    private readonly TextBox _url = new() { Text = "https://", Margin = new Thickness(0, 8, 0, 8) };
-    private readonly CheckBox _insecure = new() { Content = "Allow insecure HTTP for a development or LAN server" };
-    private readonly TextBlock _detail = Body();
+    private readonly TextBox _url = new() { Text = "https://" };
+    private readonly CheckBox _insecure = new() { Content = UiText.Get("allowHttp") };
+    private readonly TextBlock _detail = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 16, 0, 0), LineHeight = 22 };
+    private readonly Func<Task> _refresh;
     private int _step;
 
     public SetupView(Func<Task> refresh)
     {
-        Children.Add(Title(UiText.Get("connect")));
-        Children.Add(new TextBlock { Text = "Server URL", Foreground = Brushes.Gray });
+        _refresh = refresh;
+        var title = new TextBlock { Text = UiText.Get("connect"), FontSize = 28, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+        title.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        Children.Add(title);
+        Children.Add(Ui.MutedText(UiText.Get("setupIntro")));
+        Children.Add(Caption(UiText.Get("setupHint")));
+        Ui.ApplyStyle(_url, "Field");
         Children.Add(_url);
+        Ui.ApplyStyle(_insecure, "Check");
         Children.Add(_insecure);
-        var test = UiButton(UiText.Get("test"));
-        test.Click += async (_, _) => await TestAsync();
-        var browser = UiButton(UiText.Get("signIn"));
-        browser.Click += async (_, _) => await AuthorizeAsync();
-        var next = UiButton(UiText.Get("start"));
-        next.Click += async (_, _) =>
+        var row = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        row.Children.Add(Ui.Button(UiText.Get("test"), "SecondaryButton", TestAsync));
+        row.Children.Add(Ui.Button(UiText.Get("signIn"), "PrimaryButton", AuthorizeAsync));
+        row.Children.Add(Ui.Button(UiText.Get("start"), "SecondaryButton", async () =>
         {
-            await AgentConnection.CallAsync(new { method = "backup.now" });
-            await refresh();
-        };
-        var row = new StackPanel { Orientation = Orientation.Horizontal };
-        row.Children.Add(test);
-        row.Children.Add(browser);
-        row.Children.Add(next);
+            await Ui.TryCall(new { method = "backup.now" });
+            await _refresh();
+        }));
         Children.Add(row);
+        _detail.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        _detail.Text = UiText.Get("setupIntro");
         Children.Add(_detail);
     }
 
@@ -492,8 +895,8 @@ public sealed class SetupView : StackPanel, IRefresh
 
         if (state == "pending")
         {
-            var waiting = UiText.Get("waitingApproval");
-            _detail.Text = string.IsNullOrEmpty(code) ? waiting : UiText.Get("userCode") + " " + code + "\n" + waiting;
+            var waiting = UiText.Get("approve");
+            _detail.Text = string.IsNullOrEmpty(code) ? waiting : $"{UiText.Get("userCode")} {code}\n{waiting}";
             return;
         }
 
@@ -509,24 +912,33 @@ public sealed class SetupView : StackPanel, IRefresh
             return;
         }
 
-        _detail.Text = _step switch
+        if (_step == 0)
         {
-            0 => "Enter the URL of your own server. Nothing is built in.",
-            _ => string.IsNullOrEmpty(detail) ? "Continue in the browser and choose Authorize Windows Backup Client." : detail,
-        };
+            return;
+        }
+
+        if (_step == 1)
+        {
+            _detail.Text = string.IsNullOrEmpty(detail) ? UiText.Get("approve") : detail;
+        }
     }
 
     private async Task TestAsync()
     {
-        var response = await AgentConnection.CallAsync(new { method = "server.test", url = _url.Text, allowInsecure = _insecure.IsChecked == true });
-        if (!response.GetProperty("ok").GetBoolean())
+        var response = await Ui.TryCall(new { method = "server.test", url = _url.Text, allowInsecure = _insecure.IsChecked == true });
+        if (response == null)
         {
-            _detail.Text = MainWindow.TextOf(response, "message");
             return;
         }
 
-        var result = response.GetProperty("result");
-        _detail.Text = $"Connected to {MainWindow.TextOf(result, "name")}\nAPI {MainWindow.TextOf(result, "apiVersion")} · server {MainWindow.TextOf(result, "serverVersion")}";
+        if (!response.Value.GetProperty("ok").GetBoolean())
+        {
+            _detail.Text = MainWindow.TextOf(response.Value, "message");
+            return;
+        }
+
+        var result = response.Value.GetProperty("result");
+        _detail.Text = $"{UiText.Get("connectedTo")} {MainWindow.TextOf(result, "name")}\nAPI {MainWindow.TextOf(result, "apiVersion")} · {MainWindow.TextOf(result, "serverVersion")}";
         if (_url.Text.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
         {
             _detail.Text = UiText.Get("insecure") + "\n" + _detail.Text;
@@ -537,92 +949,75 @@ public sealed class SetupView : StackPanel, IRefresh
 
     private async Task AuthorizeAsync()
     {
-        var saved = await AgentConnection.CallAsync(new { method = "server.set", url = _url.Text, allowInsecure = _insecure.IsChecked == true, confirm = true });
-        if (!saved.GetProperty("ok").GetBoolean())
+        var saved = await Ui.TryCall(new { method = "server.set", url = _url.Text, allowInsecure = _insecure.IsChecked == true, confirm = true });
+        if (saved == null || !saved.Value.GetProperty("ok").GetBoolean())
         {
-            _detail.Text = MainWindow.TextOf(saved, "message");
+            if (saved != null)
+            {
+                _detail.Text = MainWindow.TextOf(saved.Value, "message");
+            }
+
             return;
         }
 
-        var began = await AgentConnection.CallAsync(new { method = "auth.begin" });
-        if (!began.GetProperty("ok").GetBoolean())
+        var began = await Ui.TryCall(new { method = "auth.begin" });
+        if (began == null || !began.Value.GetProperty("ok").GetBoolean())
         {
-            _detail.Text = MainWindow.TextOf(began, "message");
+            if (began != null)
+            {
+                _detail.Text = MainWindow.TextOf(began.Value, "message");
+            }
+
             return;
         }
 
-        var uri = MainWindow.TextOf(began.GetProperty("result"), "verificationUri");
+        var uri = MainWindow.TextOf(began.Value.GetProperty("result"), "verificationUri");
         if (!string.IsNullOrWhiteSpace(uri))
         {
             Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
         }
 
-        _detail.Text = "User code " + MainWindow.TextOf(began.GetProperty("result"), "userCode") + "\nApprove this device in the browser. Backup starts after authorization.";
+        _detail.Text = $"{UiText.Get("userCode")} {MainWindow.TextOf(began.Value.GetProperty("result"), "userCode")}\n{UiText.Get("approve")}";
         _step = 2;
+    }
+
+    private static TextBlock Caption(string text)
+    {
+        var block = new TextBlock { Text = text, FontSize = 12.5, Margin = new Thickness(0, 16, 0, 0) };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        return block;
     }
 }
 
 internal static class Ui
 {
-    public static TextBlock Title(string text) => new()
-    {
-        Text = text,
-        FontSize = 28,
-        FontWeight = FontWeights.SemiBold,
-        Margin = new Thickness(0, 0, 0, 16),
-        Foreground = Brush("Text"),
-    };
+    public static Action<Exception>? Report { get; set; }
 
-    public static TextBlock Body(string text = "") => new()
+    public static async Task<JsonElement?> TryCall(object request)
     {
-        Text = text,
-        TextWrapping = TextWrapping.Wrap,
-        Margin = new Thickness(0, 0, 0, 8),
-        Foreground = Brush("Text"),
-    };
-
-    public static TextBlock Muted(string text) => new()
-    {
-        Text = text,
-        TextWrapping = TextWrapping.Wrap,
-        Foreground = Brush("Muted"),
-    };
-
-    public static Border Card(string title, TextBlock body)
-    {
-        var stack = new StackPanel();
-        stack.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, Foreground = Brush("Muted"), Margin = new Thickness(0, 0, 0, 8) });
-        stack.Children.Add(body);
-        return Card(stack);
+        try
+        {
+            return await AgentConnection.CallAsync(request);
+        }
+        catch (Exception ex)
+        {
+            Report?.Invoke(ex);
+            return null;
+        }
     }
 
-    public static Border Card(UIElement child) => new()
+    public static void ApplyStyle(FrameworkElement element, string key)
     {
-        Background = Brush("Card"),
-        BorderBrush = Brush("Line"),
-        BorderThickness = new Thickness(1),
-        CornerRadius = new CornerRadius(12),
-        Padding = new Thickness(16),
-        Margin = new Thickness(0, 0, 0, 12),
-        Child = child,
-    };
+        if (System.Windows.Application.Current?.TryFindResource(key) is Style style)
+        {
+            element.Style = style;
+        }
+    }
 
-    public static Border Section(string title, string body) => Card(title, Body(body));
-
-    public static Button UiButton(string text) => new()
+    public static Button Button(string text, string style, Func<Task> action)
     {
-        Content = text,
-        Margin = new Thickness(0, 0, 8, 0),
-        Padding = new Thickness(12, 8, 12, 8),
-        Background = Brush("Accent"),
-        Foreground = Brushes.White,
-        BorderThickness = new Thickness(0),
-        Cursor = System.Windows.Input.Cursors.Hand,
-    };
-
-    public static Button ActionButton(string text, Func<Task> action)
-    {
-        var button = UiButton(text);
+        var button = new Button { Content = text };
+        ApplyStyle(button, style);
         button.Click += async (_, _) =>
         {
             try
@@ -631,20 +1026,56 @@ internal static class Ui
             }
             catch (Exception ex)
             {
-                System.Windows.MessageBox.Show(ex.Message, "My Drive Backup", MessageBoxButton.OK, MessageBoxImage.Error);
+                Report?.Invoke(ex);
             }
         };
         return button;
     }
 
-    public static StackPanel Labeled(string label, UIElement child)
+    public static Border Card(UIElement child)
     {
-        var stack = new StackPanel();
-        stack.Children.Add(Muted(label));
-        stack.Children.Add(child);
-        return stack;
+        var border = new Border
+        {
+            CornerRadius = new CornerRadius(18),
+            Padding = new Thickness(18),
+            Margin = new Thickness(0, 0, 0, 12),
+            BorderThickness = new Thickness(1),
+            Child = child,
+        };
+        border.SetResourceReference(Border.BackgroundProperty, "Card");
+        border.SetResourceReference(Border.BorderBrushProperty, "Line");
+        return border;
     }
 
-    private static Brush Brush(string key) =>
-        System.Windows.Application.Current.TryFindResource(key) as Brush ?? System.Windows.Media.Brushes.White;
+    public static Border Empty(string title, string body)
+    {
+        var stack = new StackPanel { Margin = new Thickness(8, 12, 8, 12) };
+        var heading = new TextBlock { Text = title, FontSize = 18, FontWeight = FontWeights.SemiBold };
+        heading.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+        stack.Children.Add(heading);
+        stack.Children.Add(MutedText(body));
+        return Card(stack);
+    }
+
+    public static Border Pill(string text, string tone)
+    {
+        var label = new TextBlock { Text = text, FontSize = 12, FontWeight = FontWeights.SemiBold };
+        label.SetResourceReference(TextBlock.ForegroundProperty, tone);
+        var border = new Border
+        {
+            CornerRadius = new CornerRadius(99),
+            Padding = new Thickness(10, 4, 10, 4),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Child = label,
+        };
+        border.SetResourceReference(Border.BackgroundProperty, tone + "Soft");
+        return border;
+    }
+
+    public static TextBlock MutedText(string text)
+    {
+        var block = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0), FontSize = 13, LineHeight = 20 };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        return block;
+    }
 }
