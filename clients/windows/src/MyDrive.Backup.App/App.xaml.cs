@@ -7,6 +7,11 @@ public partial class App : Application
 {
     private DateTime _lastDialogUtc = DateTime.MinValue;
 
+    public App()
+    {
+        System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
+    }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);

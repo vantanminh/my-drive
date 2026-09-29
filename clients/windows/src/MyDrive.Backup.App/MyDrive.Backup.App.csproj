@@ -12,9 +12,17 @@
   <ItemGroup>
     <ProjectReference Include="..\MyDrive.Backup.Core\MyDrive.Backup.Core.csproj" />
   </ItemGroup>
+  <!-- WPF removes the System.IO implicit using so Path does not clash with
+       System.Windows.Shapes.Path. This app qualifies Shapes types explicitly. -->
   <ItemGroup>
     <Using Include="System.IO" />
-    <Using Remove="System.Windows.Forms" />
-    <Using Remove="System.Drawing" />
   </ItemGroup>
+  <!-- WinForms is only used for the tray icon and folder picker. Drop its implicit
+       usings so WPF names such as Button and Application stay unambiguous. -->
+  <Target Name="PreferWpfTypeNames" BeforeTargets="GenerateGlobalUsings">
+    <ItemGroup>
+      <Using Remove="System.Windows.Forms" />
+      <Using Remove="System.Drawing" />
+    </ItemGroup>
+  </Target>
 </Project>

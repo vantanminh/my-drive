@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using DrawingColor = System.Drawing.Color;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
@@ -81,10 +82,10 @@ public sealed class TrayIcon : IDisposable
         using (var graphics = Graphics.FromImage(bitmap))
         {
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            graphics.Clear(Color.Transparent);
-            using var ink = new SolidBrush(Color.FromArgb(15, 118, 110));
+            graphics.Clear(DrawingColor.Transparent);
+            using var ink = new SolidBrush(DrawingColor.FromArgb(15, 118, 110));
             graphics.FillEllipse(ink, 1, 1, 30, 30);
-            using var cloud = new SolidBrush(Color.White);
+            using var cloud = new SolidBrush(DrawingColor.White);
             graphics.FillEllipse(cloud, 8, 15, 10, 9);
             graphics.FillEllipse(cloud, 13, 11, 12, 11);
             graphics.FillEllipse(cloud, 18, 16, 8, 8);
