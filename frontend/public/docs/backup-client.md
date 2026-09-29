@@ -2,7 +2,7 @@
 
 [Overview](/docs/index.md)
 
-The desktop client is part of this server, not a separate cloud. It asks you for the server URL, opens this site to approve the device, and then uploads only changed files.
+The desktop client is part of this server, not a separate cloud. Download `MyDriveBackup-Setup.exe` from the project's GitHub Release **Windows Backup Client**, run it, and enter this server's address. The app then opens this site to approve the device and uploads only changed files. Windows may warn that the publisher is unknown because the installer is not code-signed.
 
 There is no built-in server address. `GET /.well-known/cloud-client` describes the API version and which features this exact server implements. This client speaks API version `1`.
 

@@ -15,6 +15,12 @@ There is no built-in hostname and no password field. Access and refresh tokens s
 
 The protocol is documented at `/docs/backup-client.md`.
 
+## Install
+
+On Windows, download `MyDriveBackup-Setup.exe` from the GitHub Release named **Windows Backup Client** and run it. That file is built by GitHub Actions for every push to `master` and for version tags. It installs for the current user, creates a Start menu shortcut, and does not require a separate .NET install. Windows may show an unknown-publisher warning because the installer is not code-signed.
+
+Pull requests upload the same installer as the `MyDriveBackup-Setup` workflow artifact so the package can be tried before it is released.
+
 ## Build
 
 The backup engine and the background agent target `net8.0` and can be tested on Linux:
