@@ -484,11 +484,35 @@ public sealed class SetupView : StackPanel, IRefresh
     {
         var state = MainWindow.TextOf(status, "authState");
         var detail = MainWindow.TextOf(status, "authDetail");
+        var code = MainWindow.TextOf(status, "authUserCode");
+        if (state is "pending" or "authorized" or "denied" or "expired" or "error")
+        {
+            _step = 2;
+        }
+
+        if (state == "pending")
+        {
+            var waiting = UiText.Get("waitingApproval");
+            _detail.Text = string.IsNullOrEmpty(code) ? waiting : UiText.Get("userCode") + " " + code + "\n" + waiting;
+            return;
+        }
+
+        if (state == "authorized")
+        {
+            _detail.Text = string.IsNullOrEmpty(detail) ? UiText.Get("authorized") : UiText.Get("authorized") + "\n" + detail;
+            return;
+        }
+
+        if (state is "denied" or "expired" or "error")
+        {
+            _detail.Text = string.IsNullOrEmpty(detail) ? state : detail;
+            return;
+        }
+
         _detail.Text = _step switch
         {
             0 => "Enter the URL of your own server. Nothing is built in.",
-            1 => string.IsNullOrEmpty(detail) ? "Continue in the browser and choose Authorize Windows Backup Client." : detail,
-            _ => state == "authorized" ? UiText.Get("authorized") + "\n" + detail : detail,
+            _ => string.IsNullOrEmpty(detail) ? "Continue in the browser and choose Authorize Windows Backup Client." : detail,
         };
     }
 

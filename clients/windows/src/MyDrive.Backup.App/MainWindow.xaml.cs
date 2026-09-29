@@ -15,6 +15,7 @@ public partial class MainWindow : Window
     private JsonElement _status;
     private string _current = "dashboard";
     private bool _polling;
+    private bool _awaitingConnection;
 
     public MainWindow()
     {
@@ -81,7 +82,15 @@ public partial class MainWindow : Window
             SetupHost.Visibility = connected ? Visibility.Collapsed : Visibility.Visible;
             if (!connected)
             {
+                _awaitingConnection = true;
                 _setup.Update(_status);
+            }
+            else if (_awaitingConnection)
+            {
+                _awaitingConnection = false;
+                Show();
+                WindowState = WindowState.Normal;
+                Activate();
             }
 
             _tray?.Update(_status);

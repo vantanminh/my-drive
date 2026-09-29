@@ -33,6 +33,8 @@ public static class UiText
         ["test"] = ("Test connection", "Kiểm tra kết nối"),
         ["signIn"] = ("Continue in browser", "Tiếp tục trên trình duyệt"),
         ["authorized"] = ("Device authorized", "Thiết bị đã được ủy quyền"),
+        ["waitingApproval"] = ("Approve this device in the browser. This window updates when approval finishes.", "Hãy phê duyệt thiết bị trên trình duyệt. Cửa sổ này sẽ tự cập nhật khi phê duyệt xong."),
+        ["userCode"] = ("User code", "Mã thiết bị"),
         ["choose"] = ("Choose folders to protect", "Chọn thư mục cần bảo vệ"),
         ["ready"] = ("You're protected.", "Dữ liệu đã được bảo vệ."),
         ["start"] = ("Start backup", "Bắt đầu sao lưu"),

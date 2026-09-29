@@ -300,6 +300,80 @@ public sealed class EngineTests
     }
 
     [Fact]
+    public async Task Browser_approval_connects_the_app_before_sign_in()
+    {
+        using var fixture = await Fixture.Create(fileCount: 0);
+        var server = fixture.Database.GetServer();
+        Assert.NotNull(server);
+        server.Connected = false;
+        fixture.Database.SaveServer(server);
+
+        var pending = await fixture.Engine.BeginAuthorizationAsync(CancellationToken.None);
+        Assert.Equal("pending", pending.State);
+        Assert.Equal("ABCD-EFGH", pending.UserCode);
+
+        var waiting = await fixture.Engine.RunOnceAsync(CancellationToken.None);
+        Assert.Equal("Sign in required", waiting.PauseReason);
+        Assert.Equal("pending", fixture.Engine.Authorization.State);
+        Assert.Equal(1, fixture.Api.PollCalls);
+        Assert.False(fixture.Database.GetServer()!.Connected);
+
+        fixture.Clock.UtcNow = fixture.Clock.UtcNow.AddSeconds(5);
+        fixture.Api.PollResult = AuthorizedPoll();
+        var connected = await fixture.Engine.RunOnceAsync(CancellationToken.None);
+        Assert.False(connected.Paused);
+        Assert.Equal("authorized", fixture.Engine.Authorization.State);
+        Assert.Equal("user@example.com", fixture.Engine.Authorization.Detail);
+        var saved = fixture.Database.GetServer();
+        Assert.NotNull(saved);
+        Assert.True(saved.Connected);
+        Assert.Equal("device-1", saved.DeviceId);
+        Assert.Equal("user@example.com", saved.AccountEmail);
+        Assert.Equal(2, fixture.Api.PollCalls);
+    }
+
+    [Fact]
+    public async Task Retrying_device_authorization_still_receives_the_new_approval()
+    {
+        using var fixture = await Fixture.Create(fileCount: 0);
+        var server = fixture.Database.GetServer();
+        Assert.NotNull(server);
+        server.Connected = false;
+        fixture.Database.SaveServer(server);
+        fixture.Database.SetFlag("paused", true);
+
+        await fixture.Engine.BeginAuthorizationAsync(CancellationToken.None);
+        await fixture.Engine.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(1, fixture.Api.PollCalls);
+
+        fixture.Api.PollResult = AuthorizedPoll();
+        var ignored = await fixture.Engine.RunOnceAsync(CancellationToken.None);
+        Assert.Equal("Paused", ignored.PauseReason);
+        Assert.Equal(1, fixture.Api.PollCalls);
+        Assert.False(fixture.Database.GetServer()!.Connected);
+
+        await fixture.Engine.BeginAuthorizationAsync(CancellationToken.None);
+        var approved = await fixture.Engine.RunOnceAsync(CancellationToken.None);
+        Assert.Equal("Paused", approved.PauseReason);
+        Assert.Equal("authorized", fixture.Engine.Authorization.State);
+        Assert.True(fixture.Database.GetServer()!.Connected);
+        Assert.Equal("device-1", fixture.Database.GetServer()!.DeviceId);
+    }
+
+    private static DevicePoll AuthorizedPoll() => new()
+    {
+        Authorized = true,
+        IntervalSeconds = 5,
+        Tokens = new TokenSet
+        {
+            AccessToken = "mdb_access",
+            RefreshToken = "mdr_refresh",
+            DeviceId = "device-1",
+            ExpiresIn = 3600,
+        },
+    };
+
+    [Fact]
     public async Task A_thousand_files_are_indexed_without_uploading_them_twice()
     {
         using var fixture = await Fixture.Create(fileCount: 1000);
@@ -533,6 +607,8 @@ internal sealed class FakeDrive : IDriveApi
 
     public int CreateCalls;
     public int TrashCalls;
+    public int PollCalls;
+    public DevicePoll PollResult { get; set; } = new() { Pending = true, IntervalSeconds = 5 };
     public int FailAfterPatches = int.MaxValue;
     public List<(long Offset, int Count)> Patches { get; } = [];
     public Dictionary<string, StoredFile> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -545,8 +621,11 @@ internal sealed class FakeDrive : IDriveApi
     public Task<DeviceCodeStart> StartDeviceCodeAsync(string deviceName, CancellationToken cancellationToken) =>
         Task.FromResult(new DeviceCodeStart { DeviceCode = "device-code-value-1234567890", UserCode = "ABCD-EFGH", VerificationUri = "/device/authorize", VerificationUriComplete = "/device/authorize?user_code=ABCD-EFGH", ExpiresIn = 600, Interval = 5 });
 
-    public Task<DevicePoll> PollDeviceCodeAsync(string deviceCode, CancellationToken cancellationToken) =>
-        Task.FromResult(new DevicePoll { Pending = true, IntervalSeconds = 5 });
+    public Task<DevicePoll> PollDeviceCodeAsync(string deviceCode, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref PollCalls);
+        return Task.FromResult(PollResult);
+    }
 
     public Task<TokenSet> RefreshAsync(string refreshToken, CancellationToken cancellationToken) => throw new NotSupportedException();
 
