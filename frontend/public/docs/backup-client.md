@@ -4,6 +4,8 @@
 
 The desktop client is part of this server, not a separate cloud. Download `MyDriveBackup-Setup.exe` from the project's GitHub Release **Windows Backup Client**, run it, and enter this server's address. The app then opens this site to approve the device and uploads only changed files. Windows may warn that the publisher is unknown because the installer is not code-signed.
 
+Each published client has a version, `windows-client-vX.Y.Z`. In the app, **Settings → Updates** can check for a newer version and install it. Automatic install is on unless you turn it off, so later clients do not need a manual setup download. The Transfers page shows live speed, bytes sent this session, and a recent-speed chart while a file is still uploading.
+
 There is no built-in server address. `GET /.well-known/cloud-client` describes the API version and which features this exact server implements. This client speaks API version `1`.
 
 ## Authorize a device

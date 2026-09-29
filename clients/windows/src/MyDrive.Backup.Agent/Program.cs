@@ -167,6 +167,7 @@ namespace MyDrive.Backup.Agent
     {
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            engine.ExitForUpdate = () => lifetime.StopApplication();
             var control = new ControlServer(engine, settingsApplied: WindowsStartup.Apply);
             logger.LogInformation("Backup service is listening.");
             try

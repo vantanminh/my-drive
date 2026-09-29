@@ -590,6 +590,7 @@ public sealed class SettingsView : StackPanel, IRefresh
     private JsonElement _settings;
     private JsonElement _status;
     private TextBlock? _account;
+    private TextBlock? _updateStatus;
     private bool _loaded;
     private bool _loading;
     private string _language = "";
@@ -602,6 +603,11 @@ public sealed class SettingsView : StackPanel, IRefresh
         if (_loaded && _account != null && _language == UiText.Language)
         {
             _account.Text = AccountText();
+            if (_updateStatus != null)
+            {
+                _updateStatus.Text = UpdateText();
+            }
+
             return;
         }
 
@@ -691,6 +697,23 @@ public sealed class SettingsView : StackPanel, IRefresh
                 Check(UiText.Get("notifications"), "notifications"),
                 Choice(UiText.Get("language"), "language", false, ("auto", "Auto"), ("en", "English"), ("vi", "Tiếng Việt")),
                 Choice(UiText.Get("theme"), "theme", false, ("system", "System"), ("light", "Light"), ("dark", "Dark"))));
+            var updateStatus = new TextBlock { Text = UpdateText(), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8), LineHeight = 22 };
+            updateStatus.SetResourceReference(TextBlock.ForegroundProperty, "Text");
+            _updateStatus = updateStatus;
+            var updateActions = new WrapPanel();
+            updateActions.Children.Add(Ui.Button(UiText.Get("checkNow"), "SecondaryButton", async () =>
+            {
+                await ShowAndRefresh(await Ui.TryCall(new { method = "update.check" }));
+            }));
+            updateActions.Children.Add(Ui.Button(UiText.Get("installUpdate"), "PrimaryButton", async () =>
+            {
+                await ShowAndRefresh(await Ui.TryCall(new { method = "update.install" }));
+            }));
+            Children.Add(Section(UiText.Get("sectionUpdates"), UiText.Get("updatesBody"),
+                updateStatus,
+                Check(UiText.Get("checkForUpdates"), "checkForUpdates"),
+                Check(UiText.Get("autoInstallUpdates"), "autoInstallUpdates"),
+                updateActions));
 
             var advanced = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
             advanced.Children.Add(Ui.Button(UiText.Get("openLogs"), "SecondaryButton", OpenLogsAsync));
@@ -749,6 +772,31 @@ public sealed class SettingsView : StackPanel, IRefresh
             $"{UiText.Get("connectedTo")}: {(MainWindow.Bool(server, "connected") ? UiText.Get("authorized") : "—")}",
             $"API {OrDash(MainWindow.TextOf(server, "apiVersion"))}",
         });
+    }
+
+    private string UpdateText()
+    {
+        var version = MainWindow.TextOf(_status, "clientVersion");
+        if (string.IsNullOrEmpty(version))
+        {
+            version = ClientInfo.Version;
+        }
+
+        var available = MainWindow.TextOf(_status, "availableVersion");
+        var state = MainWindow.TextOf(_status, "updateState");
+        var detail = MainWindow.TextOf(_status, "updateDetail");
+        var extra = state switch
+        {
+            "checking" => UiText.Get("updateChecking"),
+            "downloading" => UiText.Get("updateDownloading"),
+            "installing" => UiText.Get("updateInstalling"),
+            "available" => string.IsNullOrEmpty(available) ? UiText.Get("updateAvailable") : $"{UiText.Get("updateAvailable")} {available}",
+            "failed" => string.IsNullOrEmpty(detail) ? UiText.Get("updateFailed") : $"{UiText.Get("updateFailed")} {detail}",
+            "current" => UiText.Get("updateCurrent"),
+            _ => "",
+        };
+        var line = $"{UiText.Get("clientVersion")} {version}";
+        return string.IsNullOrEmpty(extra) ? line : line + "\n" + extra;
     }
 
     private static string OrDash(string value) => string.IsNullOrEmpty(value) ? "—" : value;

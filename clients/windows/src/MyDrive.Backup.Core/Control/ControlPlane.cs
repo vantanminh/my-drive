@@ -131,6 +131,8 @@ public sealed class ControlServer
                 "integrity.verify" => await Verify(request, cancellationToken),
                 "versions" => await _engine.VersionsAsync(Required(request, "fileId"), cancellationToken),
                 "notifications.drain" => Notifications(),
+                "update.check" => await _engine.CheckForUpdateAsync(cancellationToken),
+                "update.install" => await _engine.InstallUpdateAsync(cancellationToken),
                 _ => throw new InvalidOperationException("Unknown control method."),
             };
             return Ok(result);

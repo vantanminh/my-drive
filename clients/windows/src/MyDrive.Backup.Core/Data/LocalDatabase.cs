@@ -46,6 +46,29 @@ public sealed class LocalDatabase : IDisposable
         }
     }
 
+    public string? GetMeta(string key)
+    {
+        lock (_gate)
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT value FROM meta WHERE key = $key";
+            command.Parameters.AddWithValue("$key", key);
+            return command.ExecuteScalar() as string;
+        }
+    }
+
+    public void SetMeta(string key, string value)
+    {
+        lock (_gate)
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText = "INSERT INTO meta(key, value) VALUES($key, $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+            command.Parameters.AddWithValue("$key", key);
+            command.Parameters.AddWithValue("$value", value);
+            command.ExecuteNonQuery();
+        }
+    }
+
     public void SetFlag(string key, bool value)
     {
         lock (_gate)

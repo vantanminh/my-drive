@@ -32,6 +32,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+      - name: Require a new client version when the client changed
+        shell: pwsh
+        run: ./clients/windows/installer/require-version.ps1
       - name: Install Inno Setup
         shell: pwsh
         run: |
@@ -54,33 +57,35 @@ jobs:
           name: MyDriveBackup-Setup
           path: clients/windows/dist/MyDriveBackup-Setup.exe
           if-no-files-found: error
-      - name: Replace the floating Windows client release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view windows-backup
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete windows-backup --yes --cleanup-tag
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-      - name: Publish the installer
+      - name: Publish this client version
         if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'windows-backup' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && format('Windows Backup Client {0}', github.ref_name) || 'Windows Backup Client' }}
+          tag_name: windows-client-v${{ env.CLIENT_VERSION }}
+          name: Windows Backup Client ${{ env.CLIENT_VERSION }}
           make_latest: true
           overwrite_files: true
           body: |
-            Built from `${{ github.sha }}`.
+            Version **${{ env.CLIENT_VERSION }}**, built from `${{ github.sha }}`.
 
-            Download **MyDriveBackup-Setup.exe** and run it. Re-run the installer to replace the copy already in `%LOCALAPPDATA%\Programs\My Drive Backup`.
+            Download **MyDriveBackup-Setup.exe** and run it. Clients from 1.1.0 onward can install the next version themselves from Settings.
 
             The installer is for the current Windows user, does not ask for administrator rights, and already includes the .NET runtime. After it finishes, open **My Drive Backup** from the Start menu and enter the address of your server.
 
             Uninstalling the app leaves the local backup index in `%LOCALAPPDATA%\MyDriveBackup`. Files already stored on the server are not deleted.
 
             Windows SmartScreen may say the publisher is unknown. The installer is not code-signed.
+          files: clients/windows/dist/MyDriveBackup-Setup.exe
+      - name: Update the stable Windows client download
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-backup
+          name: Windows Backup Client ${{ env.CLIENT_VERSION }}
+          make_latest: false
+          overwrite_files: true
+          body: |
+            Latest Windows backup client: **${{ env.CLIENT_VERSION }}**, built from `${{ github.sha }}`.
+
+            Version history is published as `windows-client-vX.Y.Z`. Installed clients from 1.1.0 onward check that list and can install the newer setup without a manual download.
           files: clients/windows/dist/MyDriveBackup-Setup.exe

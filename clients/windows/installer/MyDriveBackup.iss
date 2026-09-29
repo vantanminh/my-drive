@@ -1,7 +1,7 @@
 ; Per-user installer. Tokens live in the installing user's DPAPI store, so the
 ; app is installed under that user's profile and does not ask for administrator rights.
 #ifndef AppVersion
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.0"
 #endif
 #ifndef PublishDir
 #define PublishDir "..\publish\win-x64"
@@ -30,7 +30,7 @@ WizardStyle=modern
 UninstallDisplayIcon={app}\MyDrive.Backup.exe
 UninstallDisplayName=My Drive Backup
 CloseApplications=yes
-RestartApplications=no
+RestartApplications=yes
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

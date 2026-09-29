@@ -63,6 +63,7 @@ public sealed class BackupEngine : IDisposable
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly HashSet<string> _force = new(StringComparer.Ordinal);
     private readonly TransferMeter _meter = new();
+    private readonly ClientUpdateService _updates;
     private readonly object _liveGate = new();
     private readonly Dictionary<string, long> _liveBytes = new(StringComparer.Ordinal);
     private readonly object _state = new();
@@ -84,11 +85,13 @@ public sealed class BackupEngine : IDisposable
         INotifier? notifier = null,
         INetworkMonitor? network = null,
         IContentHasher? hasher = null,
-        Func<ServerProfile, IDriveApi>? apis = null)
+        Func<ServerProfile, IDriveApi>? apis = null,
+        ClientUpdateService? updates = null)
     {
         _database = database;
         _secrets = secrets;
         _clock = clock ?? new SystemClock();
+        _updates = updates ?? new ClientUpdateService(_database, _clock);
         _notifier = notifier ?? new NullNotifier();
         _network = network ?? new NetworkMonitor();
         _hasher = hasher ?? new Sha256Hasher();
@@ -161,8 +164,24 @@ public sealed class BackupEngine : IDisposable
             AuthState = _authorization.State,
             AuthDetail = _authorization.Detail,
             AuthUserCode = _authorization.UserCode,
+            ClientVersion = _updates.Snapshot.ClientVersion,
+            AvailableVersion = _updates.Snapshot.AvailableVersion,
+            UpdateState = _updates.Snapshot.State,
+            UpdateDetail = _updates.Snapshot.Detail,
         };
     }
+
+    public Action? ExitForUpdate
+    {
+        get => _updates.ExitProcess;
+        set => _updates.ExitProcess = value;
+    }
+
+    public Task<UpdateSnapshot> CheckForUpdateAsync(CancellationToken cancellationToken) =>
+        _updates.CheckAsync(_database.GetSettings().AutoInstallUpdates, cancellationToken);
+
+    public Task<UpdateSnapshot> InstallUpdateAsync(CancellationToken cancellationToken) =>
+        _updates.InstallAsync(cancellationToken);
 
     public AuthorizationState Authorization => _authorization;
 
@@ -444,6 +463,7 @@ public sealed class BackupEngine : IDisposable
             {
                 RefreshWatchers();
                 await RunOnceAsync(cancellationToken);
+                _updates.MaybeCheck(_database.GetSettings(), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

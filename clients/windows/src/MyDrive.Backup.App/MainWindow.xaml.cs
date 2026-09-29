@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Windows;
+using MyDrive.Backup;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -19,10 +20,12 @@ public partial class MainWindow : Window
     private bool _polling;
     private bool _awaitingConnection;
     private bool _serviceReady;
+    private bool _closingForUpdate;
 
     public MainWindow()
     {
         InitializeComponent();
+        Title = "My Drive Backup " + ClientInfo.Version;
         Ui.Report = Report;
         _setup = new SetupView(RefreshNowAsync);
         SetupPage.Content = _setup;
@@ -100,6 +103,18 @@ public partial class MainWindow : Window
             _serviceReady = true;
             ServiceBanner.Visibility = Visibility.Collapsed;
             _status = response.GetProperty("result");
+            ShowVersion();
+            if (TextOf(_status, "updateState") == "installing")
+            {
+                if (!_closingForUpdate)
+                {
+                    _closingForUpdate = true;
+                    ExitApplication();
+                }
+
+                return;
+            }
+
             if (_pages.TryGetValue(_current, out var page))
             {
                 page.Page.Update(_status);
@@ -295,7 +310,7 @@ public partial class MainWindow : Window
         BackupButton.Content = UiText.Get("backupNow");
         PauseButton.Content = Bool(_status, "paused") ? UiText.Get("resume") : UiText.Get("pause");
         RetryServiceButton.Content = UiText.Get("retry");
-        NavSubtitle.Text = UiText.Get("ready");
+        ShowVersion();
         if (_pages.ContainsKey(_current))
         {
             PageTitle.Text = UiText.Get(_current);
@@ -349,6 +364,21 @@ public partial class MainWindow : Window
         {
             brush.Color = (Color)ColorConverter.ConvertFromString(color);
         }
+    }
+
+    private void ShowVersion()
+    {
+        var version = TextOf(_status, "clientVersion");
+        if (string.IsNullOrEmpty(version))
+        {
+            version = ClientInfo.Version;
+        }
+
+        var available = TextOf(_status, "availableVersion");
+        var state = TextOf(_status, "updateState");
+        NavSubtitle.Text = state == "available" && !string.IsNullOrEmpty(available)
+            ? "v" + version + " → " + available
+            : "v" + version;
     }
 
     private static bool IsSystemDark()
