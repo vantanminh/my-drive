@@ -16,6 +16,8 @@ harness.db-shm
 # Windows backup client build output
 /clients/windows/**/bin/
 /clients/windows/**/obj/
+/clients/windows/publish/
+/clients/windows/dist/
 /frontend/dist/
 /frontend/tsconfig.tsbuildinfo
 

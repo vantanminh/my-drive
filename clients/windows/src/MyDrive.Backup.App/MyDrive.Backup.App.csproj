@@ -11,4 +11,12 @@
   <ItemGroup>
     <ProjectReference Include="..\MyDrive.Backup.Core\MyDrive.Backup.Core.csproj" />
   </ItemGroup>
+  <!-- WinForms is only used for the tray icon and folder picker. Drop its implicit
+       usings so WPF names such as Button and Application stay unambiguous. -->
+  <Target Name="PreferWpfTypeNames" BeforeTargets="GenerateGlobalUsings">
+    <ItemGroup>
+      <Using Remove="System.Windows.Forms" />
+      <Using Remove="System.Drawing" />
+    </ItemGroup>
+  </Target>
 </Project>
