@@ -7,9 +7,15 @@
     <RootNamespace>MyDrive.Backup.App</RootNamespace>
     <AssemblyName>MyDrive.Backup</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\MyDrive.Backup.Core\MyDrive.Backup.Core.csproj" />
+  </ItemGroup>
+  <!-- WPF removes the System.IO implicit using so Path does not clash with
+       System.Windows.Shapes.Path. This app qualifies Shapes types explicitly. -->
+  <ItemGroup>
+    <Using Include="System.IO" />
   </ItemGroup>
   <!-- WinForms is only used for the tray icon and folder picker. Drop its implicit
        usings so WPF names such as Button and Application stay unambiguous. -->
