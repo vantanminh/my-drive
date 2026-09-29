@@ -35,6 +35,6 @@ The tray app targets `net8.0-windows` and is built on Windows:
 dotnet build clients/windows/MyDrive.Backup.Windows.sln -c Release
 ```
 
-Publish the agent and the app into the same folder. The app starts `MyDrive.Backup.Agent.exe` if the service is not already listening on the `MyDrive.Backup` pipe. Closing the window leaves the agent running. **Start with Windows** registers the agent for the current user. `--install-service` is an optional `sc.exe` registration and must not be combined with a second copy of the agent.
+Publish the agent and the app into the same folder. The agent is a Windows GUI binary: starting it does not open a command window. The app launches `MyDrive.Backup.Agent.exe` with no window if nothing is answering the `MyDrive.Backup` pipe, and it replaces an agent that stays up without answering. Closing the window leaves the agent running. **Start with Windows** registers the agent for the current user. `--install-service` is an optional `sc.exe` registration and must not be combined with a second copy of the agent. Service output is written to `%LocalAppData%\MyDriveBackup\agent.log`.
 
 HTTP is rejected unless you explicitly allow an insecure development or LAN URL. Certificate validation stays enabled.

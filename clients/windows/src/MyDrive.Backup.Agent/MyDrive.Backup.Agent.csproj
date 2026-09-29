@@ -4,6 +4,7 @@
     <RootNamespace>MyDrive.Backup.Agent</RootNamespace>
     <AssemblyName>MyDrive.Backup.Agent</AssemblyName>
     <Nullable>enable</Nullable>
+    <OutputType>WinExe</OutputType>
     <UserSecretsId>mydrive-backup-agent</UserSecretsId>
   </PropertyGroup>
   <ItemGroup>
