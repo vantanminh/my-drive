@@ -9,6 +9,7 @@ import type {
   Entry,
   EntryDetails,
   EntryPage,
+  FaceCluster,
   FaceClusterPage,
   ManagedAccountPage,
   MediaPage,
@@ -324,11 +325,15 @@ export const api = {
       csrf: true,
       cache: 'no-store'
     }),
-  faceClusters: (offset = 0, signal?: AbortSignal) => {
-    const query = new URLSearchParams({ limit: '50' });
+  faceClusters: (offset = 0, signal?: AbortSignal, filter?: { q?: string; named?: boolean }) => {
+    const query = new URLSearchParams({ limit: '60' });
     if (offset) query.set('offset', String(offset));
+    if (filter?.q) query.set('q', filter.q);
+    if (filter?.named != null) query.set('named', filter.named ? 'true' : 'false');
     return request<FaceClusterPage>('/api/faces?' + query.toString(), { signal, cache: 'no-store' });
   },
+  getFaceCluster: (id: string, signal?: AbortSignal) =>
+    request<FaceCluster>('/api/faces/' + encodeURIComponent(id), { signal, cache: 'no-store' }),
   renameFaceCluster: (id: string, label: string | null) =>
     request<{ id: string; label: string | null }>('/api/faces/' + encodeURIComponent(id), {
       method: 'PATCH',

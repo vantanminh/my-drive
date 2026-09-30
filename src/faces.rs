@@ -3,7 +3,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ const MAX_LABEL_CHARS: usize = 80;
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/faces", get(list_faces))
-        .route("/api/faces/{cluster_id}", patch(rename_face))
+        .route("/api/faces/{cluster_id}", get(get_face).patch(rename_face))
         .route("/api/faces/{cluster_id}/separate", post(separate_faces))
         .route("/api/faces/merge", post(merge_faces))
         .route("/api/admin/faces", get(list_admin_faces))
@@ -77,6 +77,8 @@ struct ErrorBody {
 struct FaceListQuery {
     limit: Option<u16>,
     offset: Option<u32>,
+    q: Option<String>,
+    named: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -181,7 +183,19 @@ async fn list_faces(
     Query(query): Query<FaceListQuery>,
 ) -> Result<Response, FaceError> {
     let (limit, offset) = page_bounds(query.limit, query.offset)?;
-    let mut rows = fetch_clusters(&state.pool, Some(user.id), limit, offset).await?;
+    let label_pattern = search_pattern(query.q)?;
+    let mut rows = fetch_clusters(
+        &state.pool,
+        Some(user.id),
+        None,
+        label_pattern.as_deref(),
+        query.named,
+        true,
+        true,
+        limit,
+        offset,
+    )
+    .await?;
     let has_more = rows.len() > usize::from(limit);
     rows.truncate(usize::from(limit));
     let next_offset = has_more.then_some(offset + u32::from(limit));
@@ -200,7 +214,18 @@ async fn list_admin_faces(
 ) -> Result<Response, FaceError> {
     require_owner(&user)?;
     let (limit, offset) = page_bounds(query.limit, query.offset)?;
-    let mut rows = fetch_clusters(&state.pool, query.owner_id, limit, offset).await?;
+    let mut rows = fetch_clusters(
+        &state.pool,
+        query.owner_id,
+        None,
+        None,
+        None,
+        false,
+        false,
+        limit,
+        offset,
+    )
+    .await?;
     let has_more = rows.len() > usize::from(limit);
     rows.truncate(usize::from(limit));
     let next_offset = has_more.then_some(offset + u32::from(limit));
@@ -215,9 +240,37 @@ async fn list_admin_faces(
     Ok(no_store(Json(response)))
 }
 
+async fn get_face(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(cluster_id): Path<Uuid>,
+) -> Result<Response, FaceError> {
+    let mut rows = fetch_clusters(
+        &state.pool,
+        Some(user.id),
+        Some(cluster_id),
+        None,
+        None,
+        false,
+        false,
+        1,
+        0,
+    )
+    .await?;
+    let Some(row) = rows.pop() else {
+        return Err(FaceError::NotFound);
+    };
+    Ok(no_store(Json(FaceClusterResponse::from(row))))
+}
+
 async fn fetch_clusters(
     pool: &PgPool,
     owner_id: Option<Uuid>,
+    cluster_id: Option<Uuid>,
+    label_pattern: Option<&str>,
+    named: Option<bool>,
+    hide_empty_unlabeled: bool,
+    people_order: bool,
     limit: u16,
     offset: u32,
 ) -> Result<Vec<FaceClusterRow>, FaceError> {
@@ -253,14 +306,27 @@ async fn fetch_clusters(
                  LIMIT 1 \
            ) AS representative ON TRUE \
           WHERE ($1::UUID IS NULL OR cluster.owner_id = $1) \
+            AND ($4::UUID IS NULL OR cluster.id = $4) \
+            AND ($5::TEXT IS NULL OR cluster.label ILIKE $5 ESCAPE '\\') \
+            AND ($6::BOOL IS NULL OR (cluster.label IS NOT NULL) = $6) \
           GROUP BY cluster.id, owner.email, representative.file_id, representative.box_left, \
                    representative.box_top, representative.box_width, representative.box_height \
-          ORDER BY cluster.updated_at DESC, cluster.id DESC \
+         HAVING NOT $7::BOOL \
+             OR COUNT(DISTINCT observation.file_version_id) FILTER (WHERE entry.id IS NOT NULL) > 0 \
+             OR cluster.label IS NOT NULL \
+          ORDER BY CASE WHEN $8::BOOL THEN (cluster.label IS NULL)::INT ELSE 0 END ASC, \
+                   CASE WHEN $8::BOOL THEN COUNT(DISTINCT observation.file_version_id) FILTER (WHERE entry.id IS NOT NULL) ELSE 0 END DESC, \
+                   cluster.updated_at DESC, cluster.id DESC \
           LIMIT $2 OFFSET $3",
     )
     .bind(owner_id)
     .bind(i64::from(limit) + 1)
     .bind(i64::from(offset))
+    .bind(cluster_id)
+    .bind(label_pattern)
+    .bind(named)
+    .bind(hide_empty_unlabeled)
+    .bind(people_order)
     .fetch_all(pool)
     .await
     .map_err(FaceError::Database)
@@ -505,6 +571,31 @@ fn page_bounds(limit: Option<u16>, offset: Option<u32>) -> Result<(u16, u32), Fa
     Ok((limit, offset))
 }
 
+fn search_pattern(query: Option<String>) -> Result<Option<String>, FaceError> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_LABEL_CHARS {
+        return Err(FaceError::BadRequest);
+    }
+    Ok(Some(contains_pattern(trimmed)))
+}
+
+fn contains_pattern(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    format!("%{escaped}%")
+}
+
 fn normalize_label(label: Option<String>) -> Result<Option<String>, FaceError> {
     label
         .map(|value| {
@@ -579,7 +670,10 @@ impl From<FaceClusterRow> for AdminFaceClusterResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{FaceError, MergeRequest, normalize_label, page_bounds, validate_merge_request};
+    use super::{
+        FaceError, MergeRequest, contains_pattern, normalize_label, page_bounds, search_pattern,
+        validate_merge_request,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -595,6 +689,21 @@ mod tests {
         ));
         assert!(matches!(
             page_bounds(None, Some(1_000_001)),
+            Err(FaceError::BadRequest)
+        ));
+    }
+
+    #[test]
+    fn people_search_escapes_like_wildcards() {
+        assert_eq!(contains_pattern("a%b_c\\d"), "%a\\%b\\_c\\\\d%");
+        assert_eq!(
+            search_pattern(Some("  Ada  ".to_owned())).unwrap(),
+            Some("%Ada%".to_owned())
+        );
+        assert_eq!(search_pattern(Some("   ".to_owned())).unwrap(), None);
+        assert_eq!(search_pattern(None).unwrap(), None);
+        assert!(matches!(
+            search_pattern(Some("a".repeat(81))),
             Err(FaceError::BadRequest)
         ));
     }

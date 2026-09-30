@@ -65,7 +65,7 @@ export default function PhotoMosaic({
   }
 
   return (
-    <div className="photo-mosaic" ref={frameRef}>
+    <div className={'photo-mosaic' + (selectionMode ? ' selection-active' : '')} ref={frameRef}>
       {rows.map((row, index) => {
         const last = index === rows.length - 1;
         return (
