@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from 'react';
-import { Check, Copy, Download, FolderInput, GitMerge, Image as ImageIcon, Images, MoreHorizontal, Plus, ScanFace, Scissors, Share2, Trash2, Upload, UserRoundX, X } from 'lucide-react';
-import { api, downloadUrl, thumbnailUrl } from '../api';
+import { Check, Copy, Download, FolderInput, GitMerge, Image as ImageIcon, Images, MoreHorizontal, Plus, ScanFace, Scissors, Search, Share2, Trash2, Upload, UserRoundX, X } from 'lucide-react';
+import { ApiError, api, downloadUrl, thumbnailUrl } from '../api';
+import { faceCropStyle } from '../faceCrop';
 import { formatDate, formatSize, friendlyError } from '../format';
 import { nextSelection } from '../selection';
 import { uploadFile } from '../uploadFile';
@@ -22,6 +23,21 @@ type Props = {
 
 type ShareTarget = { id: string; kind: 'file' | 'folder' | 'album'; name: string };
 type Destination = { action: 'move' | 'copy'; ids: string[] } | null;
+type PeopleFilter = 'all' | 'named' | 'unnamed';
+type NoticeAction = { label: string; personId: string };
+
+const MAX_SEPARATE = 64;
+
+function photoCountLabel(count: number): string {
+  if (count === 1) return '1 photo';
+  return `${count} photos`;
+}
+
+function peopleNamedFilter(filter: PeopleFilter): boolean | undefined {
+  if (filter === 'named') return true;
+  if (filter === 'unnamed') return false;
+  return undefined;
+}
 
 function toViewerItem(item: MediaItem): ViewerItem {
   return {
@@ -91,10 +107,17 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
   const [offset, setOffset] = useState<number | null>(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [notice, setNoticeMessage] = useState('');
   const [albums, setAlbums] = useState<Album[]>([]);
   const [faces, setFaces] = useState<FaceCluster[]>([]);
   const [faceOffset, setFaceOffset] = useState<number | null>(null);
+  const [peopleQuery, setPeopleQuery] = useState('');
+  const [peopleFilter, setPeopleFilter] = useState<PeopleFilter>('all');
+  const [debouncedPeopleQuery, setDebouncedPeopleQuery] = useState('');
+  const [activePerson, setActivePerson] = useState<FaceCluster | null>(null);
+  const [personMissing, setPersonMissing] = useState(false);
+  const [noticeAction, setNoticeAction] = useState<NoticeAction | null>(null);
+  const [busy, setBusy] = useState('');
   const [albumName, setAlbumName] = useState('');
   const [shareTargets, setShareTargets] = useState<ShareTarget[] | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
@@ -114,9 +137,28 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
   const createFiles = useRef<HTMLInputElement>(null);
   const albumFiles = useRef<HTMLInputElement>(null);
   const sentinel = useRef<HTMLDivElement>(null);
+  const pagingFaces = useRef(false);
+  const peopleGeneration = useRef(0);
+  const renameSkip = useRef<string | null>(null);
+
+  function setNotice(message: string, action: NoticeAction | null = null) {
+    setNoticeMessage(message);
+    setNoticeAction(message ? action : null);
+  }
+
+  function faceListFilter() {
+    return { q: debouncedPeopleQuery || undefined, named: peopleNamedFilter(peopleFilter) };
+  }
 
   const activeAlbum = albums.find((album) => album.id === albumId) ?? null;
-  const activeFace = faces.find((face) => face.id === personId) ?? null;
+  const activeFace = activePerson && activePerson.id === personId
+    ? activePerson
+    : faces.find((face) => face.id === personId) ?? null;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedPeopleQuery(peopleQuery.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [peopleQuery]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -125,6 +167,7 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
     setItems([]);
     setSelected([]);
     setSelectionMode(false);
+    setPersonMissing(false);
     anchor.current = null;
     const load = async () => {
       try {
@@ -134,8 +177,14 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
           return;
         }
         if (tab === 'people' && !personId) {
-          const page = await api.faceClusters(0, controller.signal);
-          if (controller.signal.aborted) return;
+          setActivePerson(null);
+          setFaces([]);
+          setFaceOffset(null);
+          setFaceSelection([]);
+          faceAnchor.current = null;
+          const generation = ++peopleGeneration.current;
+          const page = await api.faceClusters(0, controller.signal, faceListFilter());
+          if (controller.signal.aborted || peopleGeneration.current !== generation) return;
           setFaces(page.clusters);
           setFaceOffset(page.nextOffset);
           setLabelDrafts(Object.fromEntries(page.clusters.map((cluster) => [cluster.id, cluster.label || ''])));
@@ -154,15 +203,30 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
           return;
         }
         if (tab === 'people' && personId) {
-          const [facePage, mediaPage] = await Promise.all([
-            api.faceClusters(0, controller.signal),
-            api.faceMedia(personId, 0, controller.signal)
+          setActivePerson(null);
+          const [faceResult, mediaResult] = await Promise.all([
+            api.getFaceCluster(personId, controller.signal).catch((cause: unknown) => {
+              if (cause instanceof ApiError && cause.status === 404) return null;
+              throw cause;
+            }),
+            api.faceMedia(personId, 0, controller.signal).catch((cause: unknown) => {
+              if (cause instanceof ApiError && cause.status === 404) return null;
+              throw cause;
+            })
           ]);
           if (controller.signal.aborted) return;
-          setFaces(facePage.clusters);
-          setLabelDrafts(Object.fromEntries(facePage.clusters.map((cluster) => [cluster.id, cluster.label || ''])));
-          setItems(mediaPage.items);
-          setOffset(mediaPage.next_offset ?? null);
+          if (!faceResult || !mediaResult) {
+            setActivePerson(null);
+            setPersonMissing(true);
+            setItems([]);
+            setOffset(null);
+            return;
+          }
+          setActivePerson(faceResult);
+          setPersonMissing(false);
+          setLabelDrafts((current) => ({ ...current, [faceResult.id]: faceResult.label || '' }));
+          setItems(mediaResult.items);
+          setOffset(mediaResult.next_offset ?? null);
           return;
         }
         const page = await api.listPhotos(null, controller.signal);
@@ -178,16 +242,40 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
     };
     void load();
     return () => controller.abort();
-  }, [tab, albumId, personId]);
+  }, [tab, albumId, personId, debouncedPeopleQuery, peopleFilter]);
 
   useEffect(() => {
     const node = sentinel.current;
     if (!node || loading) return;
-    const more = tab === 'timeline' ? cursor : offset;
+    const peopleList = tab === 'people' && !personId;
+    const more = peopleList ? faceOffset != null : tab === 'timeline' ? Boolean(cursor) : offset != null;
     if (!more) return;
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
       observer.disconnect();
+        if (peopleList) {
+        if (faceOffset == null || pagingFaces.current) return;
+        const generation = peopleGeneration.current;
+        pagingFaces.current = true;
+        api.faceClusters(faceOffset, undefined, faceListFilter())
+          .then((page) => {
+            if (peopleGeneration.current !== generation) return;
+            setFaces((current) => {
+              const seen = new Set(current.map((cluster) => cluster.id));
+              return [...current, ...page.clusters.filter((cluster) => !seen.has(cluster.id))];
+            });
+            setLabelDrafts((current) => ({
+              ...current,
+              ...Object.fromEntries(page.clusters.map((cluster) => [cluster.id, cluster.label || '']))
+            }));
+            setFaceOffset(page.nextOffset);
+          })
+          .catch((cause: unknown) => {
+            if (peopleGeneration.current === generation) setError(friendlyError(cause));
+          })
+          .finally(() => { pagingFaces.current = false; });
+        return;
+      }
       const request = tab === 'timeline'
         ? api.listPhotos(cursor)
         : tab === 'albums' && albumId
@@ -207,7 +295,7 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
     }, { rootMargin: '600px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [albumId, cursor, loading, offset, personId, tab]);
+  }, [albumId, cursor, faceOffset, loading, offset, personId, tab, debouncedPeopleQuery, peopleFilter]);
 
   const groups = useMemo(() => groupByDay(items), [items]);
   const viewerItems = useMemo(() => items.map(toViewerItem), [items]);
@@ -291,45 +379,82 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
   }
 
   async function renameFace(cluster: FaceCluster, label: string) {
+    const next = label.trim();
+    if (next === (cluster.label || '')) return;
+    setBusy('rename:' + cluster.id);
+    setError('');
     try {
-      await api.renameFaceCluster(cluster.id, label.trim() || null);
-      setFaces((current) => current.map((item) => item.id === cluster.id ? { ...item, label: label.trim() || null } : item));
-      setNotice(label.trim() ? `Saved “${label.trim()}”.` : 'Name cleared.');
+      const result = await api.renameFaceCluster(cluster.id, next || null);
+      const saved = result.label;
+      setFaces((current) => current.map((item) => item.id === cluster.id ? { ...item, label: saved } : item));
+      setActivePerson((current) => current && current.id === cluster.id ? { ...current, label: saved } : current);
+      setLabelDrafts((current) => ({ ...current, [cluster.id]: saved || '' }));
+      setNotice(saved ? `Saved “${saved}”.` : 'Name cleared.');
     } catch (cause) {
+      setLabelDrafts((current) => ({ ...current, [cluster.id]: cluster.label || '' }));
       setError(friendlyError(cause));
+    } finally {
+      setBusy('');
     }
   }
 
   async function mergeFaces() {
     const target = mergeTarget || faceSelection[0];
     const sources = faceSelection.filter((id) => id !== target);
-    if (!target || sources.length === 0) return;
+    if (!target || sources.length === 0 || busy) return;
+    const name = faces.find((face) => face.id === target)?.label || 'Unnamed person';
+    if (!window.confirm(`Merge ${sources.length} ${sources.length === 1 ? 'person' : 'people'} into “${name}”? Their photos will be combined.`)) return;
+    setBusy('merge');
+    setError('');
     try {
       await api.mergeFaceClusters(target, sources);
       setFaceSelection([]);
       setMergeTarget('');
-      const page = await api.faceClusters();
+      const page = await api.faceClusters(0, undefined, faceListFilter());
       setFaces(page.clusters);
+      setFaceOffset(page.nextOffset);
       setLabelDrafts(Object.fromEntries(page.clusters.map((cluster) => [cluster.id, cluster.label || ''])));
-      setNotice('People merged.');
+      setNotice(`Merged into “${name}”.`);
     } catch (cause) {
       setError(friendlyError(cause));
+    } finally {
+      setBusy('');
     }
   }
 
   async function separateSelected(ids = selected) {
-    if (!personId || ids.length === 0) return;
+    if (!personId || ids.length === 0 || busy) return;
+    if (ids.length > MAX_SEPARATE) {
+      setError(`Move at most ${MAX_SEPARATE} photos at a time.`);
+      return;
+    }
+    setBusy('separate');
+    setError('');
     try {
-      await api.separateFace(personId, ids);
+      const result = await api.separateFace(personId, ids);
       setSelected((current) => current.filter((id) => !ids.includes(id)));
-      const [mediaPage, facePage] = await Promise.all([api.faceMedia(personId), api.faceClusters()]);
-      setFaces(facePage.clusters);
+      const [mediaPage, face] = await Promise.all([
+        api.faceMedia(personId),
+        api.getFaceCluster(personId).catch((cause: unknown) => {
+          if (cause instanceof ApiError && cause.status === 404) return null;
+          throw cause;
+        })
+      ]);
+      const action = { label: 'Open new person', personId: result.clusterId };
+      if (!face) {
+        setNotice('Those photos were moved to a new person.', action);
+        onNavigate({ tab: 'people', personId: null, fileId: null });
+        return;
+      }
+      setActivePerson(face);
+      setFaces((current) => current.map((item) => item.id === face.id ? face : item));
       setItems(mediaPage.items);
       setOffset(mediaPage.next_offset ?? null);
-      setNotice('Those photos were moved to a new person.');
-      if (mediaPage.items.length === 0) onNavigate({ tab: 'people', personId: null, fileId: null });
+      setNotice('Those photos were moved to a new person.', action);
     } catch (cause) {
       setError(friendlyError(cause));
+    } finally {
+      setBusy('');
     }
   }
 
@@ -368,6 +493,10 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
       await api.batchEntries({ action: 'trash', ids });
       setItems((current) => current.filter((item) => !ids.includes(item.id)));
       setSelected([]);
+      if (tab === 'people' && personId) {
+        const face = await api.getFaceCluster(personId).catch(() => activeFace);
+        if (face) setActivePerson(face);
+      }
       setNotice(ids.length === 1 ? 'Moved to trash.' : `${ids.length} items moved to trash.`);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -398,9 +527,12 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
   }
 
   async function loadMoreFaces() {
-    if (faceOffset == null) return;
+    if (faceOffset == null || pagingFaces.current) return;
+    const generation = peopleGeneration.current;
+    pagingFaces.current = true;
     try {
-      const page = await api.faceClusters(faceOffset);
+      const page = await api.faceClusters(faceOffset, undefined, faceListFilter());
+      if (peopleGeneration.current !== generation) return;
       setFaces((current) => {
         const seen = new Set(current.map((cluster) => cluster.id));
         return [...current, ...page.clusters.filter((cluster) => !seen.has(cluster.id))];
@@ -412,7 +544,22 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
       setFaceOffset(page.nextOffset);
     } catch (cause) {
       setError(friendlyError(cause));
+    } finally {
+      pagingFaces.current = false;
     }
+  }
+
+  function editPersonName(cluster: FaceCluster, draft: string) {
+    if (renameSkip.current === cluster.id) {
+      renameSkip.current = null;
+      return;
+    }
+    void renameFace(cluster, draft);
+  }
+
+  function cancelPersonName(cluster: FaceCluster) {
+    renameSkip.current = cluster.id;
+    setLabelDrafts((current) => ({ ...current, [cluster.id]: cluster.label || '' }));
   }
 
   async function loadMoreLibrary() {
@@ -494,7 +641,18 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
       </div>
 
       {error && <div className="notice notice-error" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
-      {notice && !error && <div className="notice notice-success" role="status"><Check size={16} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss"><X size={16} /></button></div>}
+      {notice && !error && (
+        <div className="notice notice-success" role="status">
+          <Check size={16} />
+          <span>{notice}</span>
+          {noticeAction && (
+            <button type="button" className="notice-action" onClick={() => onNavigate({ tab: 'people', personId: noticeAction.personId, fileId: null })}>
+              {noticeAction.label}
+            </button>
+          )}
+          <button type="button" onClick={() => setNotice('')} aria-label="Dismiss"><X size={16} /></button>
+        </div>
+      )}
       {uploading && <div className="notice" role="status"><Upload size={16} /><span>{uploading}</span></div>}
 
       {tab === 'timeline' && (
@@ -517,79 +675,158 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
             <div>
               <span className="eyebrow">PEOPLE</span>
               <h1>People</h1>
-              <p>Faces found in your photos. Name someone, open their pictures, or merge groups that are the same person.</p>
+              <p>Faces found in your photos. Open someone to see their pictures, type a name, or merge groups that are the same person.</p>
             </div>
           </header>
-          {faceSelection.length > 1 && (
+          <div className="people-toolbar">
+            <label className="people-search">
+              <Search size={16} />
+              <input value={peopleQuery} onChange={(event) => setPeopleQuery(event.target.value)} placeholder="Search by name" aria-label="Search people" maxLength={80} />
+              {peopleQuery && <button type="button" onClick={() => setPeopleQuery('')} aria-label="Clear search"><X size={14} /></button>}
+            </label>
+            <div className="people-filters" role="tablist" aria-label="Filter people">
+              {(['all', 'named', 'unnamed'] as const).map((filter) => (
+                <button key={filter} type="button" role="tab" aria-selected={peopleFilter === filter} className={peopleFilter === filter ? 'active' : ''} onClick={() => setPeopleFilter(filter)}>
+                  {filter === 'all' ? 'All' : filter === 'named' ? 'Named' : 'Unnamed'}
+                </button>
+              ))}
+            </div>
+          </div>
+          {faceSelection.length > 0 && (
             <div className="batch-bar" role="toolbar" aria-label="People actions">
               <strong>{faceSelection.length} selected</strong>
-              <label className="batch-merge-target">Merge into
-                <select value={mergeTarget || faceSelection[0]} onChange={(event) => setMergeTarget(event.target.value)}>
-                  {faces.filter((face) => faceSelection.includes(face.id)).map((face) => (
-                    <option key={face.id} value={face.id}>{face.label || 'Unnamed person'}</option>
-                  ))}
-                </select>
-              </label>
-              <button className="batch-action" type="button" onClick={() => void mergeFaces()}><GitMerge size={15} /> Merge</button>
-              <button className="batch-action" type="button" onClick={() => setFaceSelection([])}>Clear</button>
+              {faceSelection.length > 1 ? (
+                <>
+                  <label className="batch-merge-target">Merge into
+                    <select value={mergeTarget || faceSelection[0]} onChange={(event) => setMergeTarget(event.target.value)}>
+                      {faces.filter((face) => faceSelection.includes(face.id)).map((face) => (
+                        <option key={face.id} value={face.id}>{face.label || 'Unnamed person'}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <button className="batch-action" type="button" disabled={busy === 'merge'} onClick={() => void mergeFaces()}><GitMerge size={15} /> {busy === 'merge' ? 'Merging…' : 'Merge'}</button>
+                </>
+              ) : <span className="batch-hint">Select another person to merge them together.</span>}
+              <button className="batch-action" type="button" onClick={() => { setFaceSelection([]); setMergeTarget(''); }}>Clear</button>
             </div>
           )}
-          <div className="people-grid">
-            {faces.map((cluster) => (
-              <article className={'person-card' + (faceSelection.includes(cluster.id) ? ' selected' : '')} key={cluster.id}>
-                <button
-                  className="person-open"
-                  onClick={(event) => {
-                    if (event.metaKey || event.ctrlKey || event.shiftKey || faceSelection.length > 0) {
-                      selectFace(cluster.id, event.shiftKey ? 'range' : 'toggle');
-                      return;
-                    }
-                    onNavigate({ tab: 'people', personId: cluster.id, fileId: null });
-                  }}
-                >
-                  <FacePortrait cluster={cluster} />
-                  <strong>{cluster.label || 'Unnamed person'}</strong>
-                  <span>{cluster.assetCount} {cluster.assetCount === 1 ? 'item' : 'items'}</span>
-                </button>
-                <label className="person-select">
-                  <input type="checkbox" checked={faceSelection.includes(cluster.id)} onChange={() => selectFace(cluster.id, 'toggle')} aria-label={'Select ' + (cluster.label || 'unnamed person')} />
-                </label>
-                <form className="person-rename" onSubmit={(event) => { event.preventDefault(); void renameFace(cluster, labelDrafts[cluster.id] || ''); }}>
-                  <input value={labelDrafts[cluster.id] ?? ''} onChange={(event) => setLabelDrafts((current) => ({ ...current, [cluster.id]: event.target.value }))} placeholder="Add a name" maxLength={80} aria-label="Person name" />
-                  <button className="button button-secondary" type="submit">Save</button>
-                </form>
-              </article>
-            ))}
-          </div>
-          {!loading && faces.length === 0 && (
+          {loading && faces.length === 0 ? (
+            <div className="people-grid" aria-hidden="true">
+              {Array.from({ length: 8 }, (_, index) => <div className="person-skeleton" key={index} />)}
+            </div>
+          ) : (
+            <div className={'people-grid' + (faceSelection.length > 0 ? ' is-selecting' : '')}>
+              {faces.map((cluster) => (
+                <article className={'person-card' + (faceSelection.includes(cluster.id) ? ' selected' : '')} key={cluster.id}>
+                  <div className="person-avatar-wrap">
+                    <label className="person-select">
+                      <input type="checkbox" checked={faceSelection.includes(cluster.id)} onChange={() => selectFace(cluster.id, 'toggle')} aria-label={'Select ' + (cluster.label || 'unnamed person')} />
+                    </label>
+                    <button
+                      type="button"
+                      className="person-avatar"
+                      onClick={(event) => {
+                        if (event.metaKey || event.ctrlKey || event.shiftKey) {
+                          selectFace(cluster.id, event.shiftKey ? 'range' : 'toggle');
+                          return;
+                        }
+                        onNavigate({ tab: 'people', personId: cluster.id, fileId: null });
+                      }}
+                    >
+                      <FacePortrait key={cluster.id + ':' + (cluster.representativeFileId ?? '')} cluster={cluster} />
+                    </button>
+                  </div>
+                  <input
+                    className="person-name-input"
+                    value={labelDrafts[cluster.id] ?? ''}
+                    placeholder="Add a name"
+                    maxLength={80}
+                    aria-label={'Name for ' + (cluster.label || 'unnamed person')}
+                    disabled={busy === 'rename:' + cluster.id}
+                    onChange={(event) => setLabelDrafts((current) => ({ ...current, [cluster.id]: event.target.value }))}
+                    onBlur={() => editPersonName(cluster, labelDrafts[cluster.id] || '')}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      }
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        cancelPersonName(cluster);
+                        event.currentTarget.blur();
+                      }
+                    }}
+                  />
+                  <span className="person-count">{photoCountLabel(cluster.assetCount)}</span>
+                </article>
+              ))}
+            </div>
+          )}
+          {!loading && !error && faces.length === 0 && (
             <div className="empty-state">
               <span className="empty-icon"><ScanFace size={22} /></span>
-              <h2>No people yet</h2>
-              <p>Faces appear here after photos and videos finish indexing.</p>
+              <h2>{debouncedPeopleQuery || peopleFilter !== 'all' ? 'No matching people' : 'No people yet'}</h2>
+              <p>{debouncedPeopleQuery || peopleFilter !== 'all' ? 'Try another name, or show everyone.' : 'Faces appear here after photos and videos finish indexing.'}</p>
             </div>
           )}
-          {faceOffset != null && <button className="load-more" onClick={() => void loadMoreFaces()}>Load more people</button>}
+          {faceOffset != null && <button className="load-more" type="button" onClick={() => void loadMoreFaces()}>Load more people</button>}
         </>
       )}
 
       {tab === 'people' && personId && (
+        personMissing && !loading ? (
+          <div className="empty-state">
+            <span className="empty-icon"><ScanFace size={22} /></span>
+            <h2>Person not found</h2>
+            <p>This group was merged or removed.</p>
+            <button className="button button-secondary" type="button" onClick={() => onNavigate({ tab: 'people', personId: null, fileId: null })}>Back to people</button>
+          </div>
+        ) : (
         <>
-          <header className="photos-heading">
+          <header className="photos-heading person-detail-heading">
             <div className="photos-heading-copy">
-              <button className="back-link" onClick={() => onNavigate({ tab: 'people', personId: null, fileId: null })}>All people</button>
-              <h1>{activeFace?.label || 'Unnamed person'}</h1>
-              <p>{items.length} photo{items.length === 1 ? '' : 's'} in this group. Move wrong matches out, or rename the person.</p>
-              {activeFace && (
-                <form className="album-create" onSubmit={(event) => { event.preventDefault(); void renameFace(activeFace, labelDrafts[activeFace.id] || ''); }}>
-                  <input value={labelDrafts[activeFace.id] ?? activeFace.label ?? ''} onChange={(event) => setLabelDrafts((current) => ({ ...current, [activeFace.id]: event.target.value }))} maxLength={80} aria-label="Person name" placeholder="Name" />
-                  <button className="button button-secondary" type="submit">Save name</button>
-                </form>
-              )}
+              <button className="back-link" type="button" onClick={() => onNavigate({ tab: 'people', personId: null, fileId: null })}>All people</button>
+              <div className="person-detail">
+                {activeFace ? <FacePortrait key={activeFace.id + ':' + (activeFace.representativeFileId ?? '')} cluster={activeFace} large /> : <span className="face-portrait face-portrait-empty large"><ScanFace size={28} /></span>}
+                <div className="person-detail-copy">
+                  <h1>
+                    {activeFace ? <input
+                      className="person-title-input"
+                      value={labelDrafts[activeFace.id] ?? ''}
+                      placeholder="Add a name"
+                      maxLength={80}
+                      aria-label="Person name"
+                      disabled={busy === 'rename:' + activeFace.id}
+                      onChange={(event) => {
+                        if (!activeFace) return;
+                        setLabelDrafts((current) => ({ ...current, [activeFace.id]: event.target.value }));
+                      }}
+                      onBlur={() => editPersonName(activeFace, labelDrafts[activeFace.id] || '')}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          event.currentTarget.blur();
+                        }
+                        if (event.key === 'Escape') {
+                          event.preventDefault();
+                          cancelPersonName(activeFace);
+                          event.currentTarget.blur();
+                        }
+                      }}
+                    /> : 'Loading…'}
+                  </h1>
+                  <p>{loading && !activeFace ? 'Loading photos…' : `${photoCountLabel(activeFace?.assetCount ?? items.length)}. Select photos of someone else, then choose Not this person.`}</p>
+                </div>
+              </div>
             </div>
-            <button className="button button-secondary" type="button" disabled={selected.length === 0} onClick={() => void separateSelected()}><UserRoundX size={16} /> Not this person</button>
+            <div className="heading-actions">
+              <button className={'button button-secondary' + (selectionMode ? ' is-active' : '')} type="button" aria-pressed={selectionMode} onClick={() => { setSelectionMode((value) => !value); if (selectionMode) setSelected([]); }}>Select</button>
+              <button className="button button-secondary" type="button" disabled={selected.length === 0 || busy === 'separate'} onClick={() => void separateSelected()}><UserRoundX size={16} /> {busy === 'separate' ? 'Moving…' : 'Not this person'}</button>
+            </div>
           </header>
-          <MediaGroups groups={groups} loading={loading} selected={selected} selectionMode={selectionMode || selected.length > 0} onSelect={selectMedia} onOpen={(id) => onNavigate({ fileId: id })} onContextMenu={openMenu} />
+          <MediaGroups groups={groups} loading={loading} selected={selected} selectionMode={selectionMode || selected.length > 0} onSelect={selectMedia} onOpen={(id) => onNavigate({ fileId: id })} onContextMenu={openMenu} emptyTitle="No photos in this group" emptyBody="Photos you move out show up as a new person." />
         </>
+        )
       )}
 
       {tab === 'albums' && !albumId && (
@@ -686,7 +923,7 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
       )}
 
       <div ref={sentinel} className="photos-sentinel" />
-      {loading && <div className="photos-loading"><span className="spinner" /> Loading media…</div>}
+      {loading && !(tab === 'people' && !personId) && <div className="photos-loading"><span className="spinner" /> Loading photos…</div>}
 
       {pickerOpen && (
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerOpen(false); }}>
@@ -754,34 +991,34 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
   );
 }
 
-function FacePortrait({ cluster }: { cluster: FaceCluster }) {
-  const [aspect, setAspect] = useState<number | null>(null);
-  const boxWidth = cluster.representativeBoxWidth;
-  const boxHeight = cluster.representativeBoxHeight;
-  if (!cluster.representativeFileId) {
-    return <span className="face-portrait face-portrait-empty"><ScanFace size={28} /></span>;
+function FacePortrait({ cluster, large = false }: { cluster: FaceCluster; large?: boolean }) {
+  const [crop, setCrop] = useState<ReturnType<typeof faceCropStyle>>(null);
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const box = cluster.representativeBoxLeft != null && cluster.representativeBoxTop != null && cluster.representativeBoxWidth != null && cluster.representativeBoxHeight != null
+    ? {
+      left: cluster.representativeBoxLeft,
+      top: cluster.representativeBoxTop,
+      width: cluster.representativeBoxWidth,
+      height: cluster.representativeBoxHeight
+    }
+    : null;
+  if (!cluster.representativeFileId || failed) {
+    return <span className={'face-portrait face-portrait-empty' + (large ? ' large' : '')}><ScanFace size={large ? 32 : 28} /></span>;
   }
-  const cropped = aspect != null && boxWidth != null && boxHeight != null && boxWidth > 0 && boxHeight > 0;
-  const widthPercent = cropped ? 100 / boxWidth : 100;
-  const heightPercent = cropped ? widthPercent / aspect : 100;
-  const left = cluster.representativeBoxLeft ?? 0;
-  const top = cluster.representativeBoxTop ?? 0;
   return (
-    <span className="face-portrait">
+    <span className={'face-portrait' + (large ? ' large' : '') + (ready ? ' is-ready' : '')}>
       <img
         src={thumbnailUrl(cluster.representativeFileId)}
         alt=""
-        style={cropped ? {
-          width: `${widthPercent}%`,
-          height: `${heightPercent}%`,
-          left: `${-left * widthPercent}%`,
-          top: `${-top * heightPercent}%`
-        } : undefined}
+        style={crop ?? undefined}
         onLoad={(event) => {
           const naturalWidth = event.currentTarget.naturalWidth;
           const naturalHeight = event.currentTarget.naturalHeight;
-          if (naturalWidth > 0 && naturalHeight > 0) setAspect(naturalWidth / naturalHeight);
+          if (naturalWidth > 0 && naturalHeight > 0) setCrop(faceCropStyle(box, naturalWidth / naturalHeight));
+          setReady(true);
         }}
+        onError={() => setFailed(true)}
       />
     </span>
   );
@@ -794,7 +1031,9 @@ function MediaGroups({
   selected,
   selectionMode,
   onSelect,
-  onContextMenu
+  onContextMenu,
+  emptyTitle = 'No photos or videos yet',
+  emptyBody = 'Upload into an album, or add images and videos from Drive.'
 }: {
   groups: Array<{ key: string; label: string; items: MediaItem[] }>;
   loading: boolean;
@@ -803,13 +1042,15 @@ function MediaGroups({
   selectionMode?: boolean;
   onSelect?: (id: string, mode: 'toggle' | 'range') => void;
   onContextMenu?: (event: ReactMouseEvent, id: string) => void;
+  emptyTitle?: string;
+  emptyBody?: string;
 }) {
   if (!loading && groups.length === 0) {
     return (
       <div className="empty-state">
         <span className="empty-icon"><Images size={22} /></span>
-        <h2>No photos or videos yet</h2>
-        <p>Upload into an album, or add images and videos from Drive.</p>
+        <h2>{emptyTitle}</h2>
+        <p>{emptyBody}</p>
       </div>
     );
   }
