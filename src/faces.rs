@@ -186,14 +186,16 @@ async fn list_faces(
     let label_pattern = search_pattern(query.q)?;
     let mut rows = fetch_clusters(
         &state.pool,
-        Some(user.id),
-        None,
-        label_pattern.as_deref(),
-        query.named,
-        true,
-        true,
-        limit,
-        offset,
+        ClusterQuery {
+            owner_id: Some(user.id),
+            cluster_id: None,
+            label_pattern: label_pattern.as_deref(),
+            named: query.named,
+            hide_empty_unlabeled: true,
+            people_order: true,
+            limit,
+            offset,
+        },
     )
     .await?;
     let has_more = rows.len() > usize::from(limit);
@@ -216,14 +218,16 @@ async fn list_admin_faces(
     let (limit, offset) = page_bounds(query.limit, query.offset)?;
     let mut rows = fetch_clusters(
         &state.pool,
-        query.owner_id,
-        None,
-        None,
-        None,
-        false,
-        false,
-        limit,
-        offset,
+        ClusterQuery {
+            owner_id: query.owner_id,
+            cluster_id: None,
+            label_pattern: None,
+            named: None,
+            hide_empty_unlabeled: false,
+            people_order: false,
+            limit,
+            offset,
+        },
     )
     .await?;
     let has_more = rows.len() > usize::from(limit);
@@ -247,14 +251,16 @@ async fn get_face(
 ) -> Result<Response, FaceError> {
     let mut rows = fetch_clusters(
         &state.pool,
-        Some(user.id),
-        Some(cluster_id),
-        None,
-        None,
-        false,
-        false,
-        1,
-        0,
+        ClusterQuery {
+            owner_id: Some(user.id),
+            cluster_id: Some(cluster_id),
+            label_pattern: None,
+            named: None,
+            hide_empty_unlabeled: false,
+            people_order: false,
+            limit: 1,
+            offset: 0,
+        },
     )
     .await?;
     let Some(row) = rows.pop() else {
@@ -263,16 +269,20 @@ async fn get_face(
     Ok(no_store(Json(FaceClusterResponse::from(row))))
 }
 
-async fn fetch_clusters(
-    pool: &PgPool,
+struct ClusterQuery<'a> {
     owner_id: Option<Uuid>,
     cluster_id: Option<Uuid>,
-    label_pattern: Option<&str>,
+    label_pattern: Option<&'a str>,
     named: Option<bool>,
     hide_empty_unlabeled: bool,
     people_order: bool,
     limit: u16,
     offset: u32,
+}
+
+async fn fetch_clusters(
+    pool: &PgPool,
+    query: ClusterQuery<'_>,
 ) -> Result<Vec<FaceClusterRow>, FaceError> {
     sqlx::query_as::<_, FaceClusterRow>(
         "SELECT cluster.id, cluster.owner_id, owner.email AS owner_email, cluster.label, \
@@ -319,14 +329,14 @@ async fn fetch_clusters(
                    cluster.updated_at DESC, cluster.id DESC \
           LIMIT $2 OFFSET $3",
     )
-    .bind(owner_id)
-    .bind(i64::from(limit) + 1)
-    .bind(i64::from(offset))
-    .bind(cluster_id)
-    .bind(label_pattern)
-    .bind(named)
-    .bind(hide_empty_unlabeled)
-    .bind(people_order)
+    .bind(query.owner_id)
+    .bind(i64::from(query.limit) + 1)
+    .bind(i64::from(query.offset))
+    .bind(query.cluster_id)
+    .bind(query.label_pattern)
+    .bind(query.named)
+    .bind(query.hide_empty_unlabeled)
+    .bind(query.people_order)
     .fetch_all(pool)
     .await
     .map_err(FaceError::Database)
