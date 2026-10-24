@@ -137,3 +137,30 @@ run `harness upgrade` to update the harness block in this AGENTS.md.
 Only the harness-managed section (markers HARNESS:BEGIN through HARNESS:END)
 is modified — all other content is preserved.
 <!-- HARNESS:END -->
+
+## Cursor Cloud specific instructions
+
+The Cloud Agent `start` script brings up local development. It starts PostgreSQL 17 with `pg_ctlcluster 17 main start` (systemd is blocked by `policy-rc.d`), creates the `mydrive` role plus the `mydrive` and `mydrive_test` databases, writes a gitignored `/workspace/.env`, and launches two tmux sessions:
+
+- `my-drive-api`: `cargo run --locked --bin my-drive` on `0.0.0.0:3000`
+- `my-drive-web`: `npm run dev -- --host 0.0.0.0 --port 5173` in `frontend/`
+
+Vite proxies `/api` to `http://127.0.0.1:3000`. Liveness is `GET /health/live`; readiness is `GET /health/ready`.
+
+Local-only fixture credentials, written into `.env` on each boot:
+
+- Owner: `owner@example.test` / `local-dev-owner-password`
+- Database: `postgres://mydrive:localdevdb0123456789abcdef@127.0.0.1:5432/mydrive`
+- Storage: `/var/lib/my-drive/dev-storage` with `STORAGE_REQUIRE_MOUNT=false`
+- Previews: `/var/lib/my-drive/dev-previews` with `MEDIA_PREVIEW_REQUIRE_MOUNT=false`
+
+Do not reuse these credentials outside this environment. Leaving the bootstrap owner variables set is safe: startup no-ops once an owner exists.
+
+Rust edition 2024 needs stable Rust (`rustup default stable`, 1.85+). Node.js 22 is required for the web client. Integration tests use a separate database:
+
+```bash
+TEST_DATABASE_URL=postgres://mydrive:localdevdb0123456789abcdef@127.0.0.1:5432/mydrive_test \
+  cargo test --all-targets --locked -- --ignored --test-threads=1
+```
+
+Other checks already used in CI: `cargo fmt --all -- --check`, `cargo test --all-targets --locked`, `cargo clippy --all-targets --locked -- -D warnings`, and `npm test` plus `npm run build` in `frontend/`. Document preview and the media indexer are separate binaries and are not required to sign in or use the drive UI.
