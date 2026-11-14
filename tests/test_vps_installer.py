@@ -209,7 +209,18 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn('media-indexer', actual['services'])
         self.assertNotIn('MEDIA_PREVIEW_ROOT', actual['services']['app']['environment'])
         self.assertEqual(actual['services']['app']['ports'], [])
-        self.assertEqual(actual['services']['app']['volumes'], ['preview-bind'])
+        self.assertEqual(
+            actual['services']['app']['volumes'],
+            [
+                'preview-bind',
+                {
+                    'type': 'bind',
+                    'source': '/run/my-drive-updater',
+                    'target': '/run/my-drive-updater',
+                    'bind': {'create_host_path': False},
+                },
+            ],
+        )
         self.assertEqual(actual['services']['proxy']['ports'], ['80:80', '443:443'])
 
     def test_bootstrap_scrub_precedes_public_proxy(self):

@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 16);
+    assert_eq!(migrator.iter().len(), 17);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -89,4 +89,8 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     assert!(devices.contains("CREATE TABLE device_credentials"));
     assert!(devices.contains("access_token_digest BYTEA NOT NULL UNIQUE"));
     assert!(devices.contains("replace_file_id"));
+
+    let updates = include_str!("../migrations/0017_system_updates.sql");
+    assert!(updates.contains("CREATE TABLE system_update_settings"));
+    assert!(updates.contains("INSERT INTO system_update_settings (singleton) VALUES (TRUE)"));
 }

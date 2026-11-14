@@ -327,7 +327,7 @@ def ensure_updater_compose(model):
     if not any(isinstance(v, dict) and v.get('target') == target for v in volumes):
         volumes.append({
             'type': 'bind',
-            'source': str(UPDATER_RUN_DIR),
+            'source': UPDATER_RUN_DIR.as_posix(),
             'target': target,
             'bind': {'create_host_path': False},
         })
@@ -422,7 +422,8 @@ def save(state):
 
 
 def start(state):
-    ensure_updater_runtime_dir()
+    if getattr(os, 'geteuid', lambda: -1)() == 0:
+        ensure_updater_runtime_dir()
     check(state)
     # Bootstrap privately before opening the public proxy.
     compose('up', '-d', 'app')
