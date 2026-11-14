@@ -1,13 +1,16 @@
 """Browser-based first-run wizard for vps.py (standard library only).
 
-The wizard listens on loopback by default and requires a one-time token. On a
-remote VPS, reach it through an SSH tunnel so the owner password never crosses
-the network in clear text.
+By default the wizard listens on every interface but answers only clients on
+private networks (home LAN, loopback, link-local), so a computer on the same
+router can open http://<server-LAN-IP>:8090 directly. Every visit still needs
+the one-time token printed in the terminal. Use --web-listen 127.0.0.1 plus an
+SSH tunnel on a VPS or any network you do not trust.
 """
 from __future__ import annotations
 
 import hmac
 import http.server
+import ipaddress
 import json
 from pathlib import Path
 import secrets
@@ -78,6 +81,38 @@ def public_ipv4():
             return sock.getsockname()[0]
     except OSError:
         return ''
+
+
+def private_client(address):
+    """True for loopback, RFC 1918/ULA and link-local peers; never public Internet clients."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_link_local or (ip.is_private and not ip.is_global)
+
+
+def lan_addresses():
+    """Private IPv4 addresses of this machine (what the home router assigned)."""
+    try:
+        output = subprocess.run(['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'], check=True, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.CalledProcessError):
+        output = ''
+    found = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[1].startswith(('docker', 'br-', 'veth', 'virbr', 'cni', 'flannel')):
+            continue
+        address = parts[3].split('/')[0]
+        if private_client(address) and address not in found:
+            found.append(address)
+    fallback = public_ipv4()
+    if not found and fallback and private_client(fallback):
+        found.append(fallback)
+    return found
 
 
 class Wizard:
@@ -184,14 +219,22 @@ def handler(wizard):
             return False
 
         def host_ok(self):
+            # Refuse public peers outright, and DNS names in Host (blocks DNS rebinding):
+            # the wizard is opened by IP address or localhost only.
+            if not private_client(self.client_address[0]):
+                return False
+            raw = self.headers.get('Host') or ''
+            host = raw[1:raw.index(']')] if raw.startswith('[') and ']' in raw else raw.rsplit(':', 1)[0]
+            if host == 'localhost':
+                return True
             if self.server.loopback:
-                host = (self.headers.get('Host') or '').rsplit(':', 1)[0].strip('[]')
-                return host in {'127.0.0.1', 'localhost', '::1'}
-            return True
+                return host in {'127.0.0.1', '::1'}
+            return private_client(host)
 
         def do_GET(self):
             if not self.host_ok():
-                return self.send(421, {'error': 'open the wizard through 127.0.0.1 or localhost'})
+                return self.send(421, {'error': 'open the wizard by the server LAN IP address or localhost, '
+                                                'from a computer on the same private network'})
             url = urlsplit(self.path)
             if url.path == '/':
                 token = parse_qs(url.query).get('token', [''])[0]
@@ -253,7 +296,7 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
-def serve(vps, prebuilt, listen='127.0.0.1', port=8090):
+def serve(vps, prebuilt, listen='0.0.0.0', port=8090):
     """Start the wizard and return it; the caller waits on wizard.submitted."""
     wizard = Wizard(vps, prebuilt)
     family = socket.AF_INET6 if ':' in listen else socket.AF_INET
@@ -262,15 +305,27 @@ def serve(vps, prebuilt, listen='127.0.0.1', port=8090):
     server.loopback = listen in {'127.0.0.1', '::1', 'localhost'}
     threading.Thread(target=server.serve_forever, daemon=True).start()
     wizard.server = server
-    shown = listen if server.loopback else (public_ipv4() or listen)
-    link = f'http://{"127.0.0.1" if server.loopback else shown}:{port}/?token={wizard.token}'
+    port = server.server_address[1]
+    query = f'/?token={wizard.token}'
     print('\nMy Drive setup wizard is running.')
     if server.loopback:
         print('On THIS machine, open the link below. From your own computer, first create a tunnel:')
         print(f'  ssh -L {port}:127.0.0.1:{port} <user>@<server>')
+        print(f'  http://127.0.0.1:{port}{query}')
     else:
-        print('WARNING: the wizard listens on the network without TLS; use only on a trusted LAN.')
-    print(f'  {link}\nWaiting for the browser (Ctrl+C to cancel)...', flush=True)
+        addresses = lan_addresses() if listen in {'0.0.0.0', '::'} else [listen]
+        print('From a computer on the SAME home network (Wi-Fi/LAN), open:')
+        for address in addresses:
+            print(f'  http://{address}:{port}{query}')
+        if not addresses:
+            print(f'  http://<this-server-LAN-IP>:{port}{query}   (find it with: ip -4 addr)')
+        print(f'On this machine: http://127.0.0.1:{port}{query}')
+        print('Only private-network clients are answered. The page is plain HTTP inside your LAN;\n'
+              'on a VPS or untrusted network use --web-listen 127.0.0.1 with an SSH tunnel instead.')
+        if shutil.which('ufw') and 'Status: active' in subprocess.run(
+                ['ufw', 'status'], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout:
+            print(f'UFW is active: allow the wizard temporarily with  sudo ufw allow from 192.168.0.0/16 to any port {port}')
+    print('Waiting for the browser (Ctrl+C to cancel)...', flush=True)
     return wizard
 
 
