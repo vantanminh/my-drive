@@ -87,26 +87,6 @@ Không cần mở cổng router; Caddy chỉ nghe `127.0.0.1:80`. API token **kh
 lưu**; máy chỉ giữ connector token trong `/opt/my-drive/.env` (root, 0600).
 Cài bằng file cấu hình: `"tls": "cloudflare", "cf_token": "...", "cf_replicas": 2`.
 
-### Cloudflare Tunnel (máy ở nhà, không IP tĩnh)
-
-Chọn **Cloudflare Tunnel** ở bước "Mạng & truy cập", nhập tên miền (đã thêm vào
-Cloudflare) và một API token tạo tại *My Profile → API Tokens → Create Custom
-Token* với quyền:
-
-- Account · Cloudflare Tunnel · Edit
-- Zone · DNS · Edit
-- Zone · Zone · Read (giới hạn ở zone chứa tên miền)
-
-Wizard kiểm tra token, zone, tài khoản và bản ghi DNS trước khi cài. Khi cài,
-bộ cài tự tạo (hoặc dùng lại) tunnel `my-drive-<tên-miền>`, cấu hình ingress
-`tên-miền → http://proxy:80`, thay bản ghi A/AAAA/CNAME cũ bằng CNAME proxied tới
-tunnel, chạy N container `cloudflared` (mỗi connector 4 kết nối tới edge), chờ
-đủ N connector đăng ký rồi kiểm tra `https://tên-miền/health/ready`.
-
-Không cần mở cổng router; Caddy chỉ nghe `127.0.0.1:80`. API token **không được
-lưu**; máy chỉ giữ connector token trong `/opt/my-drive/.env` (root, 0600).
-Cài bằng file cấu hình: `"tls": "cloudflare", "cf_token": "...", "cf_replicas": 2`.
-
 GitHub CI cần publish đủ các image và package phải là **Public** để người cài
 không cần tài khoản GitHub. Repository public không tự làm package public.
 Chủ repo đặt visibility của từng package ở GitHub Packages sau lần publish đầu;
