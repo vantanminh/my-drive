@@ -149,6 +149,33 @@ class InstallerTests(unittest.TestCase):
         with patch.object(cloudflare, 'api', side_effect=fake), self.assertRaises(ValueError):
             cloudflare.inspect('a' * 40, 'example.com')
 
+    def test_web_wizard_lan_mode_accepts_only_private_networks(self):
+        import http.client, sys
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import setup_web
+        for address, private in [('192.168.1.20', True), ('10.0.0.5', True), ('172.16.3.4', True),
+                                 ('127.0.0.1', True), ('fe80::1', True), ('fd00::2', True),
+                                 ('::ffff:192.168.1.2', True), ('8.8.8.8', False), ('100.64.0.1', False),
+                                 ('2606:4700::1', False), ('example.com', False)]:
+            with self.subTest(address=address):
+                self.assertEqual(setup_web.private_client(address), private)
+        with patch('builtins.print'), patch.object(setup_web, 'lan_addresses', return_value=['192.168.1.10']):
+            wizard = setup_web.serve(vps, True, '0.0.0.0', 0)
+        port = wizard.server.server_address[1]
+        try:
+            def get(path, host):
+                conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+                conn.request('GET', path, headers={'Host': host})
+                response = conn.getresponse()
+                response.read()
+                return response.status
+            self.assertEqual(get(f'/?token={wizard.token}', f'192.168.1.10:{port}'), 303)
+            self.assertEqual(get('/', f'192.168.1.10:{port}'), 403)  # token still required
+            self.assertEqual(get(f'/?token={wizard.token}', f'drive.example.com:{port}'), 421)
+            self.assertEqual(get(f'/?token={wizard.token}', f'8.8.8.8:{port}'), 421)
+        finally:
+            wizard.server.shutdown()
+
     def test_internal_ip_and_generated_password(self):
         config = self.config(host='192.0.2.1', tls='internal')
         self.assertGreaterEqual(len(config['owner_password']), 32)

@@ -621,7 +621,8 @@ def main():
     setup.add_argument('--config', help='private JSON configuration; omit for wizard')
     setup.add_argument('--prepare-only', action='store_true', help='prepare files/images without starting or enabling service (recovery)')
     setup.add_argument('--cli', action='store_true', help='answer setup questions in the terminal instead of the web wizard')
-    setup.add_argument('--web-listen', default='127.0.0.1', help='wizard address (default loopback; use an SSH tunnel)')
+    setup.add_argument('--web-listen', default='0.0.0.0',
+                       help='wizard address; default answers private LAN clients only. Use 127.0.0.1 + SSH tunnel on a VPS')
     setup.add_argument('--web-port', type=int, default=8090)
     setup.add_argument('--prebuilt', action='store_true', help='download CI-published images; never build locally')
     setup.add_argument('--image-prefix', default='ghcr.io/vantanminh/my-drive')

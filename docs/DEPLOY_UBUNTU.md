@@ -40,9 +40,17 @@ Rust, frontend hoặc Dockerfile. Thư mục tạm được xóa khi kết thúc
 ### Wizard cài đặt trên trình duyệt
 
 Mặc định bộ cài mở **trang cài đặt web** (giống Synology) thay vì hỏi từng dòng
-trong terminal. Terminal in ra một link dạng
-`http://127.0.0.1:8090/?token=...`. Trang chỉ lắng nghe trên loopback và cần
-token dùng một lần, nên với VPS ở xa hãy mở SSH tunnel từ máy của bạn trước:
+trong terminal. Terminal in ra link có token dùng một lần.
+
+**Home server (mặc định):** từ máy tính cùng mạng Wi-Fi/LAN, mở thẳng
+`http://<IP-LAN-của-server>:8090/?token=...` (terminal in sẵn IP router cấp).
+Wizard chỉ trả lời máy trong mạng riêng (192.168.x.x, 10.x.x.x, 172.16–31.x.x,
+localhost); máy từ Internet bị từ chối. Trang dùng HTTP trong LAN nên chỉ dùng
+trong mạng nhà tin cậy. Nếu bật UFW, mở tạm cổng:
+`sudo ufw allow from 192.168.0.0/16 to any port 8090`.
+
+**VPS hoặc mạng không tin cậy:** chạy với `--web-listen 127.0.0.1` và mở SSH
+tunnel từ máy bạn:
 
 ```bash
 ssh -L 8090:127.0.0.1:8090 user@your-server
@@ -57,7 +65,7 @@ khẩu được tạo khi xong. Tùy chọn:
 
 - `--cli`: dùng wizard hỏi trong terminal như trước.
 - `--web-port 8091`: đổi cổng wizard.
-- `--web-listen 0.0.0.0`: mở wizard cho LAN (không mã hóa; chỉ dùng mạng tin cậy).
+- `--web-listen 127.0.0.1`: chỉ cho truy cập qua SSH tunnel (khuyến nghị cho VPS).
 
 ### Cloudflare Tunnel (máy ở nhà, không IP tĩnh)
 
