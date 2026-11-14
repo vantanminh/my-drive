@@ -21,6 +21,15 @@ SOURCE = Path(__file__).resolve().parents[1]
 INSTALL = Path('/opt/my-drive')
 PATH_RE = re.compile(r'/[A-Za-z0-9_./-]+')
 IMAGE_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]+')
+TLS_ALIASES = {'https': 'acme', 'letsencrypt': 'acme', 'self-signed': 'internal',
+               'unencrypted': 'http', 'none': 'http', 'plain': 'http'}
+_progress_hook = None
+
+
+def progress(message):
+    print(f'==> {message}', flush=True)
+    if _progress_hook:
+        _progress_hook(message)
 
 
 def run(*args, capture=False, env=None):
@@ -87,8 +96,10 @@ def validate(config):
     if set(config) - allowed:
         raise ValueError(f'unknown configuration fields: {sorted(set(config) - allowed)}')
     result = dict(config)
-    result['host'] = valid_host(str(config['host']))
-    if config.get('tls', 'acme') not in {'acme', 'internal', 'http'}:
+    result['host'] = valid_host(str(config.get('host', '')).strip().lower())
+    if isinstance(config.get('tls'), str):
+        result['tls'] = TLS_ALIASES.get(config['tls'].strip().lower(), config['tls'].strip().lower())
+    if result.get('tls', 'acme') not in {'acme', 'internal', 'http'}:
         raise ValueError('tls must be acme, internal, or http')
     result.setdefault('tls', 'acme')
     if result['tls'] == 'acme':
@@ -98,7 +109,8 @@ def validate(config):
             pass
         else:
             raise ValueError('use internal TLS for IP-only installation')
-    if not re.fullmatch(r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', str(config['email'])):
+    result['email'] = str(config.get('email', '')).strip()
+    if not re.fullmatch(r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', result['email']):
         raise ValueError('a valid owner email is required')
     password = config.get('owner_password') or secrets.token_urlsafe(32)
     if not isinstance(password, str) or len(password.encode()) < 16 or any(c in password for c in '\r\n\x00'):
@@ -137,6 +149,7 @@ def ask(prebuilt=False):
     print('My Drive Ubuntu VPS setup. Configuration stays on this server.')
     host = input('Domain or IPv4 address: ').strip().lower()
     tls = input('Access: acme HTTPS / internal HTTPS / http only (unencrypted) [acme]: ').strip().lower() or 'acme'
+    tls = TLS_ALIASES.get(tls, tls)
     if tls == 'http':
         print('HTTP does not encrypt traffic. Use only on a trusted network or through a secure tunnel.')
     email = input('Owner email (also ACME contact when enabled): ').strip()
@@ -171,8 +184,8 @@ def filesystem(path):
     return {'uuid': item['uuid'], 'device': item['maj:min'], 'mount': item['target']}
 
 
-def prepare(config):
-    # Validate all targets before creating or changing any data directory.
+def inspect_targets(config):
+    """Validate data targets without creating or changing anything."""
     for field in ('storage', 'database', 'previews'):
         path = valid_path(config[field])
         if path.exists() and (not path.is_dir() or any(path.iterdir())):
@@ -184,6 +197,31 @@ def prepare(config):
         mounts[field] = filesystem(existing)
     if config['media_indexing'] and mounts['storage']['uuid'] == mounts['previews']['uuid']:
         raise ValueError('media indexing needs different storage and preview filesystems')
+    return mounts
+
+
+def preflight(config, prebuilt):
+    """Every non-destructive host check the installer needs before writing files."""
+    if (INSTALL / 'state.json').exists() or (INSTALL.exists() and any(INSTALL.iterdir())):
+        raise ValueError(f'{INSTALL} already contains an installation')
+    memory_kib = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
+                          if line.startswith('MemTotal:')))
+    minimum = 2 if (config['images'] or prebuilt) else 4
+    if memory_kib < minimum * 1024**2 * 0.95:
+        raise ValueError(f'at least {minimum} GiB RAM required for this installation mode')
+    for port in (80,) if config['tls'] == 'http' else (80, 443):
+        with socket.socket() as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(('0.0.0.0', port))
+            except OSError:
+                raise ValueError(f'TCP port {port} is already in use; stop the other web server first') from None
+    return inspect_targets(config)
+
+
+def prepare(config):
+    # Validate all targets before creating or changing any data directory.
+    mounts = inspect_targets(config)
     for field in ('storage', 'database', 'previews'):
         path = Path(config[field])
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -354,24 +392,26 @@ def install(args):
     else:
         if INSTALL.exists() and any(INSTALL.iterdir()):
             raise ValueError(f'{INSTALL} is nonempty without installer state; refusing to overwrite')
-        config = validate(json.loads(Path(args.config).read_text())) if args.config else ask(args.prebuilt)
+        if args.config:
+            config = validate(json.loads(Path(args.config).read_text()))
+        elif getattr(args, 'wizard', None):
+            args.wizard.submitted.wait()
+            config = dict(args.wizard.config)  # the wizard keeps its copy to show the password
+        else:
+            config = ask(args.prebuilt)
         if args.prebuilt:
             if not config['images']:
                 config['images'] = prebuilt_images(config, args.image_prefix, args.image_tag)
             config = validate(config)
-        memory_kib = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
-                              if line.startswith('MemTotal:')))
-        minimum = 2 if config['images'] else 4
-        if memory_kib < minimum * 1024**2 * 0.95:
-            raise ValueError(f'at least {minimum} GiB RAM required for this installation mode')
-        required_ports = (80,) if config['tls'] == 'http' else (80, 443)
-        for port in required_ports:
-            with socket.socket() as sock:
-                sock.bind(('0.0.0.0', port))
+        progress('Checking memory, ports and data disks')
+        preflight(config, args.prebuilt)
+        progress('Creating data directories')
         mounts = prepare(config)
         INSTALL.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(INSTALL, 0o700)
+        progress('Downloading container images' if config['images'] else 'Building container images (this can take a while)')
         images = build_images(config, SOURCE)
+        progress('Writing private configuration and secrets')
         values = {
             'POSTGRES_PASSWORD': secrets.token_hex(32), 'MEDIA_INDEXER_PASSWORD': secrets.token_hex(32),
             'POSTGRES_DATA_SSD': config['database'], 'STORAGE_DATA_HDD': config['storage'],
@@ -390,6 +430,7 @@ def install(args):
         del config['owner_password']
         state = {'config': config, 'mounts': mounts, 'env': values}
         save(state)
+    progress('Generating service and reverse-proxy configuration')
     if not (INSTALL / 'compose.yaml').exists():
         model = json.loads(run('docker', 'compose', '--env-file', INSTALL / '.env', '-f', SOURCE / 'compose.yaml',
                                'config', '--no-interpolate', '--no-path-resolution', '--format', 'json', capture=True))
@@ -501,6 +542,9 @@ def main():
     setup = sub.add_parser('install')
     setup.add_argument('--config', help='private JSON configuration; omit for wizard')
     setup.add_argument('--prepare-only', action='store_true', help='prepare files/images without starting or enabling service (recovery)')
+    setup.add_argument('--cli', action='store_true', help='answer setup questions in the terminal instead of the web wizard')
+    setup.add_argument('--web-listen', default='127.0.0.1', help='wizard address (default loopback; use an SSH tunnel)')
+    setup.add_argument('--web-port', type=int, default=8090)
     setup.add_argument('--prebuilt', action='store_true', help='download CI-published images; never build locally')
     setup.add_argument('--image-prefix', default='ghcr.io/vantanminh/my-drive')
     setup.add_argument('--image-tag', default='latest')
@@ -527,14 +571,38 @@ def main():
         if args.command not in {'logs', 'status'}:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.command == 'install':
-            state = install(args)
+            args.wizard = None
+            fresh = not (INSTALL / 'state.json').exists()
+            if fresh and not args.config and not args.cli:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                import setup_web
+                global _progress_hook
+                args.wizard = setup_web.serve(sys.modules[__name__], args.prebuilt, args.web_listen, args.web_port)
+                _progress_hook = args.wizard.progress
+            try:
+                state = install(args)
+                if not args.prepare_only:
+                    # systemd starts a separate process, which must acquire this same lock.
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    progress('Starting My Drive and waiting until it is ready')
+                    run('systemctl', 'restart', 'my-drive.service')
+            except BaseException as error:
+                if args.wizard:
+                    args.wizard.failed(str(error) if isinstance(error, ValueError) else
+                                       f'{type(error).__name__}: inspect "sudo my-drive logs" and re-run the installer.')
+                    if not isinstance(error, KeyboardInterrupt):
+                        print('Installation failed; details are shown in the browser.', file=sys.stderr)
+                        setup_web.wait_and_close(args.wizard, 600)
+                raise
             if args.prepare_only:
                 print('Prepared without starting/enabling the service. Complete recovery, then systemctl enable --now my-drive.')
                 return
-            # systemd starts a separate process, which must acquire this same lock.
-            fcntl.flock(lock, fcntl.LOCK_UN)
-            run('systemctl', 'restart', 'my-drive.service')
             scheme = 'http' if state['config']['tls'] == 'http' else 'https'
+            if args.wizard:
+                password = args.wizard.config.get('owner_password', '')
+                args.wizard.done(f"{scheme}://{state['config']['host']}", password)
+                print('Installed. Close the wizard page (or wait 15 minutes) to finish.')
+                setup_web.wait_and_close(args.wizard)
             print(f"Installed: {scheme}://{state['config']['host']}\nCredentials: /opt/my-drive/owner-credentials.txt (root only). Copy securely, then delete this file.")
             return
         state = json.loads((INSTALL / 'state.json').read_text())

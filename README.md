@@ -13,7 +13,8 @@ needed; it downloads deployment files and pulls images built by GitHub CI/CD:
 sudo bash -c 'set -e; apt-get update; apt-get install -y ca-certificates curl; curl -fsSL https://raw.githubusercontent.com/vantanminh/my-drive/master/scripts/bootstrap.sh | bash'
 ```
 
-The wizard asks for your domain/IP, access mode, owner email/password and storage
+The installer opens a local web setup wizard (reach it through an SSH tunnel on a
+remote VPS, or pass `--cli` for terminal prompts). The wizard asks for your domain/IP, access mode, owner email/password and storage
 settings. It installs Docker, generates private credentials, configures the
 reverse proxy and systemd, and starts the drive. For public HTTPS, point your
 domain at the VPS and allow TCP 80/443. Use internal TLS for IP-only access.

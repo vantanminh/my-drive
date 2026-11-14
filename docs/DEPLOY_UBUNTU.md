@@ -36,7 +36,28 @@ Bootstrap tải Compose và scripts triển khai vào thư mục tạm, cài Doc
 chạy wizard và pull app/document-preview/indexer từ GHCR. Không tải source
 Rust, frontend hoặc Dockerfile. Thư mục tạm được xóa khi kết thúc; file runtime
 được giữ trong `/opt/my-drive`. Image sau pull được ghim theo digest.
-Wizard đọc trực tiếp terminal nên vẫn dùng được dù bootstrap chạy qua pipe.
+
+### Wizard cài đặt trên trình duyệt
+
+Mặc định bộ cài mở **trang cài đặt web** (giống Synology) thay vì hỏi từng dòng
+trong terminal. Terminal in ra một link dạng
+`http://127.0.0.1:8090/?token=...`. Trang chỉ lắng nghe trên loopback và cần
+token dùng một lần, nên với VPS ở xa hãy mở SSH tunnel từ máy của bạn trước:
+
+```bash
+ssh -L 8090:127.0.0.1:8090 user@your-server
+```
+
+Sau đó mở link trên trình duyệt máy bạn. Wizard kiểm tra RAM, Docker, cổng
+80/443, liệt kê ổ đĩa ext4/xfs/btrfs còn trống, rồi đi qua các bước: mạng & kiểu
+kết nối, tài khoản quản trị, thư mục lưu trữ, giới hạn, xác nhận. Mọi cấu hình
+được kiểm tra lại phía server (kể cả thư mục trống, ổ khác nhau khi bật lập chỉ
+mục) **trước** khi tạo bất kỳ file nào. Trang hiển thị tiến trình cài và mật
+khẩu được tạo khi xong. Tùy chọn:
+
+- `--cli`: dùng wizard hỏi trong terminal như trước.
+- `--web-port 8091`: đổi cổng wizard.
+- `--web-listen 0.0.0.0`: mở wizard cho LAN (không mã hóa; chỉ dùng mạng tin cậy).
 
 GitHub CI cần publish đủ các image và package phải là **Public** để người cài
 không cần tài khoản GitHub. Repository public không tự làm package public.
