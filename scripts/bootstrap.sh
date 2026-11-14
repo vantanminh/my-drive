@@ -20,7 +20,12 @@ interactive=1
 for argument in "$@"; do
     case "$argument" in --config|--config=*) interactive=0 ;; esac
 done
-if (( interactive )); then
+terminal=0
+for argument in "$@"; do
+    [[ "$argument" == --cli ]] && terminal=1
+done
+# The default wizard is a local web page; only --cli needs the terminal.
+if (( interactive && terminal )); then
     # stdin may be the curl|bash pipe; reserve the terminal for the wizard.
     if ! { exec 3</dev/tty; } 2>/dev/null; then
         echo 'No terminal available. Pass --config /path/to/private-config.json.' >&2
@@ -34,6 +39,7 @@ workdir="$(mktemp -d /tmp/my-drive-bootstrap.XXXXXXXX)"
 trap 'rm -rf -- "$workdir"' EXIT
 mkdir -p "$workdir/scripts" "$workdir/docker"
 files=(compose.yaml docker/setup-indexer-role.sh scripts/install.sh scripts/vps.py
+       scripts/setup_web.py scripts/setup_wizard.html
        scripts/backup.sh scripts/backup-common.sh scripts/backup_compose.py
        scripts/backup_bundle.py scripts/storage_archive.py scripts/restore.sh scripts/verify-backup.sh)
 for file in "${files[@]}"; do
@@ -41,7 +47,7 @@ for file in "${files[@]}"; do
         "https://raw.githubusercontent.com/$repository/$ref/$file" --output "$workdir/$file"
 done
 echo "Installing published images from $image_prefix:$image_tag (no VPS build)."
-if (( interactive )); then
+if (( interactive && terminal )); then
     bash "$workdir/scripts/install.sh" --prebuilt --image-prefix "$image_prefix" --image-tag "$image_tag" "$@" <&3
 else
     bash "$workdir/scripts/install.sh" --prebuilt --image-prefix "$image_prefix" --image-tag "$image_tag" "$@"

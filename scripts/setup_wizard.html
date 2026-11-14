@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cài đặt My Drive</title>
+<style>
+:root{--bg:#eef2f7;--card:#fff;--text:#1d2633;--muted:#677589;--line:#d9e0ea;--accent:#1f6feb;--accent-soft:#e7f0ff;--ok:#1a7f37;--warn:#b35900;--bad:#c62828;--field:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#0f141b;--card:#171e28;--text:#e6edf3;--muted:#93a1b3;--line:#2b3644;--accent:#4c8dff;--accent-soft:#1b2a44;--ok:#3fb950;--warn:#e3a33b;--bad:#ff6b6b;--field:#0f141b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:980px;margin:32px auto;padding:0 16px}
+.shell{display:grid;grid-template-columns:240px 1fr;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.08);min-height:560px}
+aside{background:linear-gradient(160deg,#1f6feb,#0b3d91);color:#fff;padding:28px 20px}
+aside h1{font-size:20px;margin:0 0 4px}aside p{margin:0 0 24px;opacity:.8;font-size:13px}
+ol.steps{list-style:none;margin:0;padding:0}
+ol.steps li{display:flex;gap:10px;align-items:center;padding:9px 0;opacity:.6;font-size:14px}
+ol.steps li.active{opacity:1;font-weight:600}ol.steps li.done{opacity:.9}
+ol.steps b{width:24px;height:24px;border-radius:50%;border:2px solid #fff;display:grid;place-items:center;font-size:12px;flex:none}
+ol.steps li.done b{background:#fff;color:#0b3d91}
+main{padding:28px 32px;display:flex;flex-direction:column}
+section{display:none;flex:1}section.on{display:block}
+h2{margin:0 0 4px;font-size:22px}.sub{color:var(--muted);margin:0 0 22px}
+label{display:block;font-weight:600;margin:14px 0 6px;font-size:14px}
+.hint{color:var(--muted);font-size:13px;font-weight:400;margin-top:4px}
+input[type=text],input[type=email],input[type=password],input[type=number]{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--field);color:var(--text);font:inherit}
+input:focus{outline:2px solid var(--accent);border-color:transparent}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
+.choices{display:grid;gap:10px}
+.choice{display:flex;gap:12px;border:1px solid var(--line);border-radius:10px;padding:12px 14px;cursor:pointer;align-items:flex-start}
+.choice:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.choice input{margin-top:4px}.choice strong{display:block}.choice span{color:var(--muted);font-size:13px}
+.checks{display:grid;gap:8px;margin-top:6px}
+.check{display:flex;justify-content:space-between;gap:12px;border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.pill{font-size:12px;font-weight:700;padding:2px 10px;border-radius:99px;white-space:nowrap;align-self:center}
+.pill.ok{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent)}
+.pill.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
+.pill.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:4px;min-width:80px}.bar i{display:block;height:100%;background:var(--accent)}
+.alert{border-radius:10px;padding:10px 14px;margin:14px 0 0;font-size:14px;display:none}
+.alert.show{display:block}.alert.err{background:color-mix(in srgb,var(--bad) 12%,transparent);color:var(--bad)}
+.alert.warn{background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn)}
+.nav{display:flex;justify-content:space-between;gap:12px;margin-top:26px;padding-top:18px;border-top:1px solid var(--line)}
+button{font:inherit;font-weight:600;border-radius:8px;padding:10px 20px;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--text)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button:disabled{opacity:.5;cursor:not-allowed}
+.toggle{display:flex;gap:10px;align-items:center;margin-top:16px;font-weight:600}
+.summary dt{color:var(--muted);font-size:13px}.summary dd{margin:0 0 10px;font-weight:600;word-break:break-all}
+.summary{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
+ul.progress{list-style:none;padding:0;margin:0}ul.progress li{display:flex;gap:10px;align-items:center;padding:8px 0}
+.dot{width:18px;height:18px;border-radius:50%;border:2px solid var(--line);flex:none}
+.running .dot{border-color:var(--accent);border-top-color:transparent;animation:spin 1s linear infinite}
+.done .dot{background:var(--ok);border-color:var(--ok)}.failed .dot{background:var(--bad);border-color:var(--bad)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.secret{font-family:ui-monospace,Menlo,Consolas,monospace;background:var(--bg);padding:10px 12px;border-radius:8px;word-break:break-all}
+a{color:var(--accent)}
+@media (max-width:760px){.shell{grid-template-columns:1fr}aside{padding:18px 16px}ol.steps{display:flex;gap:6px;overflow-x:auto}ol.steps li span{display:none}main{padding:20px 16px}.grid2,.summary{grid-template-columns:1fr}.wrap{margin:12px auto}}
+</style>
+</head>
+<body>
+<div class="wrap"><div class="shell">
+<aside>
+  <h1>My Drive</h1><p>Trình cài đặt lần đầu</p>
+  <ol class="steps" id="steps">
+    <li><b>1</b><span>Kiểm tra hệ thống</span></li>
+    <li><b>2</b><span>Mạng &amp; truy cập</span></li>
+    <li><b>3</b><span>Tài khoản quản trị</span></li>
+    <li><b>4</b><span>Ổ lưu trữ</span></li>
+    <li><b>5</b><span>Giới hạn</span></li>
+    <li><b>6</b><span>Xác nhận</span></li>
+    <li><b>7</b><span>Cài đặt</span></li>
+  </ol>
+</aside>
+<main>
+  <section data-step="0">
+    <h2>Chào mừng</h2>
+    <p class="sub">Trình cài đặt kiểm tra máy chủ trước khi bắt đầu. Cấu hình chỉ lưu trên máy chủ này.</p>
+    <div class="checks" id="syschecks"><div class="check">Đang kiểm tra…</div></div>
+    <h3 style="margin:22px 0 6px;font-size:16px">Ổ đĩa phát hiện được</h3>
+    <div style="overflow-x:auto"><table id="disks"><thead><tr><th>Điểm gắn</th><th>Thiết bị</th><th>FS</th><th>Còn trống</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section data-step="1">
+    <h2>Mạng &amp; truy cập</h2>
+    <p class="sub">Tên miền (hoặc IPv4) mà trình duyệt dùng để mở My Drive.</p>
+    <label for="host">Tên miền hoặc địa chỉ IPv4</label>
+    <input type="text" id="host" placeholder="drive.example.com" autocomplete="off" spellcheck="false">
+    <div class="hint" id="hostHint">Với HTTPS công khai, trỏ DNS của tên miền về máy chủ và mở cổng TCP 80/443.</div>
+    <label>Kiểu kết nối</label>
+    <div class="choices">
+      <label class="choice"><input type="radio" name="tls" value="acme" checked><div><strong>HTTPS công khai (Let's Encrypt)</strong><span>Khuyến nghị cho tên miền thật. Chứng chỉ được cấp và gia hạn tự động.</span></div></label>
+      <label class="choice"><input type="radio" name="tls" value="internal"><div><strong>HTTPS nội bộ (tự ký)</strong><span>Dùng khi chỉ có địa chỉ IP hoặc mạng nội bộ. Trình duyệt sẽ cảnh báo chứng chỉ.</span></div></label>
+      <label class="choice"><input type="radio" name="tls" value="http"><div><strong>Chỉ HTTP (không mã hóa)</strong><span>Mật khẩu và cookie đi dạng rõ. Chỉ dùng trong mạng tin cậy hoặc sau tunnel bảo mật (VD: Cloudflare Tunnel).</span></div></label>
+    </div>
+    <div class="alert warn" id="httpWarn">Lưu lượng sẽ không được mã hóa. Hãy chắc chắn bạn đặt My Drive sau một tunnel/proxy có HTTPS hoặc chỉ dùng trong LAN.</div>
+  </section>
+
+  <section data-step="2">
+    <h2>Tài khoản quản trị</h2>
+    <p class="sub">Tài khoản chủ sở hữu đầu tiên. Email cũng dùng làm liên hệ Let's Encrypt.</p>
+    <label for="email">Email</label>
+    <input type="email" id="email" placeholder="you@example.com" autocomplete="username">
+    <div class="grid2">
+      <div><label for="pw">Mật khẩu</label><input type="password" id="pw" autocomplete="new-password"></div>
+      <div><label for="pw2">Nhập lại mật khẩu</label><input type="password" id="pw2" autocomplete="new-password"></div>
+    </div>
+    <div class="hint">Tối thiểu 16 ký tự. Để trống cả hai ô để tạo mật khẩu ngẫu nhiên mạnh — mật khẩu sẽ hiển thị khi cài xong.</div>
+  </section>
+
+  <section data-step="3">
+    <h2>Ổ lưu trữ</h2>
+    <p class="sub">Thư mục phải trống hoặc chưa tồn tại, nằm trên ổ ext4/xfs/btrfs. Nên đặt dữ liệu lên HDD, database và preview lên SSD.</p>
+    <label for="storage">Thư mục dữ liệu file (HDD)</label><input type="text" id="storage" spellcheck="false"><div class="hint" data-fs="storage"></div>
+    <label for="database">Thư mục database PostgreSQL (SSD)</label><input type="text" id="database" spellcheck="false"><div class="hint" data-fs="database"></div>
+    <label for="previews">Thư mục ảnh xem trước / chỉ mục (SSD)</label><input type="text" id="previews" spellcheck="false"><div class="hint" data-fs="previews"></div>
+    <label class="toggle"><input type="checkbox" id="media"> Bật lập chỉ mục ảnh/video/khuôn mặt</label>
+    <div class="hint">Yêu cầu thư mục preview nằm trên <b>ổ khác</b> với thư mục dữ liệu.</div>
+    <div class="alert warn" id="mediaWarn"></div>
+  </section>
+
+  <section data-step="4">
+    <h2>Giới hạn</h2>
+    <p class="sub">Có thể giữ mặc định nếu chưa chắc.</p>
+    <div class="grid2">
+      <div><label for="quota_gib">Hạn mức chủ sở hữu (GiB)</label><input type="number" min="1" id="quota_gib"></div>
+      <div><label for="max_file_gib">Kích thước file tối đa (GiB)</label><input type="number" min="1" id="max_file_gib"></div>
+      <div><label for="min_free_gib">Dung lượng trống tối thiểu giữ lại (GiB)</label><input type="number" min="1" id="min_free_gib"></div>
+      <div><label for="trash_days">Giữ thùng rác (ngày)</label><input type="number" min="1" id="trash_days"></div>
+    </div>
+  </section>
+
+  <section data-step="5">
+    <h2>Xác nhận</h2>
+    <p class="sub">Kiểm tra lại cấu hình. Bấm <b>Cài đặt</b> để bắt đầu; thao tác này tạo thư mục và tải image.</p>
+    <dl class="summary" id="summary"></dl>
+  </section>
+
+  <section data-step="6">
+    <h2 id="runTitle">Đang cài đặt…</h2>
+    <p class="sub" id="runSub">Không đóng trang này. Quá trình tải image có thể mất vài phút.</p>
+    <ul class="progress" id="progress"></ul>
+    <div id="result"></div>
+  </section>
+
+  <div class="alert err" id="err"></div>
+  <div class="nav" id="nav">
+    <button id="back">Quay lại</button>
+    <button class="primary" id="next">Tiếp tục</button>
+  </div>
+</main>
+</div></div>
+<script>
+const $ = id => document.getElementById(id);
+const sections = [...document.querySelectorAll('section')];
+const stepItems = [...document.querySelectorAll('#steps li')];
+let step = 0, sys = null;
+
+function gib(bytes){ return (bytes / 1024 ** 3).toFixed(bytes > 100 * 1024 ** 3 ? 0 : 1) + ' GiB'; }
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function tls(){ return document.querySelector('input[name=tls]:checked').value; }
+function showErr(msg){ const e = $('err'); e.textContent = msg || ''; e.classList.toggle('show', !!msg); }
+
+function show(n){
+  step = n;
+  sections.forEach((s, i) => s.classList.toggle('on', i === n));
+  stepItems.forEach((li, i) => { li.classList.toggle('active', i === n); li.classList.toggle('done', i < n); });
+  $('back').style.visibility = n === 0 || n >= 6 ? 'hidden' : 'visible';
+  $('nav').style.display = n >= 6 ? 'none' : 'flex';
+  $('next').textContent = n === 5 ? 'Cài đặt' : 'Tiếp tục';
+  showErr('');
+  if (n === 3) fsHints();
+  if (n === 5) summary();
+}
+
+async function api(path, body){
+  const r = await fetch(path, body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  let data = {}; try { data = await r.json(); } catch(_) {}
+  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+
+function fsFor(path){
+  if (!sys) return null;
+  let best = null;
+  for (const fs of sys.filesystems) {
+    const m = fs.mount === '/' ? '/' : fs.mount + '/';
+    if ((path + '/').startsWith(m) && (!best || fs.mount.length > best.mount.length)) best = fs;
+  }
+  return best;
+}
+
+function fsHints(){
+  const ids = ['storage','database','previews'];
+  for (const id of ids) {
+    const fs = fsFor($(id).value.trim()), el = document.querySelector(`[data-fs=${id}]`);
+    el.textContent = fs ? `Nằm trên ${fs.mount} (${fs.source}, ${fs.fstype}) — còn trống ${gib(fs.avail)}` : 'Không xác định được ổ chứa thư mục này.';
+  }
+  const a = fsFor($('storage').value.trim()), b = fsFor($('previews').value.trim()), w = $('mediaWarn');
+  const same = a && b && a.uuid === b.uuid;
+  w.textContent = same ? 'Dữ liệu và preview đang cùng một ổ — không thể bật lập chỉ mục media. Chọn thư mục preview trên ổ khác hoặc tắt tùy chọn.' : '';
+  w.classList.toggle('show', $('media').checked && same);
+}
+
+async function loadSystem(){
+  try { sys = await api('/api/system'); } catch (e) { $('syschecks').innerHTML = `<div class="check">${esc(e.message)}</div>`; return; }
+  const d = sys.defaults;
+  for (const k of ['storage','database','previews','quota_gib','max_file_gib','min_free_gib','trash_days']) if (!$(k).value) $(k).value = d[k];
+  const need = sys.prebuilt ? 2 : 4;
+  const rows = [
+    ['Bộ nhớ RAM', `${sys.memory_gib} GiB (cần ≥ ${need} GiB)`, sys.memory_gib >= need * 0.95 ? 'ok' : 'bad'],
+    ['Docker', sys.docker ? 'Đã cài' : 'Chưa có', sys.docker ? 'ok' : 'bad'],
+    ['Cổng 80', sys.ports['80'] ? 'Trống' : 'Đang bị chiếm', sys.ports['80'] ? 'ok' : 'bad'],
+    ['Cổng 443', sys.ports['443'] ? 'Trống' : 'Đang bị chiếm (chỉ cần cho HTTPS)', sys.ports['443'] ? 'ok' : 'warn'],
+    ['Image', sys.prebuilt ? 'Tải image dựng sẵn từ CI' : 'Build từ mã nguồn trên máy này', 'ok'],
+  ];
+  $('syschecks').innerHTML = rows.map(([a,b,c]) => `<div class="check"><div><strong>${a}</strong><div class="hint">${esc(b)}</div></div><span class="pill ${c}">${c==='ok'?'OK':c==='warn'?'Lưu ý':'Lỗi'}</span></div>`).join('');
+  $('disks').querySelector('tbody').innerHTML = sys.filesystems.map(fs => {
+    const used = fs.size ? 100 - fs.avail / fs.size * 100 : 0;
+    return `<tr><td>${esc(fs.mount)}</td><td>${esc(fs.source)}</td><td>${esc(fs.fstype)}</td><td>${gib(fs.avail)} / ${gib(fs.size)}<div class="bar"><i style="width:${used.toFixed(0)}%"></i></div></td></tr>`;
+  }).join('') || '<tr><td colspan="4">Không tìm thấy ổ ext4/xfs/btrfs.</td></tr>';
+  if (!$('host').value && sys.address) $('host').placeholder = `drive.example.com hoặc ${sys.address}`;
+}
+
+function config(){
+  const num = id => Number($(id).value);
+  return {host:$('host').value.trim().toLowerCase(), tls:tls(), email:$('email').value.trim(), owner_password:$('pw').value,
+          storage:$('storage').value.trim(), database:$('database').value.trim(), previews:$('previews').value.trim(),
+          media_indexing:$('media').checked, quota_gib:num('quota_gib'), max_file_gib:num('max_file_gib'),
+          min_free_gib:num('min_free_gib'), trash_days:num('trash_days')};
+}
+
+function localCheck(n){
+  const c = config();
+  if (n === 1) {
+    if (!c.host) return 'Nhập tên miền hoặc IPv4.';
+    if (/^https?:\/\//.test(c.host) || c.host.includes('/')) return 'Chỉ nhập tên miền, không kèm http:// hay đường dẫn.';
+    if (c.tls === 'acme' && /^\d+\.\d+\.\d+\.\d+$/.test(c.host)) return "Let's Encrypt không cấp chứng chỉ cho địa chỉ IP. Chọn HTTPS nội bộ hoặc HTTP.";
+    if (c.tls !== 'http' && sys && !sys.ports['443']) return 'Cổng 443 đang bị chiếm; giải phóng nó hoặc chọn chế độ HTTP.';
+  }
+  if (n === 2) {
+    if (!/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(c.email)) return 'Email không hợp lệ.';
+    if (c.owner_password !== $('pw2').value) return 'Hai mật khẩu không khớp.';
+    if (c.owner_password && new TextEncoder().encode(c.owner_password).length < 16) return 'Mật khẩu cần ít nhất 16 ký tự (hoặc để trống để tự tạo).';
+  }
+  if (n === 4) for (const k of ['quota_gib','max_file_gib','min_free_gib','trash_days']) if (!Number.isInteger(c[k]) || c[k] < 1) return 'Các giới hạn phải là số nguyên dương.';
+  return '';
+}
+
+function summary(){
+  const c = config(), mode = {acme:"HTTPS (Let's Encrypt)", internal:'HTTPS nội bộ (tự ký)', http:'HTTP không mã hóa'}[c.tls];
+  const items = [['Địa chỉ', `${c.tls === 'http' ? 'http' : 'https'}://${c.host}`], ['Kết nối', mode], ['Email quản trị', c.email],
+    ['Mật khẩu', c.owner_password ? 'Do bạn đặt' : 'Tự tạo ngẫu nhiên'], ['Dữ liệu file', c.storage], ['Database', c.database],
+    ['Preview / chỉ mục', c.previews], ['Lập chỉ mục media', c.media_indexing ? 'Bật' : 'Tắt'],
+    ['Hạn mức', c.quota_gib + ' GiB'], ['File tối đa', c.max_file_gib + ' GiB'], ['Giữ trống tối thiểu', c.min_free_gib + ' GiB'], ['Thùng rác', c.trash_days + ' ngày']];
+  $('summary').innerHTML = items.map(([k,v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join('');
+}
+
+async function next(){
+  showErr('');
+  const local = localCheck(step);
+  if (local) return showErr(local);
+  if (step === 0 && sys && !sys.docker) return showErr('Docker chưa sẵn sàng trên máy chủ.');
+  const btn = $('next'); btn.disabled = true;
+  try {
+    if (step === 3 || step === 4) await api('/api/check', {config: config()});
+    if (step === 5) { await api('/api/install', {config: config()}); show(6); poll(); return; }
+    show(step + 1);
+  } catch (e) { showErr(e.message); }
+  finally { btn.disabled = false; }
+}
+
+async function poll(){
+  let s;
+  try { s = await api('/api/status'); } catch (_) { return setTimeout(poll, 2000); }
+  $('progress').innerHTML = s.steps.map(x => `<li class="${x.state}"><span class="dot"></span>${esc(x.text)}</li>`).join('');
+  if (s.phase === 'done') {
+    stepItems[6].classList.add('done');
+    $('runTitle').textContent = 'Cài đặt hoàn tất';
+    $('runSub').textContent = 'My Drive đã chạy và sẽ tự khởi động cùng máy chủ.';
+    $('result').innerHTML = `<p>Mở: <a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a></p>
+      ${s.password ? `<label>Mật khẩu quản trị — lưu lại ngay, trang này sẽ không hiện lại</label><div class="secret">${esc(s.password)}</div>` : ''}
+      <p class="hint">Thông tin đăng nhập cũng nằm ở <code>/opt/my-drive/owner-credentials.txt</code> (chỉ root đọc được). Sao chép an toàn rồi xóa file này.</p>
+      <div class="nav"><span></span><button class="primary" id="finish">Đóng trình cài đặt</button></div>`;
+    $('finish').onclick = async () => { try { await api('/api/finish', {}); } catch (_) {} $('result').innerHTML = '<p>Trình cài đặt đã đóng. Bạn có thể đóng tab này.</p>'; };
+    return;
+  }
+  if (s.phase === 'failed') {
+    $('runTitle').textContent = 'Cài đặt thất bại';
+    $('runSub').textContent = 'Không có mật khẩu hay dữ liệu nào bị xóa.';
+    $('result').innerHTML = `<div class="alert err show">${esc(s.error)}</div><p class="hint">Sửa lỗi rồi chạy lại lệnh cài đặt trên máy chủ. Xem log: <code>sudo my-drive logs</code>.</p>`;
+    return;
+  }
+  setTimeout(poll, 1500);
+}
+
+$('next').onclick = next;
+$('back').onclick = () => show(Math.max(0, step - 1));
+document.querySelectorAll('input[name=tls]').forEach(r => r.onchange = () => $('httpWarn').classList.toggle('show', tls() === 'http'));
+['storage','previews','database'].forEach(id => $(id).addEventListener('input', fsHints));
+$('media').onchange = fsHints;
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && step < 6 && e.target.tagName === 'INPUT') next(); });
+show(0); loadSystem();
+</script>
+</body>
+</html>

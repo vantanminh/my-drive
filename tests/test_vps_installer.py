@@ -38,6 +38,56 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 self.config(**fields)
 
+    def test_tls_aliases_from_wizard_answers(self):
+        self.assertEqual(self.config(tls='unencrypted')['tls'], 'http')
+        self.assertEqual(self.config(tls=' HTTPS ')['tls'], 'acme')
+        with self.assertRaises(ValueError):
+            self.config(tls='ftp')
+
+    def test_web_wizard_requires_token_loopback_host_and_json(self):
+        import http.client, sys
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import setup_web
+        preflight = patch.object(vps, 'preflight', return_value={})
+        preflight.start()
+        self.addCleanup(preflight.stop)
+        with patch('builtins.print'):
+            wizard = setup_web.serve(vps, True, '127.0.0.1', 0)
+        port = wizard.server.server_address[1]
+        try:
+            def request(method, path, body=None, headers=None):
+                conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+                conn.request(method, path, body, headers or {})
+                response = conn.getresponse()
+                return response.status, response.getheader('Set-Cookie'), response.read()
+            self.assertEqual(request('GET', '/')[0], 403)
+            self.assertEqual(request('GET', '/?token=wrong')[0], 403)
+            self.assertEqual(request('GET', '/api/system')[0], 403)
+            status, cookie, _ = request('GET', f'/?token={wizard.token}')
+            self.assertEqual(status, 303)
+            self.assertIn('HttpOnly', cookie)
+            auth = {'Cookie': cookie.split(';')[0]}
+            self.assertEqual(request('GET', '/', headers=auth)[0], 200)
+            self.assertEqual(request('GET', '/', headers=dict(auth, Host=f'evil.example:{port}'))[0], 421)
+            config = json.loads((ROOT / 'deploy/vps.example.json').read_text())
+            body = json.dumps({'config': dict(config, tls='http')})
+            self.assertEqual(request('POST', '/api/install', body, auth)[0], 415)
+            json_auth = dict(auth, **{'Content-Type': 'application/json'})
+            self.assertEqual(request('POST', '/api/install', body, dict(json_auth, Origin='http://evil.example'))[0], 403)
+            bad = json.dumps({'config': dict(config, host='https://x/')})
+            self.assertEqual(request('POST', '/api/check', bad, json_auth)[0], 400)
+            self.assertEqual(request('POST', '/api/install', body, json_auth)[0], 202)
+            self.assertTrue(wizard.submitted.is_set())
+            self.assertEqual(wizard.config['tls'], 'http')
+            self.assertGreaterEqual(len(wizard.config['owner_password']), 32)
+            self.assertEqual(request('POST', '/api/install', body, json_auth)[0], 400)
+            wizard.progress('step one')
+            wizard.done('http://drive.example.com', 'pw')
+            status, _, data = request('GET', '/api/status', headers=auth)
+            self.assertEqual(json.loads(data)['phase'], 'done')
+        finally:
+            wizard.server.shutdown()
+
     def test_internal_ip_and_generated_password(self):
         config = self.config(host='192.0.2.1', tls='internal')
         self.assertGreaterEqual(len(config['owner_password']), 32)
