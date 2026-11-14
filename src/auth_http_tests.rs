@@ -67,6 +67,7 @@ async fn browser_login_csrf_and_session_revocation_flow() {
         bootstrap_owner: None,
         cookie_secure: true,
         google_drive: None,
+        update_settings: Default::default(),
     };
     let storage = LocalStorage::initialize(&config).expect("initialize test storage");
     let app = api::router(AppState {
@@ -85,6 +86,7 @@ async fn browser_login_csrf_and_session_revocation_flow() {
             upload_session_ttl_seconds: 3600,
         },
         login_rate_limiter: LoginRateLimiter::default(),
+        update_settings: Default::default(),
     });
 
     let wrong_password = post_login(&app, &email, "wrong password").await;

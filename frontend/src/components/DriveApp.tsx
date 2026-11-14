@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
-  Activity, Check, ChevronDown, ChevronRight, CircleUserRound, ClipboardPaste, Cloud, CloudUpload, Copy, Download, Eye, File, FileImage, Film,
+  Activity, ArrowUpCircle, Check, ChevronDown, ChevronRight, CircleUserRound, ClipboardPaste, Cloud, CloudUpload, Copy, Download, Eye, File, FileImage, Film,
   FileSpreadsheet, FileText, Folder, FolderInput, FolderPlus, Gauge, HardDrive, Images, Info, LayoutGrid, List, LockKeyhole, LogOut, MoreHorizontal,
   Pause, Play, Presentation, RotateCcw, ScanFace, Scissors, Search, Share2, ShieldCheck, SlidersHorizontal, Trash2, Upload, Users, X
 } from 'lucide-react';
@@ -21,6 +21,7 @@ import StoragePage, { QuotaCard } from './StoragePage';
 import GoogleDrivePanel from './GoogleDrivePanel';
 import DeveloperPanel from './DeveloperPanel';
 import AccountSecurityPanel from './AccountSecurityPanel';
+import SystemUpdatePanel from './SystemUpdatePanel';
 
 type Props = {
   user: User;
@@ -576,6 +577,22 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const googleDriveOpen = panel === 'google-drive';
   const developerOpen = panel === 'developer';
   const securityOpen = panel === 'security';
+  const updatesOpen = panel === 'updates';
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [latestUpdateTag, setLatestUpdateTag] = useState<string | null>(null);
+  useEffect(() => {
+    if (user.role !== 'owner') return;
+    const controller = new AbortController();
+    api.updatesStatus(controller.signal)
+      .then((snapshot) => {
+        setUpdateAvailable(snapshot.latest.updateAvailable);
+        setLatestUpdateTag(snapshot.latest.tag);
+      })
+      .catch(() => {
+        // Ignore transient startup/network errors for passive badge checks.
+      });
+    return () => controller.abort();
+  }, [user.role]);
   const [shareRefresh, setShareRefresh] = useState(0);
   const [jobs, setJobs] = useState<UploadJob[]>(() =>
     readSavedUploads().map((saved) => ({
@@ -1624,6 +1641,13 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                   event.currentTarget.closest('details')?.removeAttribute('open');
                   showDrive({ folders: [], panel: 'accounts', query: '', fileId: null });
                 }}><Users size={15} /> Manage accounts</button>
+                <button onClick={(event) => {
+                  event.currentTarget.closest('details')?.removeAttribute('open');
+                  showDrive({ folders: [], panel: 'updates', query: '', fileId: null });
+                }}>
+                  <ArrowUpCircle size={15} /> System updates
+                  {updateAvailable ? <span className="update-menu-badge">{latestUpdateTag || 'New'}</span> : null}
+                </button>
                 <div className="menu-divider" />
               </>
             )}
@@ -1689,6 +1713,17 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             </div>
             {section === 'drive' && (
               <div className="heading-actions">
+                {user.role === 'owner' && updateAvailable ? (
+                  <button
+                    className="button button-secondary update-available-trigger"
+                    type="button"
+                    aria-expanded={updatesOpen}
+                    aria-controls={updatesOpen ? 'system-update-panel' : undefined}
+                    onClick={() => showDrive({ panel: updatesOpen ? null : 'updates' })}
+                  >
+                    <ArrowUpCircle size={16} /> <span>{latestUpdateTag ? `Update ${latestUpdateTag}` : 'Update available'}</span>
+                  </button>
+                ) : null}
                 {user.role === 'owner' ? (
                   <button
                     className="button button-secondary media-index-trigger"
@@ -1769,7 +1804,15 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           {section === 'drive' && googleDriveOpen ? <GoogleDrivePanel isOwner={user.role === 'owner'} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' ? (
             user.role === 'owner' ? (
-              accountAdminOpen ? (
+              updatesOpen ? (
+                <SystemUpdatePanel
+                  onClose={() => showDrive({ panel: null })}
+                  onStatusChange={(snapshot) => {
+                    setUpdateAvailable(snapshot.latest.updateAvailable);
+                    setLatestUpdateTag(snapshot.latest.tag);
+                  }}
+                />
+              ) : accountAdminOpen ? (
                 <AccountManagementPanel onClose={() => showDrive({ panel: null })} />
               ) : faceAdminOpen ? (
                 <FaceManagementPanel onClose={() => showDrive({ panel: null })} />

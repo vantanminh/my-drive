@@ -466,6 +466,7 @@ fn make_storage(storage_root: &Path) -> LocalStorage {
         bootstrap_owner: None,
         cookie_secure: false,
         google_drive: None,
+        update_settings: Default::default(),
     };
     LocalStorage::initialize(&config).expect("initialize test storage")
 }

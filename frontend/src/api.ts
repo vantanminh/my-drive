@@ -17,6 +17,8 @@ import type {
   SearchFilters,
   ServerStorage,
   ShareList,
+  SystemUpdateSettings,
+  SystemUpdatesStatus,
   UploadCreated,
   User
 } from './types';
@@ -622,6 +624,35 @@ export const api = {
     request<void>('/api/public/shares/' + encodeURIComponent(token) + '/unlock', {
       method: 'POST',
       json: { password }
+    }),
+  updatesStatus: (signal?: AbortSignal) =>
+    request<SystemUpdatesStatus>('/api/admin/updates', { signal, cache: 'no-store' }),
+  updateUpdateSettings: (settings: SystemUpdateSettings) =>
+    request<SystemUpdatesStatus>('/api/admin/updates/settings', {
+      method: 'PATCH',
+      json: settings,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  checkForUpdates: () =>
+    request<SystemUpdatesStatus>('/api/admin/updates/check', {
+      method: 'POST',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  configureUpdateBackup: (backupRoot: string, ageRecipient: string) =>
+    request<SystemUpdatesStatus>('/api/admin/updates/backup-config', {
+      method: 'POST',
+      json: { backupRoot, ageRecipient },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  applySystemUpdate: (targetTag?: string | null) =>
+    request<SystemUpdatesStatus>('/api/admin/updates/apply', {
+      method: 'POST',
+      json: { targetTag: targetTag ?? null },
+      csrf: true,
+      cache: 'no-store'
     })
 };
 

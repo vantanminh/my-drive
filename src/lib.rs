@@ -17,6 +17,7 @@ mod media_indexer;
 mod shares;
 mod storage;
 mod transfers;
+mod updates;
 
 #[cfg(test)]
 mod admin_accounts_http_tests;
@@ -32,6 +33,8 @@ mod media_admin_http_tests;
 mod share_http_tests;
 #[cfg(test)]
 mod transfer_http_tests;
+#[cfg(test)]
+mod updates_http_tests;
 
 use anyhow::Context;
 use tokio::net::TcpListener;
@@ -88,6 +91,7 @@ pub async fn run() -> anyhow::Result<()> {
     let google_drive = google_drive::initialize_settings(&storage, config.google_drive.clone())
         .context("initialize Google Drive encryption key")?;
     let document_preview_url = config.document_preview_url.clone();
+    let update_settings = config.update_settings.clone();
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server. Google OAuth material stays
     // only on the sync worker and request state when the feature is configured.
@@ -101,6 +105,7 @@ pub async fn run() -> anyhow::Result<()> {
         auth_settings,
         transfer_settings,
         login_rate_limiter: auth::LoginRateLimiter::default(),
+        update_settings: update_settings.clone(),
     };
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -112,11 +117,12 @@ pub async fn run() -> anyhow::Result<()> {
         maintenance_settings,
     ));
     tokio::spawn(google_drive::run_worker(
-        maintenance_pool,
+        maintenance_pool.clone(),
         maintenance_storage,
         google_drive,
         transfer_settings,
     ));
+    tokio::spawn(updates::run_worker(maintenance_pool, update_settings));
     info!(address = %bind_addr, "My Drive is listening");
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal())

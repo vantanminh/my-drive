@@ -2549,6 +2549,7 @@ mod tests {
             bootstrap_owner: None,
             cookie_secure: false,
             google_drive: None,
+            update_settings: Default::default(),
         })
         .expect("open HDD read-only");
         let previews = PreviewStorage::new(&MediaPreviewConfig {

@@ -883,6 +883,7 @@ async fn setup_with_google_storage(
         bootstrap_owner: None,
         cookie_secure: false,
         google_drive: None,
+        update_settings: Default::default(),
     };
     let local_storage = LocalStorage::initialize(&config).expect("initialize test storage");
     let google_drive = Some(
@@ -905,6 +906,7 @@ async fn setup_with_google_storage(
             upload_session_ttl_seconds: 3600,
         },
         login_rate_limiter: LoginRateLimiter::default(),
+        update_settings: Default::default(),
     });
     (pool, app, storage)
 }

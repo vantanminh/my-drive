@@ -377,6 +377,7 @@ fn make_app(pool: PgPool) -> (Router, tempfile::TempDir) {
         bootstrap_owner: None,
         cookie_secure: false,
         google_drive: None,
+        update_settings: Default::default(),
     };
     let storage = LocalStorage::initialize(&config).expect("initialize test storage");
     let app = api::router(AppState {
@@ -395,6 +396,7 @@ fn make_app(pool: PgPool) -> (Router, tempfile::TempDir) {
             upload_session_ttl_seconds: 3600,
         },
         login_rate_limiter: LoginRateLimiter::default(),
+        update_settings: Default::default(),
     });
     (app, temporary_storage)
 }

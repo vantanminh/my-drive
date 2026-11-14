@@ -498,6 +498,7 @@ mod tests {
             bootstrap_owner: None,
             cookie_secure: true,
             google_drive: None,
+            update_settings: Default::default(),
         }
     }
 

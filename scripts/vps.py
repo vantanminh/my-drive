@@ -19,9 +19,14 @@ import time
 
 SOURCE = Path(__file__).resolve().parents[1]
 INSTALL = Path('/opt/my-drive')
+UPDATER_RUN_DIR = Path('/run/my-drive-updater')
+UPDATER_SOCKET = UPDATER_RUN_DIR / 'updater.sock'
+UPDATER_STATUS_PATH = INSTALL / 'updater-status.json'
 PATH_RE = re.compile(r'/[A-Za-z0-9_./-]+')
 CLOUDFLARED_IMAGE = 'cloudflare/cloudflared:2026.10.0'
 IMAGE_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]+')
+RELEASE_TAG_RE = re.compile(r'^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$')
+AGE_RECIPIENT_RE = re.compile(r'^age1[a-z0-9]{10,124}$')
 TLS_ALIASES = {'https': 'acme', 'letsencrypt': 'acme', 'self-signed': 'internal',
                'unencrypted': 'http', 'none': 'http', 'plain': 'http',
                'tunnel': 'cloudflare', 'cloudflare-tunnel': 'cloudflare', 'cf': 'cloudflare'}
@@ -302,6 +307,30 @@ def make_compose(model, config):
     }
     if config['tls'] == 'cloudflare':
         services['cloudflared'] = cloudflared_service(config.get('cf_replicas', 2))
+    ensure_updater_compose(model)
+    return model
+
+
+def ensure_updater_runtime_dir():
+    UPDATER_RUN_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
+    os.chmod(UPDATER_RUN_DIR, 0o750)
+    os.chown(UPDATER_RUN_DIR, 0, 10001)
+
+
+def ensure_updater_compose(model):
+    app = model['services']['app']
+    env = app.setdefault('environment', {})
+    env.setdefault('MY_DRIVE_UPDATER_SOCKET', '/run/my-drive-updater/updater.sock')
+    env.setdefault('MY_DRIVE_IMAGE', '${MY_DRIVE_IMAGE:-ghcr.io/vantanminh/my-drive:latest}')
+    volumes = app.setdefault('volumes', [])
+    target = '/run/my-drive-updater'
+    if not any(isinstance(v, dict) and v.get('target') == target for v in volumes):
+        volumes.append({
+            'type': 'bind',
+            'source': str(UPDATER_RUN_DIR),
+            'target': target,
+            'bind': {'create_host_path': False},
+        })
     return model
 
 
@@ -393,6 +422,7 @@ def save(state):
 
 
 def start(state):
+    ensure_updater_runtime_dir()
     check(state)
     # Bootstrap privately before opening the public proxy.
     compose('up', '-d', 'app')
@@ -426,6 +456,31 @@ def start(state):
     port = 80 if scheme == 'http' else 443
     args += ['--resolve', f"{state['config']['host']}:{port}:127.0.0.1"]
     run(*args, f"{scheme}://{state['config']['host']}/health/ready")
+
+
+def install_updater_service(prepare_only=False, restart=True):
+    ensure_updater_runtime_dir()
+    atomic('/etc/systemd/system/my-drive-updater.service', '''[Unit]
+Description=My Drive host update agent
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/my-drive updater-serve
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+''', 0o644)
+    run('systemctl', 'daemon-reload')
+    if not prepare_only:
+        run('systemctl', 'enable', 'my-drive-updater.service')
+        if restart:
+            run('systemctl', 'restart', 'my-drive-updater.service')
 
 
 def install(args):
@@ -536,6 +591,7 @@ WantedBy=multi-user.target
             service['restart'] = 'on-failure:5'
     atomic(INSTALL / 'compose.yaml', json.dumps(model, indent=2) + '\n')
     run('systemctl', 'daemon-reload')
+    install_updater_service(prepare_only=args.prepare_only, restart=not args.prepare_only)
     if not args.prepare_only:
         run('systemctl', 'enable', 'my-drive.service')
     return state
@@ -598,20 +654,280 @@ def update_backup_options(state, args):
     root = args.backup_root or saved.get('root')
     recipient = args.recipient or saved.get('recipient')
     if not root or not recipient:
-        if not sys.stdin.isatty():
+        if getattr(args, 'non_interactive', False) or not sys.stdin.isatty():
             raise ValueError('first update needs --backup-root and --recipient, or an interactive terminal')
         print('Updates require an encrypted backup on a separate filesystem.')
         if not root:
             root = input('Backup destination (for example /mnt/backup/my-drive): ').strip()
         if not recipient:
             recipient = input('Age public recipient (age1...): ').strip()
+    return validate_backup_settings(root, recipient)
+
+
+def validate_backup_settings(root, recipient):
+    from pathlib import PurePosixPath
     if not root or not recipient:
         raise ValueError('backup destination and age public recipient are required')
-    if not isinstance(root, str) or any(char in root for char in '\r\n\x00') or not Path(root).is_absolute():
+    if not isinstance(root, str) or any(char in root for char in '\r\n\x00') or not root.strip().startswith('/') or root.strip() == '/':
         raise ValueError('backup destination must be an absolute path without control characters')
-    if not isinstance(recipient, str) or any(char in recipient for char in '\r\n\x00'):
-        raise ValueError('age public recipient contains a control character')
-    return argparse.Namespace(backup_root=root, recipient=recipient)
+    root = root.strip()
+    if '..' in PurePosixPath(root).parts:
+        raise ValueError('backup destination cannot contain parent traversal segments')
+    if not isinstance(recipient, str) or not AGE_RECIPIENT_RE.fullmatch(recipient.strip()):
+        raise ValueError('age public recipient must be a valid age1 public key')
+    return argparse.Namespace(backup_root=root, recipient=recipient.strip())
+
+
+def apply_release_tag(images, tag):
+    if not RELEASE_TAG_RE.fullmatch(tag):
+        raise ValueError('release tag must start with v and use semantic versioning (for example v0.1.2)')
+    updated = {}
+    for service, ref in images.items():
+        if not isinstance(ref, str) or '@sha256:' in ref:
+            raise ValueError(f'cannot override tag on pinned digest reference for {service}')
+        base = ref.rsplit(':', 1)[0] if ':' in ref.rsplit('/', 1)[-1] else ref
+        updated[service] = f'{base}:{tag}'
+    return updated
+
+
+def read_updater_status():
+    if UPDATER_STATUS_PATH.is_file():
+        try:
+            data = json.loads(UPDATER_STATUS_PATH.read_text())
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {
+        'status': 'idle',
+        'phase': None,
+        'message': None,
+        'targetTag': None,
+        'startedAt': None,
+        'finishedAt': None,
+        'updatedAt': None,
+    }
+
+
+def write_updater_status(payload):
+    from datetime import datetime, timezone
+    data = dict(payload)
+    data['updatedAt'] = datetime.now(timezone.utc).isoformat()
+    atomic(UPDATER_STATUS_PATH, json.dumps(data, indent=2) + '\n')
+    return data
+
+
+def _updater_status_payload(state):
+    status_data = read_updater_status()
+    saved_backup = state.get('update_backup', {}) if isinstance(state, dict) else {}
+    backup_root = saved_backup.get('root') if isinstance(saved_backup, dict) else None
+    backup_recipient = saved_backup.get('recipient') if isinstance(saved_backup, dict) else None
+    backup_configured = bool(backup_root and backup_recipient)
+    images = state.get('config', {}).get('images', {}) if isinstance(state, dict) else {}
+    return {
+        'connected': True,
+        'status': status_data.get('status', 'idle'),
+        'phase': status_data.get('phase'),
+        'message': status_data.get('message'),
+        'targetTag': status_data.get('targetTag'),
+        'backupConfigured': backup_configured,
+        'backupRootHint': backup_root,
+        'imageTrack': images.get('app') if isinstance(images, dict) else None,
+        'startedAt': status_data.get('startedAt'),
+        'finishedAt': status_data.get('finishedAt'),
+        'updatedAt': status_data.get('updatedAt'),
+    }
+
+
+def updater_serve():
+    import fcntl
+    import http.server
+    import socketserver
+    import threading
+    from datetime import datetime, timezone
+
+    ensure_updater_runtime_dir()
+    if UPDATER_SOCKET.exists():
+        UPDATER_SOCKET.unlink()
+
+    job_lock = threading.Lock()
+    current = read_updater_status()
+    if current.get('status') == 'running':
+        write_updater_status({
+            **current,
+            'status': 'failed',
+            'phase': 'interrupted',
+            'message': 'Updater service restarted while an update was in progress.',
+            'finishedAt': datetime.now(timezone.utc).isoformat(),
+        })
+
+    def load_install_state():
+        return json.loads((INSTALL / 'state.json').read_text())
+
+    def run_update_worker(target_tag):
+        started_at = datetime.now(timezone.utc).isoformat()
+        write_updater_status({
+            'status': 'running',
+            'phase': 'starting',
+            'message': f"Starting host update{f' to {target_tag}' if target_tag else ''}...",
+            'targetTag': target_tag,
+            'startedAt': started_at,
+            'finishedAt': None,
+        })
+        cmd = ['/usr/local/bin/my-drive', 'update', '--non-interactive']
+        if target_tag:
+            cmd += ['--tag', target_tag]
+        env = dict(os.environ, MY_DRIVE_UPDATER_SUBPROCESS='1')
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        last_line = None
+        phase = 'pulling'
+        for raw_line in iter(proc.stdout.readline, ''):
+            line = raw_line.strip()
+            if not line:
+                continue
+            last_line = line
+            lower = line.lower()
+            if 'phase:' in lower:
+                _, parsed_phase = line.split(':', 1)
+                phase = parsed_phase.strip().split(' ', 1)[0]
+            elif 'backup' in lower:
+                phase = 'backing_up'
+            elif 'restarting' in lower or 'starting my drive' in lower or 'waiting until' in lower:
+                phase = 'restarting'
+            elif 'already up to date' in lower or 'updated and verified' in lower:
+                phase = 'verifying'
+            write_updater_status({
+                'status': 'running',
+                'phase': phase,
+                'message': line[:400],
+                'targetTag': target_tag,
+                'startedAt': started_at,
+                'finishedAt': None,
+            })
+        rc = proc.wait()
+        finished_at = datetime.now(timezone.utc).isoformat()
+        if rc == 0:
+            write_updater_status({
+                'status': 'succeeded',
+                'phase': 'completed',
+                'message': (last_line or 'Updated and verified.')[:400],
+                'targetTag': target_tag,
+                'startedAt': started_at,
+                'finishedAt': finished_at,
+            })
+            # Reload unit cleanly after the HTTP status has been written if scripts changed.
+            subprocess.Popen(['systemd-run', '--quiet', '--on-active=3', 'systemctl', 'try-restart', 'my-drive-updater.service'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            write_updater_status({
+                'status': 'failed',
+                'phase': 'failed',
+                'message': (last_line or 'Update failed; inspect my-drive status/logs.')[:400],
+                'targetTag': target_tag,
+                'startedAt': started_at,
+                'finishedAt': finished_at,
+            })
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def address_string(self):
+            return 'unix-socket'
+
+        def log_message(self, format, *args):
+            return
+
+        def send_json(self, code, payload):
+            encoded = (json.dumps(payload) + '\n').encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(encoded)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def read_json_body(self):
+            length = int(self.headers.get('Content-Length') or '0')
+            if length > 65536:
+                raise ValueError('request body too large')
+            raw = self.rfile.read(length) if length > 0 else b'{}'
+            data = json.loads(raw.decode('utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('JSON object required')
+            return data
+
+        def do_GET(self):
+            if self.path != '/status':
+                self.send_json(404, {'error': 'not_found'})
+                return
+            try:
+                state = load_install_state()
+                self.send_json(200, _updater_status_payload(state))
+            except Exception as error:
+                self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+
+        def do_PUT(self):
+            if self.path != '/backup-config':
+                self.send_json(404, {'error': 'not_found'})
+                return
+            try:
+                body = self.read_json_body()
+                parsed = validate_backup_settings(body.get('backupRoot'), body.get('ageRecipient'))
+                with open('/run/lock/my-drive-installer.lock', 'a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    state = load_install_state()
+                    state['update_backup'] = {'root': parsed.backup_root, 'recipient': parsed.recipient}
+                    save(state)
+                self.send_json(200, _updater_status_payload(state))
+            except ValueError as error:
+                self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+            except Exception as error:
+                self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+
+        def do_POST(self):
+            if self.path != '/update':
+                self.send_json(404, {'error': 'not_found'})
+                return
+            try:
+                body = self.read_json_body()
+                target_tag = body.get('targetTag')
+                if target_tag is not None:
+                    if not isinstance(target_tag, str) or not RELEASE_TAG_RE.fullmatch(target_tag.strip()):
+                        raise ValueError('invalid release tag')
+                    target_tag = target_tag.strip()
+                with job_lock:
+                    state = load_install_state()
+                    saved_backup = state.get('update_backup', {})
+                    if not isinstance(saved_backup, dict) or not saved_backup.get('root') or not saved_backup.get('recipient'):
+                        self.send_json(409, {'error': 'backup_config_required', 'message': 'Encrypted backup configuration is required before updating.'})
+                        return
+                    status_now = read_updater_status()
+                    if status_now.get('status') == 'running':
+                        self.send_json(409, {'error': 'update_in_progress', 'message': 'An update is already running.'})
+                        return
+                    if not state.get('config', {}).get('images'):
+                        self.send_json(400, {'error': 'invalid_request', 'message': 'Host installation has no configured registry image track.'})
+                        return
+                    worker = threading.Thread(target=run_update_worker, args=(target_tag,), daemon=True)
+                    worker.start()
+                self.send_json(202, _updater_status_payload(state))
+            except ValueError as error:
+                self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+            except Exception as error:
+                self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+
+    class ThreadedUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+
+    with ThreadedUnixServer(str(UPDATER_SOCKET), Handler) as server:
+        os.chmod(UPDATER_SOCKET, 0o660)
+        os.chown(UPDATER_SOCKET, 0, 10001)
+        server.serve_forever()
 
 
 def main():
@@ -637,13 +953,19 @@ def main():
     update_parser = sub.add_parser('update', help='pull configured registry images and verify the deployment')
     update_parser.add_argument('--backup-root', help='encrypted backup destination; saved after a successful backup')
     update_parser.add_argument('--recipient', help='age PUBLIC recipient; saved after a successful backup')
+    update_parser.add_argument('--tag', help='optional release tag (for example v0.1.2) on the configured registry track')
+    update_parser.add_argument('--non-interactive', action='store_true', help='never prompt on stdin when invoked from automation')
     mode = update_parser.add_mutually_exclusive_group()
     mode.add_argument('--source', help='reviewed checkout of the release to build; no automatic git pull')
     mode.add_argument('--images', help='JSON map of own registry image references for this release')
+    sub.add_parser('updater-serve', help='run the local Unix-socket host updater bridge')
     args = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         parser.error('run as root on Linux')
     os.umask(0o077)
+    if args.command == 'updater-serve':
+        updater_serve()
+        return
     # Serialize install/start/update/backup so a reboot or second wizard cannot race secrets/config.
     import fcntl
     with open('/run/lock/my-drive-installer.lock', 'a') as lock:
@@ -714,19 +1036,30 @@ def main():
                 if not candidate['images']:
                     raise ValueError('--images must contain release image references')
             elif state['config'].get('images'):
-                # Re-pull the same configured registry tags (for example :latest).
-                # build_images resolves each moving tag to an immutable digest.
-                candidate['images'] = state['config']['images']
+                # Re-pull the same configured registry tags (or target release tag) and resolve to digests.
+                base_images = dict(state['config']['images'])
+                candidate['images'] = apply_release_tag(base_images, args.tag) if args.tag else base_images
             else:
                 raise ValueError('this installation has no registry update track; use --source or --images')
             candidate = validate(candidate)
+            print('phase: pulling Downloading and verifying container images', flush=True)
             images = build_images(candidate, source)  # Build/pull while old app remains available.
             image_env = {'app': 'MY_DRIVE_IMAGE', 'document-preview': 'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE',
                          'media-indexer': 'MY_DRIVE_INDEXER_IMAGE'}
+            # Keep compose.yaml and host updater unit in sync even when migrating from older installs.
+            model = json.loads((INSTALL / 'compose.yaml').read_text())
+            ensure_updater_compose(model)
+            atomic(INSTALL / 'compose.yaml', json.dumps(model, indent=2) + '\n')
+            if SOURCE != INSTALL and (SOURCE / 'scripts').is_dir():
+                for directory in ('scripts', 'docker'):
+                    shutil.copytree(SOURCE / directory, INSTALL / directory, dirs_exist_ok=True)
+            if os.environ.get('MY_DRIVE_UPDATER_SUBPROCESS') != '1':
+                install_updater_service(prepare_only=False, restart=True)
             if all(state['env'].get(image_env[service]) == image for service, image in images.items()):
                 print('Already up to date; no services were restarted.')
                 return
             backup_args = update_backup_options(state, args)
+            print('phase: backing_up Creating mandatory encrypted backup before update', flush=True)
             backup(state, backup_args)  # Mandatory complete encrypted backup before applying migrations.
             state['update_backup'] = {'root': backup_args.backup_root, 'recipient': backup_args.recipient}
             save(state)
@@ -735,6 +1068,7 @@ def main():
             for service, image in images.items():
                 state['env'][image_env[service]] = image
             save(state)
+            print('phase: restarting Restarting My Drive services and verifying health', flush=True)
             start(state)
             print('Updated and verified. Previous image references: /opt/my-drive/state.previous.json. Database rollback requires restoring the backup.')
 

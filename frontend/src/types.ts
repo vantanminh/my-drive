@@ -280,3 +280,56 @@ export type SearchFilters = {
   order?: string;
   offset?: number;
 };
+
+export type SystemUpdateCurrent = {
+  version: string;
+  commitSha: string | null;
+  buildTime: string | null;
+  image: string | null;
+};
+
+export type SystemUpdateSettings = {
+  autoCheckEnabled: boolean;
+  autoUpdateEnabled: boolean;
+  checkIntervalMinutes: number;
+};
+
+export type SystemUpdateLatest = {
+  tag: string | null;
+  commitSha: string | null;
+  publishedAt: string | null;
+  url: string | null;
+  notes: string | null;
+  updateAvailable: boolean;
+};
+
+export type SystemUpdateCheck = {
+  lastCheckedAt: string | null;
+  status: string | null;
+  error: string | null;
+};
+
+export type HostUpdaterStatus = {
+  connected: boolean;
+  status: string;
+  phase: string | null;
+  message: string | null;
+  targetTag: string | null;
+  backupConfigured: boolean;
+  backupRootHint: string | null;
+  imageTrack: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string | null;
+};
+
+export type SystemUpdatesStatus = {
+  current: SystemUpdateCurrent;
+  githubRepo: string;
+  settings: SystemUpdateSettings;
+  latest: SystemUpdateLatest;
+  check: SystemUpdateCheck;
+  hostUpdater: HostUpdaterStatus;
+  lastTriggeredAt: string | null;
+  lastTriggeredTag: string | null;
+};

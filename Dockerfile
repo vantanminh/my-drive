@@ -11,6 +11,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
 COPY src ./src
 COPY frontend/public/docs ./frontend/public/docs
+ARG MY_DRIVE_VERSION=0.1.0
+ARG MY_DRIVE_GIT_SHA=
+ARG MY_DRIVE_BUILD_TIME=
+ENV MY_DRIVE_VERSION=${MY_DRIVE_VERSION} \
+    MY_DRIVE_GIT_SHA=${MY_DRIVE_GIT_SHA} \
+    MY_DRIVE_BUILD_TIME=${MY_DRIVE_BUILD_TIME}
 RUN cargo build --release --locked --bins
 
 FROM debian:bookworm-slim AS media-thumbnailer-builder
@@ -36,6 +42,12 @@ RUN apt-get update \
         | sha256sum --check --status
 
 FROM debian:bookworm-slim AS runtime
+ARG MY_DRIVE_VERSION=0.1.0
+ARG MY_DRIVE_GIT_SHA=
+ARG MY_DRIVE_BUILD_TIME=
+ENV MY_DRIVE_VERSION=${MY_DRIVE_VERSION} \
+    MY_DRIVE_GIT_SHA=${MY_DRIVE_GIT_SHA} \
+    MY_DRIVE_BUILD_TIME=${MY_DRIVE_BUILD_TIME}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \

@@ -1330,6 +1330,7 @@ fn make_app_with_preview(
         bootstrap_owner: None,
         cookie_secure: false,
         google_drive: None,
+        update_settings: Default::default(),
     };
     let storage = LocalStorage::initialize(&config).expect("initialize test storage");
     api::router(AppState {
@@ -1348,6 +1349,7 @@ fn make_app_with_preview(
             upload_session_ttl_seconds: config.upload_session_ttl_seconds,
         },
         login_rate_limiter: LoginRateLimiter::default(),
+        update_settings: Default::default(),
     })
 }
 

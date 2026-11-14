@@ -22,6 +22,30 @@ pub struct Config {
     pub bootstrap_owner: Option<BootstrapOwner>,
     pub cookie_secure: bool,
     pub google_drive: Option<GoogleDriveSettings>,
+    pub update_settings: UpdateSettings,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpdateSettings {
+    pub github_repo: String,
+    pub github_api_base_url: String,
+    pub updater_socket: Option<PathBuf>,
+    pub updater_url: Option<String>,
+    pub updater_token: Option<String>,
+    pub current_image: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            github_repo: "vantanminh/my-drive".to_owned(),
+            github_api_base_url: "https://api.github.com".to_owned(),
+            updater_socket: default_updater_socket(),
+            updater_url: None,
+            updater_token: None,
+            current_image: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -208,6 +232,7 @@ impl Config {
             return Err(ConfigError::Invalid("TRASH_RETENTION_DAYS"));
         }
         let google_drive = google_drive_settings(vars)?;
+        let update_settings = parse_update_settings(vars)?;
         let document_preview_url = match nonempty(vars, "DOCUMENT_PREVIEW_URL") {
             Some(value) => {
                 let url = reqwest::Url::parse(value)
@@ -247,8 +272,91 @@ impl Config {
             bootstrap_owner,
             cookie_secure: bool_value(vars, "COOKIE_SECURE", true)?,
             google_drive,
+            update_settings,
         })
     }
+}
+
+fn default_updater_socket() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        Some(PathBuf::from("/run/my-drive-updater/updater.sock"))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn parse_update_settings(vars: &HashMap<String, String>) -> Result<UpdateSettings, ConfigError> {
+    let github_repo = match nonempty(vars, "MY_DRIVE_GITHUB_REPO") {
+        Some(value) => {
+            if !valid_github_repo(value) {
+                return Err(ConfigError::Invalid("MY_DRIVE_GITHUB_REPO"));
+            }
+            value.to_owned()
+        }
+        None => "vantanminh/my-drive".to_owned(),
+    };
+    let github_api_base_url = match nonempty(vars, "MY_DRIVE_GITHUB_API_URL") {
+        Some(value) => validate_http_origin(value, "MY_DRIVE_GITHUB_API_URL")?,
+        None => "https://api.github.com".to_owned(),
+    };
+    let updater_socket = match nonempty(vars, "MY_DRIVE_UPDATER_SOCKET") {
+        Some("none" | "disabled") => None,
+        Some(value) => Some(path_from_value(value, "MY_DRIVE_UPDATER_SOCKET")?),
+        None => default_updater_socket(),
+    };
+    let updater_url = match nonempty(vars, "MY_DRIVE_UPDATER_URL") {
+        Some(value) => Some(validate_http_origin(value, "MY_DRIVE_UPDATER_URL")?),
+        None => None,
+    };
+    let updater_token = nonempty(vars, "MY_DRIVE_UPDATER_TOKEN").map(str::to_owned);
+    let current_image = nonempty(vars, "MY_DRIVE_IMAGE").map(str::to_owned);
+    Ok(UpdateSettings {
+        github_repo,
+        github_api_base_url,
+        updater_socket,
+        updater_url,
+        updater_token,
+        current_image,
+    })
+}
+
+fn valid_github_repo(value: &str) -> bool {
+    let Some((owner, repo)) = value.split_once('/') else {
+        return false;
+    };
+    valid_repo_segment(owner) && valid_repo_segment(repo) && !repo.contains('/')
+}
+
+fn valid_repo_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.len() <= 100
+        && segment != "."
+        && segment != ".."
+        && !segment.contains("..")
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn validate_http_origin(value: &str, name: &'static str) -> Result<String, ConfigError> {
+    let url = reqwest::Url::parse(value).map_err(|_| ConfigError::Invalid(name))?;
+    let scheme_ok = url.scheme() == "https"
+        || (url.scheme() == "http"
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")));
+    if !scheme_ok
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ConfigError::Invalid(name));
+    }
+    Ok(value.trim_end_matches('/').to_owned())
 }
 
 fn google_drive_settings(
@@ -743,6 +851,47 @@ mod tests {
             "https://user:password@drive.example.com/api/google-drive/callback",
         ] {
             assert!(!super::valid_redirect_uri(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn update_settings_validate_github_repo_and_updater_origins() {
+        let defaults = Config::from_vars(&base_vars()).unwrap().update_settings;
+        assert_eq!(defaults.github_repo, "vantanminh/my-drive");
+        assert_eq!(defaults.github_api_base_url, "https://api.github.com");
+
+        let mut custom = base_vars();
+        custom.insert(
+            "MY_DRIVE_GITHUB_REPO".to_owned(),
+            "my-org/my_drive".to_owned(),
+        );
+        custom.insert(
+            "MY_DRIVE_GITHUB_API_URL".to_owned(),
+            "http://127.0.0.1:4010/".to_owned(),
+        );
+        custom.insert(
+            "MY_DRIVE_UPDATER_URL".to_owned(),
+            "http://localhost:8099".to_owned(),
+        );
+        custom.insert("MY_DRIVE_UPDATER_SOCKET".to_owned(), "disabled".to_owned());
+        let parsed = Config::from_vars(&custom).unwrap().update_settings;
+        assert_eq!(parsed.github_repo, "my-org/my_drive");
+        assert_eq!(parsed.github_api_base_url, "http://127.0.0.1:4010");
+        assert_eq!(parsed.updater_url.as_deref(), Some("http://localhost:8099"));
+        assert!(parsed.updater_socket.is_none());
+
+        for bad_repo in [
+            "no-slash",
+            "../evil/repo",
+            "owner/repo/extra",
+            "bad space/repo",
+        ] {
+            let mut vars = base_vars();
+            vars.insert("MY_DRIVE_GITHUB_REPO".to_owned(), bad_repo.to_owned());
+            assert!(matches!(
+                Config::from_vars(&vars),
+                Err(ConfigError::Invalid("MY_DRIVE_GITHUB_REPO"))
+            ));
         }
     }
 }

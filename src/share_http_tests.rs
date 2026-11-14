@@ -609,6 +609,7 @@ fn config(storage_root: &Path) -> Config {
         bootstrap_owner: None,
         cookie_secure: false,
         google_drive: None,
+        update_settings: Default::default(),
     }
 }
 
@@ -631,6 +632,7 @@ fn make_app(pool: PgPool, storage_root: &Path) -> Router {
             upload_session_ttl_seconds: config.upload_session_ttl_seconds,
         },
         login_rate_limiter: LoginRateLimiter::default(),
+        update_settings: Default::default(),
     })
 }
 
