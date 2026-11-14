@@ -1,0 +1,7 @@
+{
+  "platforms": ["apple"],
+  "apple": {
+    "podspecPath": "ios/MyDriveMediaSync.podspec",
+    "modules": ["MyDriveMediaSyncModule"]
+  }
+}

@@ -18,6 +18,21 @@ harness.db-shm
 /clients/windows/**/obj/
 /clients/windows/publish/
 /clients/windows/dist/
+
+# iOS Expo client build output & local signing secrets
+/clients/ios/node_modules/
+/clients/ios/.expo/
+/clients/ios/ios/
+/clients/ios/dist/
+/clients/ios/web-build/
+/clients/ios/expo-env.d.ts
+/clients/ios/*.ipa
+/clients/ios/*.xcarchive
+/clients/ios/*.p12
+/clients/ios/*.mobileprovision
+/clients/ios/*.p8
+/clients/ios/ExportOptions.plist
+
 /frontend/dist/
 /frontend/tsconfig.tsbuildinfo
 
