@@ -89,9 +89,21 @@ a{color:var(--accent)}
     <div class="hint" id="hostHint">Với HTTPS công khai, trỏ DNS của tên miền về máy chủ và mở cổng TCP 80/443.</div>
     <label>Kiểu kết nối</label>
     <div class="choices">
+      <label class="choice"><input type="radio" name="tls" value="cloudflare"><div><strong>Cloudflare Tunnel (máy ở nhà, không cần IP tĩnh)</strong><span>Không cần mở cổng router. Hệ thống tự tạo tunnel, trỏ DNS và kiểm tra kết nối bằng API token của bạn.</span></div></label>
       <label class="choice"><input type="radio" name="tls" value="acme" checked><div><strong>HTTPS công khai (Let's Encrypt)</strong><span>Khuyến nghị cho tên miền thật. Chứng chỉ được cấp và gia hạn tự động.</span></div></label>
       <label class="choice"><input type="radio" name="tls" value="internal"><div><strong>HTTPS nội bộ (tự ký)</strong><span>Dùng khi chỉ có địa chỉ IP hoặc mạng nội bộ. Trình duyệt sẽ cảnh báo chứng chỉ.</span></div></label>
       <label class="choice"><input type="radio" name="tls" value="http"><div><strong>Chỉ HTTP (không mã hóa)</strong><span>Mật khẩu và cookie đi dạng rõ. Chỉ dùng trong mạng tin cậy hoặc sau tunnel bảo mật (VD: Cloudflare Tunnel).</span></div></label>
+    </div>
+    <div id="cfBox" style="display:none">
+      <label for="cfToken">Cloudflare API token</label>
+      <input type="password" id="cfToken" autocomplete="off" spellcheck="false" placeholder="Dán API token">
+      <div class="hint">Tạo tại dash.cloudflare.com → My Profile → API Tokens → Create Custom Token với quyền:
+        <b>Account · Cloudflare Tunnel · Edit</b>, <b>Zone · DNS · Edit</b>, <b>Zone · Zone · Read</b> (chọn zone chứa tên miền).
+        Token chỉ dùng lúc cài, không lưu lại trên máy.</div>
+      <label for="cfReplicas">Số connector (độ ổn định)</label>
+      <input type="number" id="cfReplicas" min="1" max="8" value="2">
+      <div class="hint">Mỗi connector giữ 4 kết nối tới các data center Cloudflare. 2 connector = 8 kết nối, đủ cho đa số trường hợp; tăng lên nếu mạng nhà hay chập chờn.</div>
+      <div class="checks" id="cfResult" style="margin-top:12px"></div>
     </div>
     <div class="alert warn" id="httpWarn">Lưu lượng sẽ không được mã hóa. Hãy chắc chắn bạn đặt My Drive sau một tunnel/proxy có HTTPS hoặc chỉ dùng trong LAN.</div>
   </section>
@@ -226,7 +238,7 @@ function config(){
   const num = id => Number($(id).value);
   return {host:$('host').value.trim().toLowerCase(), tls:tls(), email:$('email').value.trim(), owner_password:$('pw').value,
           storage:$('storage').value.trim(), database:$('database').value.trim(), previews:$('previews').value.trim(),
-          media_indexing:$('media').checked, quota_gib:num('quota_gib'), max_file_gib:num('max_file_gib'),
+          media_indexing:$('media').checked, ...(tls() === 'cloudflare' ? {cf_token:$('cfToken').value.trim(), cf_replicas:Number($('cfReplicas').value)} : {}), quota_gib:num('quota_gib'), max_file_gib:num('max_file_gib'),
           min_free_gib:num('min_free_gib'), trash_days:num('trash_days')};
 }
 
@@ -236,7 +248,11 @@ function localCheck(n){
     if (!c.host) return 'Nhập tên miền hoặc IPv4.';
     if (/^https?:\/\//.test(c.host) || c.host.includes('/')) return 'Chỉ nhập tên miền, không kèm http:// hay đường dẫn.';
     if (c.tls === 'acme' && /^\d+\.\d+\.\d+\.\d+$/.test(c.host)) return "Let's Encrypt không cấp chứng chỉ cho địa chỉ IP. Chọn HTTPS nội bộ hoặc HTTP.";
-    if (c.tls !== 'http' && sys && !sys.ports['443']) return 'Cổng 443 đang bị chiếm; giải phóng nó hoặc chọn chế độ HTTP.';
+    if (c.tls === 'cloudflare') {
+      if (!c.cf_token) return 'Nhập Cloudflare API token.';
+      if (!Number.isInteger(c.cf_replicas) || c.cf_replicas < 1 || c.cf_replicas > 8) return 'Số connector phải từ 1 đến 8.';
+    }
+    if (!['http','cloudflare'].includes(c.tls) && sys && !sys.ports['443']) return 'Cổng 443 đang bị chiếm; giải phóng nó hoặc chọn chế độ HTTP.';
   }
   if (n === 2) {
     if (!/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(c.email)) return 'Email không hợp lệ.';
@@ -248,7 +264,7 @@ function localCheck(n){
 }
 
 function summary(){
-  const c = config(), mode = {acme:"HTTPS (Let's Encrypt)", internal:'HTTPS nội bộ (tự ký)', http:'HTTP không mã hóa'}[c.tls];
+  const c = config(), mode = {cloudflare:`Cloudflare Tunnel (${c.cf_replicas} connector, ${c.cf_replicas * 4} kết nối)`, acme:"HTTPS (Let's Encrypt)", internal:'HTTPS nội bộ (tự ký)', http:'HTTP không mã hóa'}[c.tls];
   const items = [['Địa chỉ', `${c.tls === 'http' ? 'http' : 'https'}://${c.host}`], ['Kết nối', mode], ['Email quản trị', c.email],
     ['Mật khẩu', c.owner_password ? 'Do bạn đặt' : 'Tự tạo ngẫu nhiên'], ['Dữ liệu file', c.storage], ['Database', c.database],
     ['Preview / chỉ mục', c.previews], ['Lập chỉ mục media', c.media_indexing ? 'Bật' : 'Tắt'],
@@ -263,11 +279,25 @@ async function next(){
   if (step === 0 && sys && !sys.docker) return showErr('Docker chưa sẵn sàng trên máy chủ.');
   const btn = $('next'); btn.disabled = true;
   try {
+    if (step === 1 && tls() === 'cloudflare') await checkCloudflare();
     if (step === 3 || step === 4) await api('/api/check', {config: config()});
     if (step === 5) { await api('/api/install', {config: config()}); show(6); poll(); return; }
     show(step + 1);
   } catch (e) { showErr(e.message); }
   finally { btn.disabled = false; }
+}
+
+async function checkCloudflare(){
+  const box = $('cfResult');
+  box.innerHTML = '<div class="check">Đang kiểm tra token và tên miền với Cloudflare…</div>';
+  try {
+    const r = await api('/api/cloudflare', {config: config()});
+    const rows = [['Token hợp lệ', 'Đủ quyền Tunnel và DNS', 'ok'], ['Zone', `${r.zone} (${r.zone_status})`, r.zone_status === 'active' ? 'ok' : 'warn'],
+      ['Tài khoản', r.account || r.account_id, 'ok'],
+      ['Tunnel', r.existing_tunnel ? 'Đã có tunnel cùng tên — sẽ dùng lại' : 'Sẽ tạo tunnel mới', 'ok'],
+      ['Bản ghi DNS', r.replace_records.length ? 'Sẽ thay thế: ' + r.replace_records.join(', ') : 'Sẽ tạo CNAME mới', r.replace_records.length ? 'warn' : 'ok']];
+    box.innerHTML = rows.map(([a,b,c]) => `<div class="check"><div><strong>${a}</strong><div class="hint">${esc(b)}</div></div><span class="pill ${c}">${c==='ok'?'OK':'Lưu ý'}</span></div>`).join('');
+  } catch (e) { box.innerHTML = ''; throw e; }
 }
 
 async function poll(){
@@ -296,7 +326,7 @@ async function poll(){
 
 $('next').onclick = next;
 $('back').onclick = () => show(Math.max(0, step - 1));
-document.querySelectorAll('input[name=tls]').forEach(r => r.onchange = () => $('httpWarn').classList.toggle('show', tls() === 'http'));
+document.querySelectorAll('input[name=tls]').forEach(r => r.onchange = () => { $('httpWarn').classList.toggle('show', tls() === 'http'); $('cfBox').style.display = tls() === 'cloudflare' ? 'block' : 'none'; $('cfResult').innerHTML = ''; });
 ['storage','previews','database'].forEach(id => $(id).addEventListener('input', fsHints));
 $('media').onchange = fsHints;
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && step < 6 && e.target.tagName === 'INPUT') next(); });

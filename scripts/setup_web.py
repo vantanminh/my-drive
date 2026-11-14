@@ -131,6 +131,16 @@ class Wizard:
         self.vps.preflight(config, self.prebuilt)
         return config
 
+    def cloudflare(self, raw):
+        """Read-only check of the API token, zone, account and DNS conflicts."""
+        if not isinstance(raw, dict):
+            raise ValueError('invalid request')
+        cloudflare = self.vps.local_module('cloudflare')
+        host = self.vps.valid_host(str(raw.get('host', '')).strip().lower())
+        if '.' not in host or host.replace('.', '').isdigit():
+            raise ValueError('Cloudflare Tunnel needs a domain name, not an IP address')
+        return cloudflare.inspect(cloudflare.valid_token(raw.get('cf_token')), host)
+
     def submit(self, raw):
         config = self.check(raw)
         with self.lock:
@@ -222,6 +232,8 @@ def handler(wizard):
                 if self.path == '/api/check':
                     wizard.check(body.get('config'))
                     return self.send(200, {'ok': True})
+                if self.path == '/api/cloudflare':
+                    return self.send(200, dict(wizard.cloudflare(body.get('config')), ok=True))
                 if self.path == '/api/install':
                     wizard.submit(body.get('config'))
                     return self.send(202, {'ok': True})

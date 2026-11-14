@@ -17,7 +17,7 @@ import urllib.request
 
 API = 'https://api.cloudflare.com/client/v4'
 TOKEN_RE = re.compile(r'[A-Za-z0-9_-]{20,200}')
-CONNECTOR_IMAGE = 'cloudflare/cloudflared:2025.11.1'
+CONNECTOR_IMAGE = 'cloudflare/cloudflared:2026.10.0'
 MAX_REPLICAS = 8
 TUNNEL_TARGET = '.cfargotunnel.com'
 
