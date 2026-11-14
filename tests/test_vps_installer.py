@@ -88,6 +88,67 @@ class InstallerTests(unittest.TestCase):
         finally:
             wizard.server.shutdown()
 
+    def test_cloudflare_tunnel_mode(self):
+        token = 'a' * 40
+        config = self.config(tls='tunnel', cf_token=token, cf_replicas=3)
+        self.assertEqual((config['tls'], config['cf_replicas'], config['cf_token']), ('cloudflare', 3, token))
+        for fields in [{'tls': 'cloudflare', 'host': '192.0.2.1'}, {'tls': 'cloudflare', 'cf_replicas': 9},
+                       {'tls': 'cloudflare', 'cf_token': 'bad token'}]:
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                self.config(**fields)
+        self.assertNotIn('cf_replicas', self.config(cf_replicas=3))  # ignored outside tunnel mode
+        caddy = vps.caddyfile(config)
+        self.assertIn('http://drive.example.com {', caddy)
+        self.assertIn('auto_https off', caddy)
+        model = vps.make_compose({'services': {'app': {'environment': {}}}}, config)
+        self.assertEqual(model['services']['proxy']['ports'], ['127.0.0.1:80:80'])
+        connector = model['services']['cloudflared']
+        self.assertEqual(connector['deploy']['replicas'], 3)
+        self.assertIn('${CLOUDFLARE_TUNNEL_TOKEN', connector['environment']['TUNNEL_TOKEN'])
+        self.assertEqual(model['services']['app']['environment']['COOKIE_SECURE'], 'true')
+
+    def test_cloudflare_provision_routes_dns_and_reuses_tunnel(self):
+        cloudflare = vps.local_module('cloudflare')
+        calls = []
+        zone = {'id': 'z1', 'name': 'example.com', 'status': 'active', 'account': {'id': 'acc', 'name': 'Me'}}
+
+        def fake(token, method, path, body=None, query=None):
+            calls.append((method, path, body))
+            if path == '/zones':
+                return [zone] if query['name'] == 'example.com' else []
+            if path.endswith('/cfd_tunnel') and method == 'GET':
+                return []
+            if path.endswith('/cfd_tunnel'):
+                return {'id': 't1', 'name': body['name']}
+            if path.endswith('/token'):
+                return 'connector-token'
+            if path.endswith('/dns_records') and method == 'GET':
+                return [{'id': 'r1', 'type': 'A', 'content': '198.51.100.7'}]
+            return {}
+        with patch.object(cloudflare, 'api', side_effect=fake):
+            result = cloudflare.provision('a' * 40, 'drive.example.com')
+        self.assertEqual(result['connector_token'], 'connector-token')
+        ingress = next(b for m, p, b in calls if p.endswith('/configurations'))['config']['ingress']
+        self.assertEqual(ingress[0], {'hostname': 'drive.example.com', 'service': 'http://proxy:80',
+                                      'originRequest': {'httpHostHeader': 'drive.example.com', 'connectTimeout': 30}})
+        self.assertEqual(ingress[-1], {'service': 'http_status:404'})
+        self.assertIn(('DELETE', '/zones/z1/dns_records/r1', None), calls)
+        cname = next(b for m, p, b in calls if m == 'POST' and p == '/zones/z1/dns_records')
+        self.assertEqual((cname['type'], cname['content'], cname['proxied']), ('CNAME', 't1.cfargotunnel.com', True))
+
+    def test_cloudflare_rejects_records_that_cannot_coexist(self):
+        cloudflare = vps.local_module('cloudflare')
+        zone = {'id': 'z1', 'name': 'example.com', 'status': 'active', 'account': {'id': 'acc'}}
+
+        def fake(token, method, path, body=None, query=None):
+            if path == '/zones':
+                return [zone]
+            if path.endswith('/dns_records'):
+                return [{'id': 'r', 'type': 'MX', 'content': 'mail.example.com'}]
+            return []
+        with patch.object(cloudflare, 'api', side_effect=fake), self.assertRaises(ValueError):
+            cloudflare.inspect('a' * 40, 'example.com')
+
     def test_internal_ip_and_generated_password(self):
         config = self.config(host='192.0.2.1', tls='internal')
         self.assertGreaterEqual(len(config['owner_password']), 32)

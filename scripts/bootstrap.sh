@@ -39,7 +39,7 @@ workdir="$(mktemp -d /tmp/my-drive-bootstrap.XXXXXXXX)"
 trap 'rm -rf -- "$workdir"' EXIT
 mkdir -p "$workdir/scripts" "$workdir/docker"
 files=(compose.yaml docker/setup-indexer-role.sh scripts/install.sh scripts/vps.py
-       scripts/setup_web.py scripts/setup_wizard.html
+       scripts/setup_web.py scripts/setup_wizard.html scripts/cloudflare.py
        scripts/backup.sh scripts/backup-common.sh scripts/backup_compose.py
        scripts/backup_bundle.py scripts/storage_archive.py scripts/restore.sh scripts/verify-backup.sh)
 for file in "${files[@]}"; do

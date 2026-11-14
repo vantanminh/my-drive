@@ -20,9 +20,12 @@ import time
 SOURCE = Path(__file__).resolve().parents[1]
 INSTALL = Path('/opt/my-drive')
 PATH_RE = re.compile(r'/[A-Za-z0-9_./-]+')
+CLOUDFLARED_IMAGE = 'cloudflare/cloudflared:2026.10.0'
 IMAGE_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]+')
 TLS_ALIASES = {'https': 'acme', 'letsencrypt': 'acme', 'self-signed': 'internal',
-               'unencrypted': 'http', 'none': 'http', 'plain': 'http'}
+               'unencrypted': 'http', 'none': 'http', 'plain': 'http',
+               'tunnel': 'cloudflare', 'cloudflare-tunnel': 'cloudflare', 'cf': 'cloudflare'}
+TLS_MODES = {'acme', 'internal', 'http', 'cloudflare'}
 _progress_hook = None
 
 
@@ -30,6 +33,11 @@ def progress(message):
     print(f'==> {message}', flush=True)
     if _progress_hook:
         _progress_hook(message)
+
+
+def local_module(name):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    return __import__(name)
 
 
 def run(*args, capture=False, env=None):
@@ -92,23 +100,35 @@ def valid_path(raw):
 def validate(config):
     allowed = {'host', 'tls', 'email', 'owner_password', 'storage', 'database',
                'previews', 'media_indexing', 'images', 'quota_gib', 'max_file_gib',
-               'min_free_gib', 'trash_days'}
+               'min_free_gib', 'trash_days', 'cf_token', 'cf_replicas'}
     if set(config) - allowed:
         raise ValueError(f'unknown configuration fields: {sorted(set(config) - allowed)}')
     result = dict(config)
     result['host'] = valid_host(str(config.get('host', '')).strip().lower())
     if isinstance(config.get('tls'), str):
         result['tls'] = TLS_ALIASES.get(config['tls'].strip().lower(), config['tls'].strip().lower())
-    if result.get('tls', 'acme') not in {'acme', 'internal', 'http'}:
-        raise ValueError('tls must be acme, internal, or http')
+    if result.get('tls', 'acme') not in TLS_MODES:
+        raise ValueError('tls must be acme, internal, http, or cloudflare')
     result.setdefault('tls', 'acme')
-    if result['tls'] == 'acme':
+    result.pop('cf_token', None)
+    result.pop('cf_replicas', None)
+    if result['tls'] == 'cloudflare':
+        replicas = config.get('cf_replicas', 2)
+        if type(replicas) is not int or not 1 <= replicas <= 8:
+            raise ValueError('cf_replicas must be an integer from 1 to 8')
+        result['cf_replicas'] = replicas
+        if config.get('cf_token'):
+            token = str(config['cf_token']).strip()
+            if not re.fullmatch(r'[A-Za-z0-9_-]{20,200}', token):
+                raise ValueError('Cloudflare API token looks invalid')
+            result['cf_token'] = token
+    if result['tls'] in ('acme', 'cloudflare'):
         try:
             ipaddress.IPv4Address(result['host'])
         except ValueError:
             pass
         else:
-            raise ValueError('use internal TLS for IP-only installation')
+            raise ValueError('ACME and Cloudflare Tunnel need a domain name; use internal TLS for an IP')
     result['email'] = str(config.get('email', '')).strip()
     if not re.fullmatch(r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', result['email']):
         raise ValueError('a valid owner email is required')
@@ -209,11 +229,12 @@ def preflight(config, prebuilt):
     minimum = 2 if (config['images'] or prebuilt) else 4
     if memory_kib < minimum * 1024**2 * 0.95:
         raise ValueError(f'at least {minimum} GiB RAM required for this installation mode')
-    for port in (80,) if config['tls'] == 'http' else (80, 443):
+    address = '127.0.0.1' if config['tls'] == 'cloudflare' else '0.0.0.0'
+    for port in (80,) if config['tls'] in ('http', 'cloudflare') else (80, 443):
         with socket.socket() as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                sock.bind(('0.0.0.0', port))
+                sock.bind((address, port))
             except OSError:
                 raise ValueError(f'TCP port {port} is already in use; stop the other web server first') from None
     return inspect_targets(config)
@@ -262,8 +283,11 @@ def make_compose(model, config):
     services['app']['environment']['COOKIE_SECURE'] = 'false' if config['tls'] == 'http' else 'true'
     for service in services.values():
         service['logging'] = {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}
-    proxy_ports = ['80:80']
-    if config['tls'] != 'http':
+    if config['tls'] == 'cloudflare':
+        proxy_ports = ['127.0.0.1:80:80']  # Only the local tunnel connector reaches the proxy.
+    else:
+        proxy_ports = ['80:80']
+    if config['tls'] not in ('http', 'cloudflare'):
         proxy_ports.append('443:443')
     services['proxy'] = {
         'image': 'caddy:2-alpine', 'restart': 'unless-stopped',
@@ -276,10 +300,31 @@ def make_compose(model, config):
                      'bind': {'create_host_path': False}}],
         'logging': {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}},
     }
+    if config['tls'] == 'cloudflare':
+        services['cloudflared'] = cloudflared_service(config.get('cf_replicas', 2))
     return model
 
 
+def cloudflared_service(replicas):
+    # Several connector replicas of one tunnel: each holds 4 edge connections,
+    # so N replicas give 4*N connections across Cloudflare data centers.
+    return {
+        'image': CLOUDFLARED_IMAGE, 'restart': 'unless-stopped',
+        'command': ['tunnel', '--no-autoupdate', '--protocol', 'auto', 'run'],
+        'environment': {'TUNNEL_TOKEN': '${CLOUDFLARE_TUNNEL_TOKEN:?Cloudflare tunnel token missing}'},
+        'deploy': {'replicas': replicas}, 'depends_on': ['proxy'], 'read_only': True,
+        'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'mem_limit': '256m', 'pids_limit': 64,
+        'logging': {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}},
+    }
+
+
 def caddyfile(config):
+    if config['tls'] == 'cloudflare':
+        # TLS ends at Cloudflare's edge; the tunnel reaches Caddy over the private Docker network.
+        return '{\n    admin off\n    auto_https off\n}\n' + f"http://{config['host']} {{\n" + '''    reverse_proxy app:3000
+    header X-Content-Type-Options nosniff
+}
+'''
     global_options = '{\n    admin off\n' + (f"    email {config['email']}\n" if config['tls'] == 'acme' else '') + '}\n'
     tls = '    tls internal\n' if config['tls'] == 'internal' else ''
     scheme = 'http' if config['tls'] == 'http' else 'https'
@@ -377,7 +422,7 @@ def start(state):
                 break
             time.sleep(1)
         args += ['--cacert', str(root)]
-    scheme = 'http' if state['config']['tls'] == 'http' else 'https'
+    scheme = 'http' if state['config']['tls'] in ('http', 'cloudflare') else 'https'
     port = 80 if scheme == 'http' else 443
     args += ['--resolve', f"{state['config']['host']}:{port}:127.0.0.1"]
     run(*args, f"{scheme}://{state['config']['host']}/health/ready")
@@ -405,6 +450,13 @@ def install(args):
             config = validate(config)
         progress('Checking memory, ports and data disks')
         preflight(config, args.prebuilt)
+        tunnel = None
+        if config['tls'] == 'cloudflare':
+            if not config.get('cf_token'):
+                raise ValueError('Cloudflare Tunnel mode needs cf_token (an API token) during installation')
+            cloudflare = local_module('cloudflare')
+            progress('Creating Cloudflare Tunnel and routing the DNS record')
+            tunnel = cloudflare.provision(config['cf_token'], config['host'])
         progress('Creating data directories')
         mounts = prepare(config)
         INSTALL.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -424,11 +476,16 @@ def install(args):
             'MAX_FILE_SIZE': config['max_file_gib'] * 1024**3,
             'MIN_FREE_BYTES': config['min_free_gib'] * 1024**3, 'TRASH_RETENTION_DAYS': config['trash_days'],
         }
+        if tunnel:
+            values['CLOUDFLARE_TUNNEL_TOKEN'] = tunnel.pop('connector_token')
         write_env(INSTALL / '.env', values)
         scheme = 'http' if config['tls'] == 'http' else 'https'
         atomic(INSTALL / 'owner-credentials.txt', f"URL: {scheme}://{config['host']}\nEmail: {config['email']}\nPassword: {config['owner_password']}\n")
         del config['owner_password']
+        config.pop('cf_token', None)  # The API token is never stored; only the connector token is.
         state = {'config': config, 'mounts': mounts, 'env': values}
+        if tunnel:
+            state['cloudflare'] = tunnel
         save(state)
     progress('Generating service and reverse-proxy configuration')
     if not (INSTALL / 'compose.yaml').exists():
@@ -482,6 +539,27 @@ WantedBy=multi-user.target
     if not args.prepare_only:
         run('systemctl', 'enable', 'my-drive.service')
     return state
+
+
+def verify_tunnel(state, token):
+    """Confirm every connector replica registered, then reach the app through Cloudflare."""
+    import urllib.request
+    cloudflare = local_module('cloudflare')
+    info = state['cloudflare']
+    progress(f"Verifying {state['config']['cf_replicas']} tunnel connector(s) with Cloudflare")
+    result = cloudflare.wait_connected(token, info['account_id'], info['tunnel_id'], state['config']['cf_replicas'])
+    progress(f"Tunnel online: {result['connections']} connections via {', '.join(result['colos']) or 'Cloudflare'}; "
+             'checking the public address')
+    url = f"https://{state['config']['host']}/health/ready"
+    for _ in range(24):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                if response.status == 200:
+                    return
+        except OSError:
+            pass
+        time.sleep(5)
+    progress('Tunnel is connected, but the public address is not answering yet (DNS may still be propagating)')
 
 
 def backup(state, args):
@@ -575,7 +653,7 @@ def main():
             fresh = not (INSTALL / 'state.json').exists()
             if fresh and not args.config and not args.cli:
                 sys.path.insert(0, str(Path(__file__).resolve().parent))
-                import setup_web
+                setup_web = local_module('setup_web')
                 global _progress_hook
                 args.wizard = setup_web.serve(sys.modules[__name__], args.prebuilt, args.web_listen, args.web_port)
                 _progress_hook = args.wizard.progress
@@ -586,6 +664,9 @@ def main():
                     fcntl.flock(lock, fcntl.LOCK_UN)
                     progress('Starting My Drive and waiting until it is ready')
                     run('systemctl', 'restart', 'my-drive.service')
+                    token = args.wizard.config.get('cf_token') if args.wizard else None
+                    if state.get('cloudflare') and token:
+                        verify_tunnel(state, token)
             except BaseException as error:
                 if args.wizard:
                     args.wizard.failed(str(error) if isinstance(error, ValueError) else
