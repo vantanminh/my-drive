@@ -27,6 +27,7 @@ import GoogleDrivePanel from './GoogleDrivePanel';
 import DeveloperPanel from './DeveloperPanel';
 import AccountSecurityPanel from './AccountSecurityPanel';
 import SystemUpdatePanel from './SystemUpdatePanel';
+import NetworkDrivePanel from './NetworkDrivePanel';
 
 type Props = {
   user: User;
@@ -580,6 +581,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const developerOpen = panel === 'developer';
   const securityOpen = panel === 'security';
   const updatesOpen = panel === 'updates';
+  const networkDriveOpen = panel === 'network-drive';
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [latestUpdateTag, setLatestUpdateTag] = useState<string | null>(null);
   useEffect(() => {
@@ -1686,6 +1688,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               event.currentTarget.closest('details')?.removeAttribute('open');
               showDrive({ folders: [], panel: 'security', query: '', fileId: null });
             }}><ShieldCheck size={15} /> Account security</button>
+            <button onClick={(event) => { event.currentTarget.closest('details')?.removeAttribute('open'); showDrive({ folders: [], panel: 'network-drive', query: '', fileId: null }); }}><HardDrive size={15} /> Network drive</button>
             <button onClick={(event) => { event.currentTarget.closest('details')?.removeAttribute('open'); showDrive({ folders: [], panel: 'developer', query: '', fileId: null }); }}><FileText size={15} /> Settings · Developer</button>
             <div className="menu-divider" />
             <button onClick={(event) => {
@@ -1831,6 +1834,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           )}
 
           {section === 'drive' && developerOpen ? <DeveloperPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
+          {section === 'drive' && networkDriveOpen ? <NetworkDrivePanel email={user.email} onClose={() => showDrive({ panel: null })} onOpenDeveloper={() => showDrive({ panel: 'developer' })} /> : null}
           {section === 'drive' && securityOpen ? <AccountSecurityPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' && googleDriveOpen ? <GoogleDrivePanel isOwner={user.role === 'owner'} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' ? (

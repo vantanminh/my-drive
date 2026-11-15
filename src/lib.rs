@@ -14,6 +14,7 @@ mod library;
 mod maintenance;
 mod media_admin;
 mod media_indexer;
+mod network_drive;
 mod shares;
 mod storage;
 mod transfers;
@@ -124,7 +125,10 @@ pub async fn run() -> anyhow::Result<()> {
     ));
     tokio::spawn(updates::run_worker(maintenance_pool, update_settings));
     info!(address = %bind_addr, "My Drive is listening");
-    axum::serve(listener, api::router(state))
+    axum::serve(
+        listener,
+        api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve HTTP requests")?;

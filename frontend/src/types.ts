@@ -331,3 +331,11 @@ export type SystemUpdatesStatus = {
   lastTriggeredAt: string | null;
   lastTriggeredTag: string | null;
 };
+
+export type NetworkDriveStatus = {
+  enabled: boolean;
+  path: string;
+  lanOnly: boolean;
+  readOnly: boolean;
+  canManage: boolean;
+};

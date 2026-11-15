@@ -54,6 +54,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(crate::google_drive::router())
         .merge(crate::devices::router())
         .merge(crate::updates::router())
+        .merge(crate::network_drive::router())
+        .route("/network-drive", get(serve_frontend_index))
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found))
         .route("/s/{token}", get(serve_frontend_index))

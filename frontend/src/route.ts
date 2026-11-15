@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 export type WorkspaceSection = 'drive' | 'shared' | 'trash' | 'photos' | 'storage';
-export type DrivePanel = 'accounts' | 'faces' | 'indexing' | 'google-drive' | 'security' | 'developer' | 'updates' | null;
+export type DrivePanel = 'accounts' | 'faces' | 'indexing' | 'google-drive' | 'security' | 'developer' | 'updates' | 'network-drive' | null;
 export type PhotosTab = 'timeline' | 'people' | 'albums';
 export type DriveSort = 'name' | 'updated_at' | 'created_at' | 'size';
 export type DriveOrder = 'asc' | 'desc';
@@ -124,7 +124,7 @@ function fileIdFromSearch(params: URLSearchParams): string | null {
 
 function panelFromSearch(params: URLSearchParams): DrivePanel {
   const panel = params.get('panel');
-  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive' || panel === 'security' || panel === 'developer' || panel === 'updates') return panel;
+  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive' || panel === 'security' || panel === 'developer' || panel === 'updates' || panel === 'network-drive') return panel;
   return null;
 }
 
@@ -218,6 +218,7 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
   if (parts[0] === 'indexing' && parts.length === 1) return blankRoute({ panel: 'indexing' });
   if (parts[0] === 'google-drive' && parts.length === 1) return blankRoute({ panel: 'google-drive' });
   if (parts[0] === 'updates' && parts.length === 1) return blankRoute({ panel: 'updates' });
+  if (parts[0] === 'network-drive' && parts.length === 1) return blankRoute({ panel: 'network-drive' });
   return drive;
 }
 
@@ -261,6 +262,7 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
     if (route.panel === 'developer') return '/settings/developer';
     if (route.panel === 'security') return '/security';
     if (route.panel === 'updates') return '/updates';
+    if (route.panel === 'network-drive') return '/network-drive';
     return '/drive';
   }
 

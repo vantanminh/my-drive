@@ -17,6 +17,7 @@ import type {
   SearchFilters,
   ServerStorage,
   ShareList,
+  NetworkDriveStatus,
   SystemUpdateSettings,
   SystemUpdatesStatus,
   UploadCreated,
@@ -677,6 +678,15 @@ export const api = {
     request<void>('/api/public/shares/' + encodeURIComponent(token) + '/unlock', {
       method: 'POST',
       json: { password }
+    }),
+  networkDriveStatus: (signal?: AbortSignal) =>
+    request<NetworkDriveStatus>('/api/network-drive', { signal, cache: 'no-store' }),
+  setNetworkDrive: (enabled: boolean) =>
+    request<NetworkDriveStatus>('/api/network-drive', {
+      method: 'PATCH',
+      json: { enabled },
+      csrf: true,
+      cache: 'no-store'
     }),
   updatesStatus: (signal?: AbortSignal) =>
     request<SystemUpdatesStatus>('/api/admin/updates', { signal, cache: 'no-store' }),

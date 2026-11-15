@@ -2292,3 +2292,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .system-update-host-state { display: grid; gap: 4px; margin-top: 12px; font-size: 11px; color: #52616a; }
 .system-update-host-state small { color: #7d8a94; font-size: 10px; }
 .system-update-cli-hint { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #f7f9f8; border: 1px solid #e7ecea; color: #52616a; line-height: 1.45; }
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
