@@ -50,6 +50,13 @@ class VpsUpdaterTests(unittest.TestCase):
         self.assertEqual(len(app['volumes']), 1)
         self.assertEqual(app['volumes'][0]['target'], '/run/my-drive-updater')
 
+    def test_updater_status_payload_omits_backup_requirement(self):
+        payload = vps._updater_status_payload({'config': {'images': {'app': 'ghcr.io/vantanminh/my-drive:latest'}}})
+        self.assertTrue(payload['connected'])
+        self.assertEqual(payload['imageTrack'], 'ghcr.io/vantanminh/my-drive:latest')
+        self.assertNotIn('backupConfigured', payload)
+        self.assertNotIn('backupRootHint', payload)
+
 
 if __name__ == '__main__':
     unittest.main()

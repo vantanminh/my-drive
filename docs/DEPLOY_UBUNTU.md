@@ -373,13 +373,7 @@ mới một lần để làm mới script quản trị trong `/opt/my-drive`; d�
 repository/ref tùy chỉnh nếu có và không truyền `--config`. Trạng thái cài đặt,
 database và file không bị tạo lại.
 
-Lệnh pull lại các image reference đã cấu hình khi cài, ghim digest mới, tạo
-backup ứng dụng và cấu hình được mã hóa, áp dụng image rồi kiểm tra readiness
-và HTTPS. Lần đầu có bản mới, lệnh hỏi thư mục backup trên filesystem riêng và
-age public recipient; sau backup thành công hai giá trị được lưu trong
-`/opt/my-drive/state.json` để những lần sau không cần nhập lại. Chỉ lưu public
-recipient trên VPS; giữ private identity ở nơi an toàn ngoài VPS. Nếu image
-digest chưa đổi, lệnh báo đã mới nhất và không restart dịch vụ hay tạo backup.
+Lệnh pull lại các image reference đã cấu hình khi cài, ghim digest mới, áp dụng image rồi kiểm tra readiness và HTTPS. Nếu image digest chưa đổi, lệnh báo đã mới nhất và không restart dịch vụ. Nếu muốn sao lưu trước khi nâng cấp, bạn vẫn có thể chạy `sudo my-drive backup` bất cứ lúc nào.
 
 Lệnh theo đúng tag/digest đang cấu hình. Tag di động như mặc định `latest` sẽ
 nhận image mới sau khi CI publish; tag phiên bản cố định hoặc digest sẽ giữ
@@ -388,24 +382,20 @@ phiên bản đó. Để chuyển release hoặc registry, dùng lệnh có tham
 Để build từ checkout đã review:
 
 ```bash
-sudo my-drive update --source /path/to/reviewed-checkout \
-  --backup-root /mnt/backup/my-drive --recipient age1...
+sudo my-drive update --source /path/to/reviewed-checkout
 ```
 
 Hoặc ghi JSON mapping `app`/`document-preview`/`media-indexer` vào file riêng và dùng
-`--images /path/to/release-images.json` thay `--source`. Có thể truyền
-`--backup-root` và `--recipient` để đổi nơi backup hoặc recipient; cấu hình mới
-được lưu sau khi backup thành công. Cập nhật build/pull image trước khi dừng app,
-tạo backup mã hóa đầy đủ, lưu image references cũ trong `state.previous.json`,
-áp dụng image mới rồi kiểm tra readiness và HTTPS.
+`--images /path/to/release-images.json` thay `--source`. Cập nhật build/pull image
+trước khi dừng app, lưu image references cũ trong `state.previous.json`, áp dụng image mới rồi kiểm tra readiness và HTTPS.
 Không tự `git pull`, không tự nâng database major version, không tự cập nhật
 mã installer/Compose layout sang schema mới. Thay đổi topology ở release sau
 cần đọc migration guide và chạy bộ cài tương ứng có hỗ trợ migration.
 
-Nếu cập nhật lỗi, data không bị xóa. Xem logs và giữ backup. Không tự chạy
+Nếu cập nhật lỗi, data không bị xóa. Xem logs để kiểm tra. Không tự chạy
 image cũ trên database đã migration. Để rollback: stop systemd, giữ nguyên
 database password hiện tại, lấy các `MY_DRIVE_*_IMAGE` từ `state.previous.json`
-đưa vào `state.json`, khôi phục bundle trước update theo bước restore ở trên,
+đưa vào `state.json`, khôi phục bundle backup (nếu có) theo bước restore ở trên,
 rồi start. Giữ lại local images cũ; không chạy prune trước khi xác nhận release.
 
 ## 7. Gỡ dịch vụ hoặc xử lý lỗi

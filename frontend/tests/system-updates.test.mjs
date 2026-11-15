@@ -46,10 +46,9 @@ test('system update API client sends CSRF, JSON, and credentials', async () => {
       autoUpdateEnabled: false,
       checkIntervalMinutes: 60
     });
-    await api.configureUpdateBackup('/mnt/backup/my-drive', 'age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p');
     await api.applySystemUpdate('v0.2.0');
 
-    assert.equal(requests.length, 4);
+    assert.equal(requests.length, 3);
     assert.equal(requests[0].url, '/api/admin/updates/check');
     assert.equal(requests[0].options.method, 'POST');
     assert.equal(requests[0].options.headers.get('X-CSRF-Token'), 'csrf-123');
@@ -62,11 +61,8 @@ test('system update API client sends CSRF, JSON, and credentials', async () => {
       checkIntervalMinutes: 60
     });
 
-    assert.equal(requests[2].url, '/api/admin/updates/backup-config');
-    assert.equal(JSON.parse(requests[2].options.body).backupRoot, '/mnt/backup/my-drive');
-
-    assert.equal(requests[3].url, '/api/admin/updates/apply');
-    assert.deepEqual(JSON.parse(requests[3].options.body), { targetTag: 'v0.2.0' });
+    assert.equal(requests[2].url, '/api/admin/updates/apply');
+    assert.deepEqual(JSON.parse(requests[2].options.body), { targetTag: 'v0.2.0' });
   } finally {
     globalThis.fetch = originalFetch;
     if (originalDocument === undefined) delete globalThis.document;

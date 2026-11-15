@@ -315,8 +315,6 @@ export type HostUpdaterStatus = {
   phase: string | null;
   message: string | null;
   targetTag: string | null;
-  backupConfigured: boolean;
-  backupRootHint: string | null;
   imageTrack: string | null;
   startedAt: string | null;
   finishedAt: string | null;

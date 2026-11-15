@@ -720,10 +720,6 @@ def write_updater_status(payload):
 
 def _updater_status_payload(state):
     status_data = read_updater_status()
-    saved_backup = state.get('update_backup', {}) if isinstance(state, dict) else {}
-    backup_root = saved_backup.get('root') if isinstance(saved_backup, dict) else None
-    backup_recipient = saved_backup.get('recipient') if isinstance(saved_backup, dict) else None
-    backup_configured = bool(backup_root and backup_recipient)
     images = state.get('config', {}).get('images', {}) if isinstance(state, dict) else {}
     return {
         'connected': True,
@@ -731,8 +727,6 @@ def _updater_status_payload(state):
         'phase': status_data.get('phase'),
         'message': status_data.get('message'),
         'targetTag': status_data.get('targetTag'),
-        'backupConfigured': backup_configured,
-        'backupRootHint': backup_root,
         'imageTrack': images.get('app') if isinstance(images, dict) else None,
         'startedAt': status_data.get('startedAt'),
         'finishedAt': status_data.get('finishedAt'),
@@ -798,8 +792,6 @@ def updater_serve():
             if 'phase:' in lower:
                 _, parsed_phase = line.split(':', 1)
                 phase = parsed_phase.strip().split(' ', 1)[0]
-            elif 'backup' in lower:
-                phase = 'backing_up'
             elif 'restarting' in lower or 'starting my drive' in lower or 'waiting until' in lower:
                 phase = 'restarting'
             elif 'already up to date' in lower or 'updated and verified' in lower:
@@ -872,24 +864,6 @@ def updater_serve():
             except Exception as error:
                 self.send_json(500, {'error': 'internal_error', 'message': str(error)})
 
-        def do_PUT(self):
-            if self.path != '/backup-config':
-                self.send_json(404, {'error': 'not_found'})
-                return
-            try:
-                body = self.read_json_body()
-                parsed = validate_backup_settings(body.get('backupRoot'), body.get('ageRecipient'))
-                with open('/run/lock/my-drive-installer.lock', 'a') as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    state = load_install_state()
-                    state['update_backup'] = {'root': parsed.backup_root, 'recipient': parsed.recipient}
-                    save(state)
-                self.send_json(200, _updater_status_payload(state))
-            except ValueError as error:
-                self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
-            except Exception as error:
-                self.send_json(500, {'error': 'internal_error', 'message': str(error)})
-
         def do_POST(self):
             if self.path != '/update':
                 self.send_json(404, {'error': 'not_found'})
@@ -903,10 +877,6 @@ def updater_serve():
                     target_tag = target_tag.strip()
                 with job_lock:
                     state = load_install_state()
-                    saved_backup = state.get('update_backup', {})
-                    if not isinstance(saved_backup, dict) or not saved_backup.get('root') or not saved_backup.get('recipient'):
-                        self.send_json(409, {'error': 'backup_config_required', 'message': 'Encrypted backup configuration is required before updating.'})
-                        return
                     status_now = read_updater_status()
                     if status_now.get('status') == 'running':
                         self.send_json(409, {'error': 'update_in_progress', 'message': 'An update is already running.'})
@@ -1059,11 +1029,6 @@ def main():
             if all(state['env'].get(image_env[service]) == image for service, image in images.items()):
                 print('Already up to date; no services were restarted.')
                 return
-            backup_args = update_backup_options(state, args)
-            print('phase: backing_up Creating mandatory encrypted backup before update', flush=True)
-            backup(state, backup_args)  # Mandatory complete encrypted backup before applying migrations.
-            state['update_backup'] = {'root': backup_args.backup_root, 'recipient': backup_args.recipient}
-            save(state)
             atomic(INSTALL / 'state.previous.json', json.dumps(state, indent=2) + '\n')
             state['config']['images'] = candidate['images']
             for service, image in images.items():
@@ -1071,7 +1036,7 @@ def main():
             save(state)
             print('phase: restarting Restarting My Drive services and verifying health', flush=True)
             start(state)
-            print('Updated and verified. Previous image references: /opt/my-drive/state.previous.json. Database rollback requires restoring the backup.')
+            print('Updated and verified. Previous image references: /opt/my-drive/state.previous.json.')
 
 
 if __name__ == '__main__':

@@ -16,7 +16,7 @@ use axum::{
         header::{CONTENT_TYPE, COOKIE},
     },
     response::Response,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
@@ -43,7 +43,6 @@ struct TestSession {
 
 #[derive(Clone)]
 struct MockUpdaterState {
-    backup_configured: Arc<AtomicBool>,
     triggered: Arc<AtomicBool>,
 }
 
@@ -90,14 +89,12 @@ async fn owner_can_check_configure_and_apply_system_updates() {
     });
 
     let mock_updater_state = MockUpdaterState {
-        backup_configured: Arc::new(AtomicBool::new(false)),
         triggered: Arc::new(AtomicBool::new(false)),
     };
     let updater_mock = Router::new()
         .route(
             "/status",
             get(|AxumState(st): AxumState<MockUpdaterState>| async move {
-                let configured = st.backup_configured.load(Ordering::SeqCst);
                 let running = st.triggered.load(Ordering::SeqCst);
                 Json(json!({
                     "connected": true,
@@ -105,20 +102,6 @@ async fn owner_can_check_configure_and_apply_system_updates() {
                     "phase": if running { json!("pulling") } else { Value::Null },
                     "message": if running { json!("Pulling v9.9.9") } else { Value::Null },
                     "targetTag": if running { json!("v9.9.9") } else { Value::Null },
-                    "backupConfigured": configured,
-                    "backupRootHint": if configured { json!("/mnt/backup/my-drive") } else { Value::Null },
-                }))
-            }),
-        )
-        .route(
-            "/backup-config",
-            put(|AxumState(st): AxumState<MockUpdaterState>| async move {
-                st.backup_configured.store(true, Ordering::SeqCst);
-                Json(json!({
-                    "connected": true,
-                    "status": "idle",
-                    "backupConfigured": true,
-                    "backupRootHint": "/mnt/backup/my-drive"
                 }))
             }),
         )
@@ -133,9 +116,7 @@ async fn owner_can_check_configure_and_apply_system_updates() {
                         "status": "running",
                         "phase": "pulling",
                         "message": "Starting host update to v9.9.9",
-                        "targetTag": "v9.9.9",
-                        "backupConfigured": true,
-                        "backupRootHint": "/mnt/backup/my-drive"
+                        "targetTag": "v9.9.9"
                     })),
                 )
             }),
@@ -214,22 +195,6 @@ async fn owner_can_check_configure_and_apply_system_updates() {
     assert_eq!(checked_json["latest"]["tag"], "v9.9.9");
     assert_eq!(checked_json["latest"]["updateAvailable"], true);
     assert_eq!(checked_json["hostUpdater"]["connected"], true);
-    assert_eq!(checked_json["hostUpdater"]["backupConfigured"], false);
-
-    // Updating before backup is configured must fail closed.
-    assert_eq!(
-        request(
-            &app,
-            Method::POST,
-            "/api/admin/updates/apply",
-            Some(&owner_session),
-            Some(&owner_session.csrf_token),
-            Some(json!({ "targetTag": "v9.9.9" })),
-        )
-        .await
-        .status(),
-        StatusCode::CONFLICT
-    );
 
     let settings = request(
         &app,
@@ -248,24 +213,6 @@ async fn owner_can_check_configure_and_apply_system_updates() {
     let settings_json = response_json(settings).await;
     assert_eq!(settings_json["settings"]["autoUpdateEnabled"], true);
     assert_eq!(settings_json["settings"]["checkIntervalMinutes"], 30);
-
-    let configured = request(
-        &app,
-        Method::POST,
-        "/api/admin/updates/backup-config",
-        Some(&owner_session),
-        Some(&owner_session.csrf_token),
-        Some(json!({
-            "backupRoot": "/mnt/backup/my-drive",
-            "ageRecipient": "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
-        })),
-    )
-    .await;
-    assert_eq!(configured.status(), StatusCode::OK);
-    assert_eq!(
-        response_json(configured).await["hostUpdater"]["backupConfigured"],
-        true
-    );
 
     let applied = request(
         &app,

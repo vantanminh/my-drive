@@ -36,8 +36,6 @@ function updaterPhaseLabel(status: SystemUpdatesStatus['hostUpdater']): string {
     switch (status.phase) {
       case 'pulling':
         return 'Downloading & verifying images';
-      case 'backing_up':
-        return 'Creating encrypted backup';
       case 'restarting':
         return 'Restarting services & verifying health';
       case 'verifying':
@@ -63,17 +61,11 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(false);
   const [checkIntervalMinutes, setCheckIntervalMinutes] = useState(60);
 
-  const [backupRoot, setBackupRoot] = useState('');
-  const [ageRecipient, setAgeRecipient] = useState('');
-
   function applySnapshot(snapshot: SystemUpdatesStatus) {
     setData(snapshot);
     setAutoCheckEnabled(snapshot.settings.autoCheckEnabled);
     setAutoUpdateEnabled(snapshot.settings.autoUpdateEnabled);
     setCheckIntervalMinutes(snapshot.settings.checkIntervalMinutes);
-    if (snapshot.hostUpdater.backupRootHint && !backupRoot) {
-      setBackupRoot(snapshot.hostUpdater.backupRootHint);
-    }
     onStatusChange?.(snapshot);
   }
 
@@ -179,23 +171,6 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
     }
   }
 
-  async function saveBackupSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusyAction('backup');
-    setError('');
-    setNotice('');
-    try {
-      const snapshot = await api.configureUpdateBackup(backupRoot.trim(), ageRecipient.trim());
-      applySnapshot(snapshot);
-      setAgeRecipient('');
-      setNotice('Encrypted backup settings saved for future updates.');
-    } catch (cause: unknown) {
-      setError(friendlyError(cause));
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
   async function triggerUpdate() {
     setBusyAction('apply');
     setError('');
@@ -205,7 +180,7 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
       applySnapshot(snapshot);
       setNotice(
         snapshot.hostUpdater.message ||
-          'Update started. Encrypted backup and container rollout are running on the host.'
+          'Update started. Container rollout is running on the host.'
       );
     } catch (cause: unknown) {
       setError(friendlyError(cause));
@@ -217,7 +192,6 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
   const updateAvailable = Boolean(data?.latest.updateAvailable);
   const canApplyUpdate =
     Boolean(data?.hostUpdater.connected) &&
-    Boolean(data?.hostUpdater.backupConfigured) &&
     !isRunning &&
     busyAction === null;
 
@@ -228,8 +202,7 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
           <span className="eyebrow">OWNER CONTROLS</span>
           <h2 id="system-update-title">System updates</h2>
           <p>
-            Track GitHub releases, check manually or on a schedule, and roll out verified updates with
-            pre-update encrypted backups.
+            Track GitHub releases, check manually or on a schedule, and roll out verified container updates.
           </p>
         </div>
         <div className="account-admin-header-actions">
@@ -262,7 +235,7 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
                 : updaterPhaseLabel(data!.hostUpdater)}
             </strong>
             <small>
-              {data?.hostUpdater.message || 'Pulling verified images, creating encrypted backup, and restarting services.'}
+              {data?.hostUpdater.message || 'Pulling verified images and restarting services.'}
             </small>
           </div>
         </div>
@@ -420,8 +393,8 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
                   <span>
                     <strong>Auto-update when a new release is detected</strong>
                     <small>
-                      Requires an active host updater and encrypted backup configuration. Briefly restarts the
-                      service (~15–30s) after backing up.
+                      Requires an active host updater. Briefly restarts the service (~15–30s) when applying an
+                      update.
                     </small>
                   </span>
                 </label>
@@ -436,7 +409,7 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
               <div className="security-card-heading">
                 <span className="security-card-icon"><Server size={17} /></span>
                 <div>
-                  <h3>Host updater &amp; encrypted backup</h3>
+                  <h3>Host updater</h3>
                   <p>
                     {data.hostUpdater.connected
                       ? `Host bridge connected (${updaterPhaseLabel(data.hostUpdater)}).`
@@ -446,56 +419,19 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
               </div>
 
               {data.hostUpdater.connected ? (
-                <>
-                  <div className="system-update-host-state">
+                <div className="system-update-host-state">
+                  {data.hostUpdater.imageTrack ? (
                     <span>
-                      Backup destination:{' '}
-                      <strong>
-                        {data.hostUpdater.backupConfigured
-                          ? data.hostUpdater.backupRootHint || 'Configured'
-                          : 'Not configured yet (required before updating)'}
-                      </strong>
+                      Image track: <code>{data.hostUpdater.imageTrack}</code>
                     </span>
-                    {data.hostUpdater.finishedAt ? (
-                      <small>
-                        Last host job ({data.hostUpdater.status}): {formatDate(data.hostUpdater.finishedAt)}
-                        {data.hostUpdater.message ? ` — ${data.hostUpdater.message}` : ''}
-                      </small>
-                    ) : null}
-                  </div>
-
-                  <form className="system-update-form" onSubmit={(event) => void saveBackupSettings(event)}>
-                    <label className="account-form-field">
-                      <span>Backup directory on VPS host</span>
-                      <input
-                        className="text-input"
-                        type="text"
-                        required
-                        value={backupRoot}
-                        onChange={(event) => setBackupRoot(event.target.value)}
-                        placeholder="/mnt/backup/my-drive"
-                      />
-                    </label>
-                    <label className="account-form-field">
-                      <span>Age public recipient <small>(age1…)</small></span>
-                      <input
-                        className="text-input"
-                        type="text"
-                        required
-                        value={ageRecipient}
-                        onChange={(event) => setAgeRecipient(event.target.value)}
-                        placeholder="age1..."
-                      />
-                    </label>
-                    <button className="button button-secondary" type="submit" disabled={busyAction !== null || isRunning}>
-                      {busyAction === 'backup'
-                        ? 'Saving…'
-                        : data.hostUpdater.backupConfigured
-                          ? 'Update backup settings'
-                          : 'Save backup settings'}
-                    </button>
-                  </form>
-                </>
+                  ) : null}
+                  {data.hostUpdater.finishedAt ? (
+                    <small>
+                      Last host job ({data.hostUpdater.status}): {formatDate(data.hostUpdater.finishedAt)}
+                      {data.hostUpdater.message ? ` — ${data.hostUpdater.message}` : ''}
+                    </small>
+                  ) : null}
+                </div>
               ) : (
                 <div className="system-update-cli-hint">
                   <small>

@@ -28,7 +28,6 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/admin/updates", get(status))
         .route("/api/admin/updates/settings", patch(update_settings))
         .route("/api/admin/updates/check", post(check_now))
-        .route("/api/admin/updates/backup-config", post(configure_backup))
         .route("/api/admin/updates/apply", post(apply_update))
 }
 
@@ -42,8 +41,6 @@ enum UpdateError {
     BadRequest(&'static str),
     #[error("host updater service is not connected")]
     UpdaterUnavailable,
-    #[error("encrypted backup destination is required before updating")]
-    BackupConfigRequired,
     #[error("an update is already in progress")]
     UpdateInProgress,
     #[error("host updater rejected the request")]
@@ -68,14 +65,6 @@ impl IntoResponse for UpdateError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "updater_unavailable",
                 Some("VPS host updater service is not reachable.".to_owned()),
-            ),
-            Self::BackupConfigRequired => (
-                StatusCode::CONFLICT,
-                "backup_config_required",
-                Some(
-                    "Configure an encrypted backup destination and age public key before updating."
-                        .to_owned(),
-                ),
             ),
             Self::UpdateInProgress => (
                 StatusCode::CONFLICT,
@@ -159,8 +148,6 @@ pub(crate) struct HostUpdaterStatus {
     pub phase: Option<String>,
     pub message: Option<String>,
     pub target_tag: Option<String>,
-    pub backup_configured: bool,
-    pub backup_root_hint: Option<String>,
     pub image_track: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -175,8 +162,6 @@ impl HostUpdaterStatus {
             phase: None,
             message: None,
             target_tag: None,
-            backup_configured: false,
-            backup_root_hint: None,
             image_track: None,
             started_at: None,
             finished_at: None,
@@ -204,13 +189,6 @@ struct UpdateSettingsRequest {
     auto_check_enabled: bool,
     auto_update_enabled: bool,
     check_interval_minutes: i32,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BackupConfigRequest {
-    backup_root: String,
-    age_recipient: String,
 }
 
 #[derive(Deserialize)]
@@ -353,46 +331,6 @@ async fn check_now(
     )))
 }
 
-async fn configure_backup(
-    State(state): State<AppState>,
-    user: AuthenticatedUser,
-    headers: HeaderMap,
-    Json(request): Json<BackupConfigRequest>,
-) -> Result<Response, UpdateError> {
-    require_owner(&user)?;
-    drive::require_request_csrf(&headers, &user, state.auth_settings)
-        .map_err(|_| UpdateError::Csrf)?;
-
-    let backup_root = validate_backup_root(&request.backup_root)?;
-    let age_recipient = validate_age_recipient(&request.age_recipient)?;
-
-    let payload = serde_json::json!({
-        "backupRoot": backup_root,
-        "ageRecipient": age_recipient,
-    });
-    let host_updater = send_updater_request(
-        &state.update_settings,
-        "PUT",
-        "/backup-config",
-        Some(payload),
-    )
-    .await?;
-
-    sqlx::query("INSERT INTO audit_events (event_type, actor_id) VALUES ($1, $2)")
-        .bind("system_update_backup_configured")
-        .bind(user.id)
-        .execute(&state.pool)
-        .await
-        .map_err(UpdateError::Database)?;
-
-    let row = load_settings_row(&state.pool).await?;
-    Ok(no_store_json(build_status_response(
-        &state.update_settings,
-        &row,
-        host_updater,
-    )))
-}
-
 async fn apply_update(
     State(state): State<AppState>,
     user: AuthenticatedUser,
@@ -425,9 +363,6 @@ async fn apply_update(
     }
     if current_host.status == "running" {
         return Err(UpdateError::UpdateInProgress);
-    }
-    if !current_host.backup_configured {
-        return Err(UpdateError::BackupConfigRequired);
     }
 
     let host_updater = trigger_host_update(
@@ -498,7 +433,7 @@ async fn worker_pass(pool: &PgPool, settings: &UpdateSettings) -> Result<(), Upd
     }
 
     let host = fetch_host_updater_status(settings).await;
-    if !host.connected || !host.backup_configured || host.status == "running" {
+    if !host.connected || host.status == "running" {
         return Ok(());
     }
 
@@ -1007,7 +942,6 @@ fn parse_updater_response(
         .and_then(|item| item.message.clone())
         .unwrap_or_else(|| format!("host updater returned HTTP {status}"));
     match code {
-        Some("backup_config_required") => Err(UpdateError::BackupConfigRequired),
         Some("update_in_progress") => Err(UpdateError::UpdateInProgress),
         Some("invalid_request") => Err(UpdateError::UpdaterRejected(detail)),
         _ => Err(UpdateError::UpdaterRejected(detail)),
@@ -1079,39 +1013,6 @@ fn valid_release_tag(tag: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-fn validate_backup_root(raw: &str) -> Result<String, UpdateError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty()
-        || trimmed.len() > 512
-        || !trimmed.starts_with('/')
-        || trimmed == "/"
-        || trimmed
-            .chars()
-            .any(|ch| ch.is_control() || ch.is_whitespace())
-        || trimmed.split('/').any(|segment| segment == "..")
-    {
-        return Err(UpdateError::BadRequest(
-            "backupRoot must be a safe absolute Linux directory path (for example /mnt/backup/my-drive)",
-        ));
-    }
-    Ok(trimmed.to_owned())
-}
-
-fn validate_age_recipient(raw: &str) -> Result<String, UpdateError> {
-    let trimmed = raw.trim();
-    if !trimmed.starts_with("age1")
-        || !(14..=128).contains(&trimmed.len())
-        || !trimmed
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    {
-        return Err(UpdateError::BadRequest(
-            "ageRecipient must be a valid age public key starting with age1",
-        ));
-    }
-    Ok(trimmed.to_owned())
-}
-
 fn truncate_chars(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();
@@ -1153,8 +1054,7 @@ mod tests {
     use super::*;
     use axum::{
         Router,
-        extract::State as AxumState,
-        routing::{get, post, put},
+        routing::{get, post},
     };
     use tokio::net::TcpListener;
 
@@ -1176,23 +1076,6 @@ mod tests {
         assert!(!is_update_available("v0.2.0", None, Some("v0.1.9"), None));
         assert!(!is_update_available("v0.1.2", None, Some("v0.1.2"), None));
         assert!(!is_update_available("0.1.0", None, None, None));
-    }
-
-    #[test]
-    fn validates_backup_root_and_age_recipient() {
-        assert!(validate_backup_root("/mnt/backup/my-drive").is_ok());
-        assert!(validate_backup_root("/").is_err());
-        assert!(validate_backup_root("relative/backup").is_err());
-        assert!(validate_backup_root("/mnt/../etc").is_err());
-
-        assert!(
-            validate_age_recipient(
-                "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
-            )
-            .is_ok()
-        );
-        assert!(validate_age_recipient("AGE-SECRET-KEY-1...").is_err());
-        assert!(validate_age_recipient("invalid").is_err());
     }
 
     #[test]
@@ -1287,20 +1170,7 @@ mod tests {
                         "phase": null,
                         "message": null,
                         "targetTag": null,
-                        "backupConfigured": false,
-                        "backupRootHint": null,
                         "imageTrack": "ghcr.io/vantanminh/my-drive:latest"
-                    }))
-                }),
-            )
-            .route(
-                "/backup-config",
-                put(|AxumState(_): AxumState<()>| async {
-                    Json(serde_json::json!({
-                        "connected": true,
-                        "status": "idle",
-                        "backupConfigured": true,
-                        "backupRootHint": "/mnt/backup/my-drive"
                     }))
                 }),
             )
@@ -1314,14 +1184,11 @@ mod tests {
                             "status": "running",
                             "phase": "pulling",
                             "message": "Pulling container images",
-                            "targetTag": "v0.1.5",
-                            "backupConfigured": true,
-                            "backupRootHint": "/mnt/backup/my-drive"
+                            "targetTag": "v0.1.5"
                         })),
                     )
                 }),
-            )
-            .with_state(());
+            );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1335,20 +1202,7 @@ mod tests {
         };
         let initial = fetch_host_updater_status(&settings).await;
         assert!(initial.connected);
-        assert!(!initial.backup_configured);
-
-        let configured = send_updater_request(
-            &settings,
-            "PUT",
-            "/backup-config",
-            Some(serde_json::json!({
-                "backupRoot": "/mnt/backup/my-drive",
-                "ageRecipient": "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
-            })),
-        )
-        .await
-        .expect("configure backup");
-        assert!(configured.backup_configured);
+        assert_eq!(initial.status, "idle");
 
         let running = send_updater_request(
             &settings,

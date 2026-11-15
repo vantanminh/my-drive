@@ -693,13 +693,6 @@ export const api = {
       csrf: true,
       cache: 'no-store'
     }),
-  configureUpdateBackup: (backupRoot: string, ageRecipient: string) =>
-    request<SystemUpdatesStatus>('/api/admin/updates/backup-config', {
-      method: 'POST',
-      json: { backupRoot, ageRecipient },
-      csrf: true,
-      cache: 'no-store'
-    }),
   applySystemUpdate: (targetTag?: string | null) =>
     request<SystemUpdatesStatus>('/api/admin/updates/apply', {
       method: 'POST',
