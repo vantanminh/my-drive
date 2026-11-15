@@ -22,6 +22,7 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { downloadToLocalFile } from '../../modules/mydrive-media-sync/src';
 import { FolderPickerModal } from '../components/FolderPickerModal';
+import { LanStatusBadge } from '../components/LanStatusBadge';
 import {
   ShareLinkModal,
   type ShareTargetSubject,
@@ -251,6 +252,7 @@ export function FilesScreen() {
       const downloaded = await downloadToLocalFile(
         client.downloadUrl(entry.id),
         entry.name,
+        client.getSessionToken(),
       );
       await Sharing.shareAsync(downloaded.localUri, {
         mimeType: entry.mime_detected ?? undefined,
@@ -364,7 +366,10 @@ export function FilesScreen() {
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.header}>
         <View style={styles.titleRow}>
-          <Text style={styles.title}>Files</Text>
+          <View style={styles.titleLeft}>
+            <Text style={styles.title}>Files</Text>
+            <LanStatusBadge compact />
+          </View>
           <View style={styles.headerActions}>
             <Pressable
               onPress={cycleSort}
@@ -785,6 +790,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: spacing.sm,
+  },
+  titleLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    flexShrink: 1,
   },
   title: {
     fontSize: 26,

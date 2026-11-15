@@ -4,6 +4,7 @@ import {
   uploadFileChunked,
 } from '../../modules/mydrive-media-sync/src';
 import type { MyDriveClient } from './apiClient';
+import { isLanUrl } from './lanDiscovery';
 import {
   type UploadWorkflowPhaseEvent,
   type ChunkUploader,
@@ -29,14 +30,16 @@ export function createNativeChunkUploader(client: MyDriveClient): ChunkUploader 
         onProgress?.(event.uploadedBytes, event.totalBytes);
       }
     });
+    const baseUrl = client.getBaseUrl();
     try {
       return await uploadFileChunked({
-        baseUrl: client.getBaseUrl(),
+        baseUrl,
         uploadId,
         fileUri,
         startOffset,
-        chunkSize: 2 * 1024 * 1024,
+        chunkSize: isLanUrl(baseUrl) ? 8 * 1024 * 1024 : 2 * 1024 * 1024,
         csrfToken: client.getCsrfToken(),
+        authToken: client.getSessionToken(),
       });
     } finally {
       subscription.remove();

@@ -215,6 +215,7 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
         );
         const result = await engine.run({
           settings,
+          ledgerServerUrl: serverUrl ?? undefined,
           forceReverify: options?.forceReverify,
           signal: controller.signal,
           onProgress: (nextSnap) => setSnapshot(nextSnap),
@@ -233,7 +234,7 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
         abortRef.current = null;
       }
     },
-    [client, settings, refreshLedger, inspectICloudSample],
+    [client, serverUrl, settings, refreshLedger, inspectICloudSample],
   );
 
   const cancelSync = useCallback(() => {

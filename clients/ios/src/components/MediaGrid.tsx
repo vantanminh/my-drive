@@ -71,7 +71,7 @@ export function MediaGrid({
         const isVideo =
           item.category === 'video' ||
           Boolean(item.mime_type?.startsWith('video/'));
-        const thumbUri = client?.thumbnailUrl(item.id);
+        const thumbSource = client?.thumbnailSource(item.id);
         return (
           <Pressable
             onPress={() => onPressItem(item, index)}
@@ -81,9 +81,9 @@ export function MediaGrid({
               pressed && styles.cellPressed,
             ]}
           >
-            {thumbUri ? (
+            {thumbSource ? (
               <Image
-                source={{ uri: thumbUri }}
+                source={thumbSource}
                 style={styles.thumb}
                 contentFit="cover"
                 transition={120}

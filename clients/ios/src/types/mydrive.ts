@@ -8,12 +8,14 @@ export interface User {
 export interface LoginResponse {
   user: User;
   csrf_token: string;
+  session_token?: string | null;
 }
 
 export interface ServerCapabilities {
   product: string;
   apiVersion: string;
   serverVersion: string;
+  serverId?: string | null;
   minClientApi?: string;
   maxClientApi?: string;
   features: {
@@ -28,6 +30,33 @@ export interface ServerCapabilities {
     protocol?: string;
     maxChunkBytes?: number;
   };
+}
+
+export type LanConnectionMode = 'lan' | 'remote' | 'checking' | 'offline';
+
+export interface LanConnectionStatus {
+  mode: LanConnectionMode;
+  isOnLan: boolean;
+  activeUrl: string | null;
+  primaryUrl: string | null;
+  pairedLanUrl: string | null;
+  autoSwitchLan: boolean;
+  latencyMs: number | null;
+  localIp: string | null;
+  serverId: string | null;
+  lastCheckedAt: string | null;
+}
+
+export interface DiscoveredLanServer {
+  url: string;
+  host: string;
+  port: number;
+  scheme: 'http' | 'https';
+  serverId: string | null;
+  serverVersion: string | null;
+  latencyMs: number;
+  matchedServerId: boolean;
+  source: 'probe' | 'subnet';
 }
 
 export interface ServerProbeResult {

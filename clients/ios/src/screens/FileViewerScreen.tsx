@@ -34,8 +34,18 @@ type Props = NativeStackScreenProps<RootStackParamList, 'FileViewer'>;
 
 const MAX_TEXT_PREVIEW_BYTES = 512 * 1024;
 
-function VideoBody({ uri, width, height }: { uri: string; width: number; height: number }) {
-  const player = useVideoPlayer(uri, (p) => {
+function VideoBody({
+  uri,
+  headers,
+  width,
+  height,
+}: {
+  uri: string;
+  headers?: Record<string, string>;
+  width: number;
+  height: number;
+}) {
+  const player = useVideoPlayer(headers ? { uri, headers } : uri, (p) => {
     p.loop = false;
   });
   return (
@@ -89,12 +99,14 @@ export function FileViewerScreen({ navigation, route }: Props) {
           const dl = await downloadToLocalFile(
             client.previewUrl(entry.id),
             previewName,
+            client.getSessionToken(),
           );
           setLocalUri(dl.localUri);
         } catch {
           const fallbackDl = await downloadToLocalFile(
             client.downloadUrl(entry.id),
             entry.name,
+            client.getSessionToken(),
           );
           setLocalUri(fallbackDl.localUri);
         }
@@ -105,6 +117,7 @@ export function FileViewerScreen({ navigation, route }: Props) {
         const dl = await downloadToLocalFile(
           client.downloadUrl(entry.id),
           entry.name,
+          client.getSessionToken(),
         );
         setLocalUri(dl.localUri);
         const content = await new File(dl.localUri).text();
@@ -133,6 +146,7 @@ export function FileViewerScreen({ navigation, route }: Props) {
     const dl = await downloadToLocalFile(
       client.downloadUrl(entry.id),
       entry.name,
+      client.getSessionToken(),
     );
     return dl.localUri;
   };
@@ -257,7 +271,7 @@ export function FileViewerScreen({ navigation, route }: Props) {
           centerContent
         >
           <Image
-            source={{ uri: client.previewUrl(entry.id) }}
+            source={client.previewSource(entry.id)}
             style={{ width, height: height * 0.8 }}
             contentFit="contain"
           />
@@ -271,7 +285,12 @@ export function FileViewerScreen({ navigation, route }: Props) {
           style={styles.container}
           contentContainerStyle={styles.paddedContent}
         >
-          <VideoBody uri={client.previewUrl(entry.id)} width={width - spacing.lg * 2} height={height} />
+          <VideoBody
+            uri={client.previewUrl(entry.id)}
+            headers={client.getSessionToken() ? client.authHeaders() : undefined}
+            width={width - spacing.lg * 2}
+            height={height}
+          />
           <DetailsCard entry={entry} details={details} />
         </ScrollView>
       );

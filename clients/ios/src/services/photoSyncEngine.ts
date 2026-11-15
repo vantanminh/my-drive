@@ -51,6 +51,7 @@ export interface PhotoSyncPlatformDeps {
 
 export interface SyncRunOptions {
   settings: SyncSettings;
+  ledgerServerUrl?: string;
   forceReverify?: boolean;
   maxAssetsPerRun?: number;
   onProgress?: (snapshot: SyncProgressSnapshot) => void;
@@ -104,7 +105,7 @@ export class PhotoSyncEngine {
   async run(options: SyncRunOptions): Promise<SyncProgressSnapshot> {
     const state = initialSyncSnapshot();
     const emit = () => options.onProgress?.({ ...state });
-    const serverUrl = this.client.getBaseUrl();
+    const serverUrl = options.ledgerServerUrl ?? this.client.getBaseUrl();
 
     const permission = await this.deps.getPermissionStatus();
     if (permission !== 'granted' && permission !== 'limited') {

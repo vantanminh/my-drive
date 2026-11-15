@@ -45,9 +45,12 @@ export class MyDriveApiError extends Error {
 export interface MyDriveClientConfig {
   baseUrl: string;
   csrfToken?: string | null;
+  sessionToken?: string | null;
   fetchImpl?: FetchLike;
   onCsrfUpdate?: (token: string | null) => void;
+  onSessionTokenUpdate?: (token: string | null) => void;
   onUnauthorized?: () => void;
+  onTransportError?: (failedBaseUrl: string, error: unknown) => void;
 }
 
 export interface SearchDriveParams {
@@ -85,16 +88,22 @@ function buildQuery(params: Record<string, string | number | boolean | null | un
 export class MyDriveClient {
   private baseUrl: string;
   private csrfToken: string | null;
+  private sessionToken: string | null;
   private readonly fetchImpl: FetchLike;
   private readonly onCsrfUpdate?: (token: string | null) => void;
+  private readonly onSessionTokenUpdate?: (token: string | null) => void;
   private readonly onUnauthorized?: () => void;
+  private readonly onTransportError?: (failedBaseUrl: string, error: unknown) => void;
 
   constructor(config: MyDriveClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.csrfToken = config.csrfToken ?? null;
+    this.sessionToken = config.sessionToken ?? null;
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.onCsrfUpdate = config.onCsrfUpdate;
+    this.onSessionTokenUpdate = config.onSessionTokenUpdate;
     this.onUnauthorized = config.onUnauthorized;
+    this.onTransportError = config.onTransportError;
   }
 
   getBaseUrl(): string {
@@ -110,6 +119,20 @@ export class MyDriveClient {
     this.onCsrfUpdate?.(token);
   }
 
+  getSessionToken(): string | null {
+    return this.sessionToken;
+  }
+
+  setSessionToken(token: string | null): void {
+    this.sessionToken = token;
+    this.onSessionTokenUpdate?.(token);
+  }
+
+  authHeaders(): Record<string, string> {
+    if (!this.sessionToken) return {};
+    return { Authorization: `Bearer ${this.sessionToken}` };
+  }
+
   thumbnailUrl(fileId: string): string {
     return `${this.baseUrl}/api/files/${encodeURIComponent(fileId)}/thumbnail`;
   }
@@ -120,6 +143,16 @@ export class MyDriveClient {
 
   downloadUrl(fileId: string): string {
     return `${this.baseUrl}/api/files/${encodeURIComponent(fileId)}/download`;
+  }
+
+  thumbnailSource(fileId: string): { uri: string; headers?: Record<string, string> } {
+    const uri = this.thumbnailUrl(fileId);
+    return this.sessionToken ? { uri, headers: this.authHeaders() } : { uri };
+  }
+
+  previewSource(fileId: string): { uri: string; headers?: Record<string, string> } {
+    const uri = this.previewUrl(fileId);
+    return this.sessionToken ? { uri, headers: this.authHeaders() } : { uri };
   }
 
   private async requestRaw(
@@ -135,16 +168,25 @@ export class MyDriveClient {
       Accept: 'application/json',
       ...(options?.headers ?? {}),
     };
+    if (this.sessionToken && !headers.Authorization) {
+      headers.Authorization = `Bearer ${this.sessionToken}`;
+    }
     if (MUTATING_METHODS.has(method.toUpperCase()) && this.csrfToken) {
       headers['X-Csrf-Token'] = this.csrfToken;
     }
 
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: options?.body ?? undefined,
-      credentials: 'include',
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        body: options?.body ?? undefined,
+        credentials: 'include',
+      });
+    } catch (error) {
+      this.onTransportError?.(this.baseUrl, error);
+      throw error;
+    }
 
     if (response.status === 401 && !options?.skipUnauthorizedHook) {
       this.onUnauthorized?.();
@@ -212,10 +254,13 @@ export class MyDriveClient {
       'POST',
       '/api/auth/login',
       { email: email.trim(), password },
-      undefined,
+      { 'X-MyDrive-Client': 'mobile' },
       true,
     );
     this.setCsrfToken(result.csrf_token);
+    if (result.session_token) {
+      this.setSessionToken(result.session_token);
+    }
     return result;
   }
 
@@ -235,6 +280,7 @@ export class MyDriveClient {
       await this.requestJson<void>('POST', '/api/auth/logout');
     } finally {
       this.setCsrfToken(null);
+      this.setSessionToken(null);
     }
   }
 

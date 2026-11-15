@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 
+import { LanStatusBadge } from '../components/LanStatusBadge';
 import {
   AppButton,
   Banner,
@@ -26,6 +27,7 @@ import { colors, radius, spacing } from '../theme/tokens';
 export function LoginScreen() {
   const {
     serverUrl,
+    activeBaseUrl,
     lastEmail,
     capabilities,
     sessionNotice,
@@ -93,6 +95,7 @@ export function LoginScreen() {
                     icon={isHttps ? 'lock-closed-outline' : 'wifi-outline'}
                     label={isHttps ? 'HTTPS Connected' : 'HTTP LAN'}
                   />
+                  <LanStatusBadge compact />
                   {capabilities?.serverVersion ? (
                     <Text style={styles.serverVersion}>
                       v{capabilities.serverVersion}
@@ -100,7 +103,7 @@ export function LoginScreen() {
                   ) : null}
                 </View>
                 <Text style={styles.serverUrlText} numberOfLines={1}>
-                  {serverUrl}
+                  {activeBaseUrl ?? serverUrl}
                 </Text>
               </View>
               <Pressable

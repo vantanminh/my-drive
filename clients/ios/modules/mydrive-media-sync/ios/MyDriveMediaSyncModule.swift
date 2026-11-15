@@ -1,6 +1,8 @@
 import CryptoKit
+import Darwin
 import ExpoModulesCore
 import Foundation
+import Network
 import Photos
 import UniformTypeIdentifiers
 
@@ -37,6 +39,7 @@ internal struct UploadChunkedOptions: Record {
   @Field var startOffset: Double = 0
   @Field var chunkSize: Double = 4_194_304
   @Field var csrfToken: String? = nil
+  @Field var authToken: String? = nil
 }
 
 private final class ModuleEventRelay: @unchecked Sendable {
@@ -404,6 +407,7 @@ public final class MyDriveMediaSyncModule: Module {
       let startOffset = options.startOffset
       let chunkSize = options.chunkSize
       let csrfToken = options.csrfToken
+      let authToken = options.authToken
 
       Task.detached(priority: .userInitiated) {
         do {
@@ -413,7 +417,8 @@ public final class MyDriveMediaSyncModule: Module {
             fileUri: fileUri,
             startOffset: startOffset,
             chunkSize: chunkSize,
-            csrfToken: csrfToken
+            csrfToken: csrfToken,
+            authToken: authToken
           ) { uploaded, total in
             relay.send(
               "onUploadProgress",
@@ -435,7 +440,7 @@ public final class MyDriveMediaSyncModule: Module {
       }
     }
 
-    AsyncFunction("downloadToLocalFile") { (urlString: String, filename: String, promise: Promise) in
+    AsyncFunction("downloadToLocalFile") { (urlString: String, filename: String, authToken: String?, promise: Promise) in
       Task.detached(priority: .userInitiated) {
         guard let url = URL(string: urlString) else {
           promise.reject(MediaSyncOperationException(("INVALID_URL", "Invalid download URL.")))
@@ -444,6 +449,9 @@ public final class MyDriveMediaSyncModule: Module {
         var request = URLRequest(url: url)
         request.httpShouldHandleCookies = true
         request.timeoutInterval = 300
+        if let token = authToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+          request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
 
         do {
           let (tempURL, response) = try await URLSession.shared.download(for: request)
@@ -500,6 +508,27 @@ public final class MyDriveMediaSyncModule: Module {
       else { return }
       for cookie in cookies where cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) == host {
         HTTPCookieStorage.shared.deleteCookie(cookie)
+      }
+    }
+
+    AsyncFunction("getWifiSubnetInfo") { () -> [String: Any]? in
+      guard let iface = Self.detectLanInterface() else {
+        return nil
+      }
+      return [
+        "interfaceName": iface.name,
+        "localIp": iface.ip,
+        "netmask": iface.netmask,
+        "subnetPrefix": iface.subnetPrefix,
+      ]
+    }
+
+    AsyncFunction("discoverLanServers") { (ports: [Int]?, promise: Promise) in
+      Task.detached(priority: .userInitiated) {
+        let candidatePorts = (ports?.isEmpty == false ? ports! : [3000, 80, 8080, 443, 8443])
+          .filter { $0 > 0 && $0 <= 65535 }
+        let results = await Self.scanLanForServers(ports: candidatePorts)
+        promise.resolve(results)
       }
     }
   }
@@ -696,7 +725,8 @@ public final class MyDriveMediaSyncModule: Module {
   private static func fetchRemoteUploadOffset(
     session: URLSession,
     patchURL: URL,
-    csrfToken: String?
+    csrfToken: String?,
+    authToken: String?
   ) async -> UInt64? {
     var headRequest = URLRequest(url: patchURL)
     headRequest.httpMethod = "HEAD"
@@ -705,6 +735,9 @@ public final class MyDriveMediaSyncModule: Module {
     headRequest.setValue("1.0.0", forHTTPHeaderField: "Tus-Resumable")
     if let csrf = csrfToken, !csrf.isEmpty {
       headRequest.setValue(csrf, forHTTPHeaderField: "X-Csrf-Token")
+    }
+    if let authToken = authToken?.trimmingCharacters(in: .whitespacesAndNewlines), !authToken.isEmpty {
+      headRequest.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
     }
     do {
       let (_, response) = try await session.data(for: headRequest)
@@ -726,6 +759,7 @@ public final class MyDriveMediaSyncModule: Module {
     startOffset: Double,
     chunkSize: Double,
     csrfToken: String?,
+    authToken: String?,
     onProgress: @Sendable @escaping (UInt64, UInt64) -> Void
   ) async throws -> UInt64 {
     let trimmedBase = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -746,9 +780,11 @@ public final class MyDriveMediaSyncModule: Module {
     }
 
     let minChunk: UInt64 = 512 * 1024
-    let maxChunk: UInt64 = 8 * 1024 * 1024
-    var adaptiveChunk = UInt64(min(Int(maxChunk), max(Int(minChunk), Int(chunkSize))))
+    let requestedChunk = UInt64(max(0, Int64(chunkSize)))
+    let maxChunk: UInt64 = min(32 * 1024 * 1024, max(8 * 1024 * 1024, requestedChunk))
+    var adaptiveChunk = min(maxChunk, max(minChunk, requestedChunk))
     let resolvedCsrf = resolveCsrfToken(explicit: csrfToken, for: patchURL)
+    let resolvedAuth = authToken?.trimmingCharacters(in: .whitespacesAndNewlines)
 
     let config = URLSessionConfiguration.ephemeral
     config.waitsForConnectivity = true
@@ -785,6 +821,9 @@ public final class MyDriveMediaSyncModule: Module {
       if let csrf = resolvedCsrf, !csrf.isEmpty {
         request.setValue(csrf, forHTTPHeaderField: "X-Csrf-Token")
       }
+      if let resolvedAuth, !resolvedAuth.isEmpty {
+        request.setValue("Bearer \(resolvedAuth)", forHTTPHeaderField: "Authorization")
+      }
 
       let chunkStart = CFAbsoluteTimeGetCurrent()
       do {
@@ -807,7 +846,8 @@ public final class MyDriveMediaSyncModule: Module {
           if let headOffset = await fetchRemoteUploadOffset(
             session: session,
             patchURL: patchURL,
-            csrfToken: resolvedCsrf
+            csrfToken: resolvedCsrf,
+            authToken: resolvedAuth
           ) {
             offset = min(totalBytes, headOffset)
             onProgress(offset, totalBytes)
@@ -821,7 +861,8 @@ public final class MyDriveMediaSyncModule: Module {
           if let headOffset = await fetchRemoteUploadOffset(
             session: session,
             patchURL: patchURL,
-            csrfToken: resolvedCsrf
+            csrfToken: resolvedCsrf,
+            authToken: resolvedAuth
           ) {
             offset = min(totalBytes, headOffset)
             onProgress(offset, totalBytes)
@@ -867,7 +908,8 @@ public final class MyDriveMediaSyncModule: Module {
           if let headOffset = await fetchRemoteUploadOffset(
             session: session,
             patchURL: patchURL,
-            csrfToken: resolvedCsrf
+            csrfToken: resolvedCsrf,
+            authToken: resolvedAuth
           ) {
             offset = min(totalBytes, headOffset)
             onProgress(offset, totalBytes)
@@ -908,5 +950,265 @@ public final class MyDriveMediaSyncModule: Module {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter.string(from: date)
+  }
+
+  private struct LanInterfaceInfo {
+    let name: String
+    let ip: String
+    let netmask: String
+    let hostInt: UInt32
+    let subnetPrefix: String
+  }
+
+  private final class ProbeResumeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+      self.continuation = continuation
+    }
+
+    func finish(_ value: Bool) {
+      lock.lock()
+      let cont = continuation
+      continuation = nil
+      lock.unlock()
+      cont?.resume(returning: value)
+    }
+  }
+
+  private static func isPrivateLanIpv4(_ host: UInt32) -> Bool {
+    let octets = (
+      (host >> 24) & 0xFF,
+      (host >> 16) & 0xFF,
+      (host >> 8) & 0xFF,
+      host & 0xFF
+    )
+    if octets.0 == 10 { return true }
+    if octets.0 == 172 && (16...31).contains(octets.1) { return true }
+    if octets.0 == 192 && octets.1 == 168 { return true }
+    return false
+  }
+
+  private static func ipv4String(_ host: UInt32) -> String {
+    "\((host >> 24) & 0xFF).\((host >> 16) & 0xFF).\((host >> 8) & 0xFF).\(host & 0xFF)"
+  }
+
+  private static func detectLanInterface() -> LanInterfaceInfo? {
+    var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else {
+      return nil
+    }
+    defer { freeifaddrs(ifaddrPtr) }
+
+    var candidates: [LanInterfaceInfo] = []
+    var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
+    while let ifa = ptr?.pointee {
+      defer { ptr = ifa.ifa_next }
+      guard let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else {
+        continue
+      }
+      let flags = Int32(ifa.ifa_flags)
+      guard (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING),
+            (flags & IFF_LOOPBACK) == 0
+      else {
+        continue
+      }
+      let name = String(cString: ifa.ifa_name)
+      if name.hasPrefix("pdp_ip") || name.hasPrefix("utun") || name.hasPrefix("ipsec") || name.hasPrefix("awdl") {
+        continue
+      }
+      let sin = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+      let hostInt = UInt32(bigEndian: sin.sin_addr.s_addr)
+      guard isPrivateLanIpv4(hostInt) else {
+        continue
+      }
+      var netmaskStr = "255.255.255.0"
+      if let netmaskAddr = ifa.ifa_netmask {
+        let maskSin = netmaskAddr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+        netmaskStr = ipv4String(UInt32(bigEndian: maskSin.sin_addr.s_addr))
+      }
+      let ip = ipv4String(hostInt)
+      let subnetPrefix = "\((hostInt >> 24) & 0xFF).\((hostInt >> 16) & 0xFF).\((hostInt >> 8) & 0xFF)"
+      candidates.append(
+        LanInterfaceInfo(
+          name: name,
+          ip: ip,
+          netmask: netmaskStr,
+          hostInt: hostInt,
+          subnetPrefix: subnetPrefix
+        )
+      )
+    }
+
+    if let wifi = candidates.first(where: { $0.name == "en0" }) {
+      return wifi
+    }
+    if let wired = candidates.first(where: { $0.name.hasPrefix("en") }) {
+      return wired
+    }
+    return candidates.first
+  }
+
+  private static func probeTcpPort(ip: String, port: UInt16, timeoutSeconds: Double = 0.45) async -> Bool {
+    guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+      return false
+    }
+    return await withCheckedContinuation { continuation in
+      let box = ProbeResumeBox(continuation)
+      let connection = NWConnection(host: NWEndpoint.Host(ip), port: nwPort, using: .tcp)
+      let queue = DispatchQueue(label: "mydrive.lan.probe.\(ip).\(port)")
+
+      connection.stateUpdateHandler = { state in
+        switch state {
+        case .ready:
+          box.finish(true)
+          connection.cancel()
+        case .failed, .cancelled:
+          box.finish(false)
+          connection.cancel()
+        default:
+          break
+        }
+      }
+
+      connection.start(queue: queue)
+      queue.asyncAfter(deadline: .now() + timeoutSeconds) {
+        box.finish(false)
+        connection.cancel()
+      }
+    }
+  }
+
+  private static func fetchWellKnownCloudClient(
+    ip: String,
+    port: Int,
+    scheme: String
+  ) async -> [String: Any]? {
+    let defaultPort = (scheme == "https" && port == 443) || (scheme == "http" && port == 80)
+    let origin = defaultPort ? "\(scheme)://\(ip)" : "\(scheme)://\(ip):\(port)"
+    guard let url = URL(string: "\(origin)/.well-known/cloud-client") else {
+      return nil
+    }
+
+    let config = URLSessionConfiguration.ephemeral
+    config.timeoutIntervalForRequest = 1.6
+    config.timeoutIntervalForResource = 2.0
+    config.requestCachePolicy = .reloadIgnoringLocalCacheData
+    let session = URLSession(configuration: config)
+    defer { session.finishTasksAndInvalidate() }
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "GET"
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    let started = CFAbsoluteTimeGetCurrent()
+
+    do {
+      let (data, response) = try await session.data(for: request)
+      guard let httpResponse = response as? HTTPURLResponse,
+            httpResponse.statusCode == 200,
+            let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            (payload["product"] as? String) == "my-drive"
+      else {
+        return nil
+      }
+      let latencyMs = max(1, Int(((CFAbsoluteTimeGetCurrent() - started) * 1000.0).rounded()))
+      var result: [String: Any] = [
+        "url": origin,
+        "ip": ip,
+        "port": port,
+        "scheme": scheme,
+        "product": "my-drive",
+        "latencyMs": latencyMs,
+      ]
+      if let serverId = payload["serverId"] as? String {
+        result["serverId"] = serverId
+      }
+      if let serverVersion = payload["serverVersion"] as? String {
+        result["serverVersion"] = serverVersion
+      }
+      if let apiVersion = payload["apiVersion"] as? String {
+        result["apiVersion"] = apiVersion
+      }
+      return result
+    } catch {
+      return nil
+    }
+  }
+
+  private static func scanLanForServers(ports: [Int]) async -> [[String: Any]] {
+    guard let iface = detectLanInterface() else {
+      return []
+    }
+    let prefixBase = iface.hostInt & 0xFFFF_FF00
+    let selfHost = iface.hostInt & 0x0000_00FF
+    let targetIps: [String] = (1...254)
+      .filter { UInt32($0) != selfHost }
+      .map { ipv4String(prefixBase | UInt32($0)) }
+
+    let targets: [(ip: String, port: Int)] = targetIps.flatMap { ip in
+      ports.map { (ip: ip, port: $0) }
+    }
+
+    var openEndpoints: [(ip: String, port: Int)] = []
+    let maxConcurrency = 48
+    var index = 0
+
+    await withTaskGroup(of: (String, Int)?.self) { group in
+      while index < min(maxConcurrency, targets.count) {
+        let target = targets[index]
+        index += 1
+        group.addTask {
+          guard target.port > 0, target.port <= 65535 else { return nil }
+          let reachable = await probeTcpPort(ip: target.ip, port: UInt16(target.port))
+          return reachable ? (target.ip, target.port) : nil
+        }
+      }
+
+      while let result = await group.next() {
+        if let found = result {
+          openEndpoints.append(found)
+        }
+        if index < targets.count {
+          let target = targets[index]
+          index += 1
+          group.addTask {
+            guard target.port > 0, target.port <= 65535 else { return nil }
+            let reachable = await probeTcpPort(ip: target.ip, port: UInt16(target.port))
+            return reachable ? (target.ip, target.port) : nil
+          }
+        }
+      }
+    }
+
+    if openEndpoints.isEmpty {
+      return []
+    }
+
+    var servers: [[String: Any]] = []
+    var seenUrls = Set<String>()
+    await withTaskGroup(of: [String: Any]?.self) { group in
+      for endpoint in openEndpoints {
+        let schemes = (endpoint.port == 443 || endpoint.port == 8443) ? ["https", "http"] : ["http", "https"]
+        group.addTask {
+          for scheme in schemes {
+            if let verified = await fetchWellKnownCloudClient(ip: endpoint.ip, port: endpoint.port, scheme: scheme) {
+              return verified
+            }
+          }
+          return nil
+        }
+      }
+      for await hit in group {
+        if let verified = hit, let url = verified["url"] as? String, !seenUrls.contains(url) {
+          seenUrls.insert(url)
+          servers.append(verified)
+        }
+      }
+    }
+
+    return servers.sorted {
+      ($0["latencyMs"] as? Int ?? Int.max) < ($1["latencyMs"] as? Int ?? Int.max)
+    }
   }
 }

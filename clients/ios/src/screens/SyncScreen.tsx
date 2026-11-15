@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as MediaLibrary from 'expo-media-library';
 import { Ionicons } from '@expo/vector-icons';
 
+import { LanStatusBadge } from '../components/LanStatusBadge';
 import { TextPromptModal } from '../components/TextPromptModal';
 import {
   AppButton,
@@ -21,6 +22,7 @@ import {
   SectionTitle,
   StatusBadge,
 } from '../components/UiPrimitives';
+import { useAuth } from '../context/AuthContext';
 import { useSync } from '../context/SyncContext';
 import { formatBytes, formatDateTime } from '../services/format';
 import { formatEta, formatSpeed } from '../services/uploadTracker';
@@ -77,6 +79,7 @@ export function SyncScreen() {
     clearLedgerHistory,
   } = useSync();
 
+  const { lanStatus } = useAuth();
   const [folderModalOpen, setFolderModalOpen] = useState(false);
 
   const progressRatio =
@@ -87,9 +90,14 @@ export function SyncScreen() {
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.header}>
-        <Text style={styles.title}>Photo Sync</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm }}>
+          <Text style={styles.title}>Photo Sync</Text>
+          <LanStatusBadge />
+        </View>
         <Text style={styles.subtitle}>
-          Backs up full-resolution iPhone & iCloud originals straight to your NAS.
+          {lanStatus.isOnLan
+            ? `Connected over LAN (${lanStatus.activeUrl}) for maximum backup speed.`
+            : 'Backs up full-resolution iPhone & iCloud originals straight to your NAS.'}
         </Text>
       </View>
 

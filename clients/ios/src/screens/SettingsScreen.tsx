@@ -6,6 +6,7 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -15,6 +16,8 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 
+import { LanStatusBadge } from '../components/LanStatusBadge';
+import { TextPromptModal } from '../components/TextPromptModal';
 import {
   AppButton,
   Card,
@@ -30,11 +33,24 @@ import type {
   AccountStorage,
   BackupDevice,
   BrowserSession,
+  DiscoveredLanServer,
   ServerStorage,
 } from '../types/mydrive';
 
 export function SettingsScreen() {
-  const { user, serverUrl, capabilities, client, switchServer, logout } = useAuth();
+  const {
+    user,
+    serverUrl,
+    lanStatus,
+    capabilities,
+    client,
+    switchServer,
+    logout,
+    scanLanServers,
+    setPairedLanUrl,
+    setAutoSwitchLan,
+    refreshLanStatus,
+  } = useAuth();
   const rootNav = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [storage, setStorage] = useState<AccountStorage | null>(null);
   const [serverStorage, setServerStorage] = useState<ServerStorage | null>(null);
@@ -42,6 +58,10 @@ export function SettingsScreen() {
   const [devices, setDevices] = useState<BackupDevice[]>([]);
   const [loadingStorage, setLoadingStorage] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [scanningLan, setScanningLan] = useState(false);
+  const [lanScanResults, setLanScanResults] = useState<DiscoveredLanServer[]>([]);
+  const [lanScanAttempted, setLanScanAttempted] = useState(false);
+  const [lanPromptOpen, setLanPromptOpen] = useState(false);
 
   const canManageServer = user?.role === 'owner' || user?.role === 'admin';
 
@@ -150,7 +170,32 @@ export function SettingsScreen() {
     );
   };
 
-  const isHttps = serverUrl?.startsWith('https://') ?? false;
+  const handleScanLan = async () => {
+    setScanningLan(true);
+    setLanScanAttempted(true);
+    try {
+      const results = await scanLanServers();
+      setLanScanResults(results);
+      if (results.length > 0) {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+    } finally {
+      setScanningLan(false);
+    }
+  };
+
+  const handleSelectDiscoveredLan = async (url: string) => {
+    try {
+      await setPairedLanUrl(url);
+      setLanScanResults([]);
+      setLanScanAttempted(false);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err) {
+      Alert.alert('LAN Pairing Failed', err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const isHttps = (lanStatus.activeUrl ?? serverUrl)?.startsWith('https://') ?? false;
   const usedRatio =
     storage && storage.quota_bytes && storage.quota_bytes > 0
       ? Math.min(1, storage.used_bytes / storage.quota_bytes)
@@ -294,13 +339,43 @@ export function SettingsScreen() {
           )}
         </Card>
 
-        <SectionTitle title="Connected NAS Server" />
+        <SectionTitle title="NAS Connection & LAN" />
         <Card style={styles.serverCard}>
-          <KeyValueRow label="URL" value={serverUrl ?? '—'} />
+          <View style={styles.lanHeaderRow}>
+            <LanStatusBadge />
+            <Pressable
+              onPress={() => void refreshLanStatus(true)}
+              style={({ pressed }) => [styles.lanRefreshBtn, pressed && { opacity: 0.7 }]}
+            >
+              <Ionicons name="refresh" size={15} color={colors.accent} />
+              <Text style={styles.lanRefreshText}>Check Now</Text>
+            </Pressable>
+          </View>
+          <KeyValueRow label="Active Endpoint" value={lanStatus.activeUrl ?? serverUrl ?? '—'} />
+          {lanStatus.pairedLanUrl && lanStatus.pairedLanUrl !== serverUrl ? (
+            <KeyValueRow label="Primary URL" value={serverUrl ?? '—'} />
+          ) : null}
           <KeyValueRow
-            label="Transport"
-            value={isHttps ? 'HTTPS Encrypted' : 'HTTP Local / VPN'}
+            label="Paired LAN Address"
+            value={lanStatus.pairedLanUrl ?? (lanStatus.isOnLan ? (lanStatus.activeUrl ?? 'Active') : 'Not paired')}
           />
+          <KeyValueRow
+            label="Mode & Speed"
+            value={
+              lanStatus.isOnLan
+                ? lanStatus.latencyMs != null
+                  ? `Direct LAN (${lanStatus.latencyMs} ms)`
+                  : 'Direct LAN'
+                : lanStatus.mode === 'offline'
+                  ? 'Offline'
+                  : isHttps
+                    ? 'Remote (HTTPS)'
+                    : 'Remote / Tunnel'
+            }
+          />
+          {lanStatus.localIp ? (
+            <KeyValueRow label="Device Wi-Fi IP" value={lanStatus.localIp} />
+          ) : null}
           <KeyValueRow
             label="Server Version"
             value={capabilities?.serverVersion ? `v${capabilities.serverVersion}` : 'Connected'}
@@ -310,6 +385,91 @@ export function SettingsScreen() {
             value={capabilities?.features.contentHash?.toUpperCase() ?? 'SHA-256'}
             last
           />
+
+          <View style={styles.lanSwitchRow}>
+            <View style={styles.flex}>
+              <Text style={styles.lanSwitchLabel}>Auto-Switch on Same LAN</Text>
+              <Text style={styles.lanSwitchSub}>
+                Automatically connect via local Wi-Fi IP for faster uploads and browsing
+              </Text>
+            </View>
+            <Switch
+              value={lanStatus.autoSwitchLan}
+              onValueChange={(value) => {
+                void setAutoSwitchLan(value);
+              }}
+              trackColor={{ false: colors.lineStrong, true: colors.accent }}
+            />
+          </View>
+
+          <View style={styles.lanActionRow}>
+            <AppButton
+              title={scanningLan ? 'Scanning…' : 'Scan LAN'}
+              icon="wifi-outline"
+              variant="secondary"
+              compact
+              loading={scanningLan}
+              onPress={() => void handleScanLan()}
+              style={styles.flex}
+            />
+            <AppButton
+              title="Set LAN IP"
+              icon="create-outline"
+              variant="subtle"
+              compact
+              onPress={() => setLanPromptOpen(true)}
+              style={styles.flex}
+            />
+          </View>
+
+          {lanStatus.pairedLanUrl ? (
+            <AppButton
+              title="Clear Paired LAN URL"
+              icon="close-circle-outline"
+              variant="subtle"
+              compact
+              onPress={() => {
+                void setPairedLanUrl(null);
+              }}
+            />
+          ) : null}
+
+          {lanScanAttempted ? (
+            lanScanResults.length > 0 ? (
+              <View style={styles.lanScanBox}>
+                <Text style={styles.deviceHeader}>
+                  Discovered NAS ({lanScanResults.length})
+                </Text>
+                {lanScanResults.map((srv) => (
+                  <Pressable
+                    key={srv.url}
+                    onPress={() => void handleSelectDiscoveredLan(srv.url)}
+                    style={({ pressed }) => [
+                      styles.lanResultRow,
+                      pressed && { opacity: 0.72 },
+                    ]}
+                  >
+                    <View style={styles.flex}>
+                      <Text style={styles.deviceName} numberOfLines={1}>
+                        {srv.url}
+                      </Text>
+                      <Text style={styles.deviceMeta}>
+                        {srv.matchedServerId ? 'Verified Same NAS · ' : ''}
+                        {srv.serverVersion ? `v${srv.serverVersion} · ` : ''}
+                        {srv.latencyMs} ms
+                      </Text>
+                    </View>
+                    <Text style={styles.lanUseText}>Use LAN</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : !scanningLan ? (
+              <Text style={styles.deviceMeta}>
+                No MyDrive NAS detected on the current Wi-Fi subnet.
+              </Text>
+            ) : null
+          ) : null}
+
           <AppButton
             title="Change NAS URL"
             icon="swap-horizontal-outline"
@@ -371,6 +531,21 @@ export function SettingsScreen() {
           onPress={confirmSignOut}
         />
       </ScrollView>
+
+      <TextPromptModal
+        visible={lanPromptOpen}
+        title="Pair LAN NAS URL"
+        message="Enter the local Wi-Fi IP or hostname of this MyDrive NAS (e.g. http://192.168.1.50:3000)."
+        initialValue={lanStatus.pairedLanUrl ?? 'http://192.168.1.'}
+        placeholder="http://192.168.1.50:3000"
+        confirmLabel="Verify & Save"
+        onCancel={() => setLanPromptOpen(false)}
+        onSubmit={async (value) => {
+          await setPairedLanUrl(value);
+          setLanPromptOpen(false);
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -481,6 +656,72 @@ const styles = StyleSheet.create({
   },
   serverCard: {
     gap: spacing.xs,
+  },
+  lanHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  lanRefreshBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+  },
+  lanRefreshText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: colors.accent,
+  },
+  lanSwitchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingTop: spacing.sm,
+    marginTop: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+  },
+  lanSwitchLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.ink,
+  },
+  lanSwitchSub: {
+    fontSize: 12,
+    color: colors.muted,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  lanActionRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  lanScanBox: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+    gap: spacing.xs + 2,
+  },
+  lanResultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.xs + 2,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceSubtle,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  lanUseText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: colors.accent,
   },
   switchServerBtn: {
     marginTop: spacing.sm,

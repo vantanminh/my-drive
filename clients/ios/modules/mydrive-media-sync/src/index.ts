@@ -38,6 +38,7 @@ export interface UploadChunkedOptions {
   startOffset?: number;
   chunkSize?: number;
   csrfToken?: string | null;
+  authToken?: string | null;
 }
 
 export interface LocalDownloadResult {
@@ -45,6 +46,25 @@ export interface LocalDownloadResult {
   path: string;
   mimeType: string;
   sizeBytes: number;
+}
+
+export interface WifiSubnetInfo {
+  interfaceName: string;
+  localIp: string;
+  netmask: string;
+  subnetPrefix: string;
+}
+
+export interface NativeDiscoveredLanServer {
+  url: string;
+  ip: string;
+  port: number;
+  scheme: 'http' | 'https';
+  product: string;
+  serverId?: string;
+  serverVersion?: string;
+  apiVersion?: number;
+  latencyMs: number;
 }
 
 export type ICloudProgressEvent = {
@@ -68,8 +88,14 @@ interface NativeMyDriveMediaSyncShape {
   cleanupPreparedFile(tempFilePath: string): Promise<void>;
   hashFileSha256(fileUri: string): Promise<{ sha256: string; sizeBytes: number }>;
   uploadFileChunked(options: UploadChunkedOptions): Promise<number>;
-  downloadToLocalFile(url: string, filename: string): Promise<LocalDownloadResult>;
+  downloadToLocalFile(
+    url: string,
+    filename: string,
+    authToken: string | null,
+  ): Promise<LocalDownloadResult>;
   clearSessionCookies(baseUrl: string): Promise<void>;
+  getWifiSubnetInfo(): Promise<WifiSubnetInfo | null>;
+  discoverLanServers(ports: number[] | null): Promise<NativeDiscoveredLanServer[]>;
 }
 
 type MediaSyncEventsMap = {
@@ -132,13 +158,26 @@ export async function uploadFileChunked(
 export async function downloadToLocalFile(
   url: string,
   filename: string,
+  authToken?: string | null,
 ): Promise<LocalDownloadResult> {
-  return requireNative().downloadToLocalFile(url, filename);
+  return requireNative().downloadToLocalFile(url, filename, authToken ?? null);
 }
 
 export async function clearSessionCookies(baseUrl: string): Promise<void> {
   if (!nativeModule) return;
   return nativeModule.clearSessionCookies(baseUrl);
+}
+
+export async function getWifiSubnetInfo(): Promise<WifiSubnetInfo | null> {
+  if (!nativeModule?.getWifiSubnetInfo) return null;
+  return nativeModule.getWifiSubnetInfo();
+}
+
+export async function discoverLanServersNative(
+  ports?: number[],
+): Promise<NativeDiscoveredLanServer[]> {
+  if (!nativeModule?.discoverLanServers) return [];
+  return nativeModule.discoverLanServers(ports ?? null);
 }
 
 export function addICloudProgressListener(

@@ -16,6 +16,7 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 
+import { LanStatusBadge } from '../components/LanStatusBadge';
 import { MediaGrid } from '../components/MediaGrid';
 import {
   ShareLinkModal,
@@ -134,6 +135,7 @@ export function PhotosScreen() {
             </Text>
           </View>
           <View style={styles.headerActions}>
+            <LanStatusBadge compact />
             {subTab === 'albums' ? (
               <Pressable
                 onPress={() => setCreateAlbumOpen(true)}
@@ -293,8 +295,8 @@ export function PhotosScreen() {
             )
           }
           renderItem={({ item }) => {
-            const coverUrl = item.cover_file_id
-              ? client?.thumbnailUrl(item.cover_file_id)
+            const coverSource = item.cover_file_id
+              ? client?.thumbnailSource(item.cover_file_id)
               : null;
             return (
               <Pressable
@@ -306,9 +308,9 @@ export function PhotosScreen() {
                 ]}
               >
                 <View style={styles.albumCoverWrap}>
-                  {coverUrl ? (
+                  {coverSource ? (
                     <Image
-                      source={{ uri: coverUrl }}
+                      source={coverSource}
                       style={styles.albumCover}
                       contentFit="cover"
                       cachePolicy="memory-disk"
@@ -384,8 +386,8 @@ export function PhotosScreen() {
             )
           }
           renderItem={({ item }) => {
-            const portraitUrl = item.representativeFileId
-              ? client?.thumbnailUrl(item.representativeFileId)
+            const portraitSource = item.representativeFileId
+              ? client?.thumbnailSource(item.representativeFileId)
               : null;
             return (
               <Pressable
@@ -397,9 +399,9 @@ export function PhotosScreen() {
                 ]}
               >
                 <View style={styles.faceAvatarWrap}>
-                  {portraitUrl ? (
+                  {portraitSource ? (
                     <Image
-                      source={{ uri: portraitUrl }}
+                      source={portraitSource}
                       style={styles.albumCover}
                       contentFit="cover"
                       cachePolicy="memory-disk"

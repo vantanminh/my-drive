@@ -40,16 +40,18 @@ type Props = NativeStackScreenProps<RootStackParamList, 'PhotoViewer'>;
 
 function VideoSlide({
   uri,
+  headers,
   active,
   width,
   height,
 }: {
   uri: string;
+  headers?: Record<string, string>;
   active: boolean;
   width: number;
   height: number;
 }) {
-  const player = useVideoPlayer(uri, (p) => {
+  const player = useVideoPlayer(headers ? { uri, headers } : uri, (p) => {
     p.loop = false;
   });
 
@@ -75,12 +77,14 @@ function VideoSlide({
 function ImageSlide({
   previewUri,
   fallbackUri,
+  headers,
   width,
   height,
   onToggleChrome,
 }: {
   previewUri: string;
   fallbackUri: string;
+  headers?: Record<string, string>;
   width: number;
   height: number;
   onToggleChrome: () => void;
@@ -103,7 +107,7 @@ function ImageSlide({
         style={[styles.slide, { width, height }]}
       >
         <Image
-          source={{ uri }}
+          source={headers ? { uri, headers } : { uri }}
           style={{ width, height }}
           contentFit="contain"
           onLoadEnd={() => setLoading(false)}
@@ -181,6 +185,7 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
       const downloaded = await downloadToLocalFile(
         client.downloadUrl(currentItem.id),
         currentItem.name,
+        client.getSessionToken(),
       );
       await MediaLibrary.Asset.create(downloaded.localUri);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -200,6 +205,7 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
       const downloaded = await downloadToLocalFile(
         client.downloadUrl(currentItem.id),
         currentItem.name,
+        client.getSessionToken(),
       );
       await Sharing.shareAsync(downloaded.localUri, {
         mimeType: currentItem.mime_type ?? undefined,
@@ -313,11 +319,13 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
           const kind = resolveViewerKind(item.name, item.mime_type, item.category);
           const previewUri = client.previewUrl(item.id);
           const downloadUri = client.downloadUrl(item.id);
+          const headers = client.getSessionToken() ? client.authHeaders() : undefined;
 
           if (kind === 'video') {
             return (
               <VideoSlide
                 uri={previewUri}
+                headers={headers}
                 active={index === currentIndex}
                 width={width}
                 height={height}
@@ -328,6 +336,7 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
             <ImageSlide
               previewUri={previewUri}
               fallbackUri={downloadUri}
+              headers={headers}
               width={width}
               height={height}
               onToggleChrome={() => setChromeVisible((prev) => !prev)}

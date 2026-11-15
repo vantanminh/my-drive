@@ -12,6 +12,7 @@ import {
 } from '../../modules/mydrive-media-sync/src';
 import { MyDriveClient } from './apiClient';
 import { createNativeChunkUploader } from './fileUpload';
+import { selectActiveEndpoint } from './lanDiscovery';
 import {
   PhotoSyncEngine,
   type PhotoSyncPlatformDeps,
@@ -114,12 +115,26 @@ export function ensureBackgroundSyncTaskDefined(): void {
         return BackgroundTask.BackgroundTaskResult.Success;
       }
 
-      const client = new MyDriveClient({
-        baseUrl: session.serverUrl,
-        csrfToken: session.csrfToken,
+      const netState = await Network.getNetworkStateAsync();
+      const isWifiOrEthernet =
+        netState.type === Network.NetworkStateType.WIFI ||
+        netState.type === Network.NetworkStateType.ETHERNET;
+      const endpoint = await selectActiveEndpoint({
+        primaryUrl: session.serverUrl,
+        pairedLanUrl: session.lanUrl,
+        autoSwitchLan: session.autoSwitchLan,
+        expectedServerId: session.serverId,
+        isConnected: Boolean(netState.isConnected),
+        isWifiOrEthernet,
       });
 
-      // Confirm cookie session is still active before scanning Photo Library.
+      const client = new MyDriveClient({
+        baseUrl: endpoint.activeUrl,
+        csrfToken: session.csrfToken,
+        sessionToken: session.sessionToken,
+      });
+
+      // Confirm session is still active before scanning Photo Library.
       await client.me();
 
       const engine = new PhotoSyncEngine(
@@ -131,6 +146,7 @@ export function ensureBackgroundSyncTaskDefined(): void {
       // Process bounded batch per background wakeup so iOS BGTask budget isn't exceeded.
       await engine.run({
         settings,
+        ledgerServerUrl: session.serverUrl,
         maxAssetsPerRun: 25,
       });
       return BackgroundTask.BackgroundTaskResult.Success;

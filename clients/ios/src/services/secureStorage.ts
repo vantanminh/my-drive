@@ -5,8 +5,12 @@ import type { SyncSettings } from '../types/mydrive';
 
 const KEYS = {
   serverUrl: 'mydrive_server_url',
+  lanUrl: 'mydrive_lan_url',
+  autoSwitchLan: 'mydrive_auto_switch_lan',
+  serverId: 'mydrive_server_id',
   userEmail: 'mydrive_user_email',
   csrfToken: 'mydrive_csrf_token',
+  sessionToken: 'mydrive_session_token',
   allowHttpForUrl: 'mydrive_allow_http_url',
   syncSettings: 'mydrive_sync_settings',
   shareUrls: 'mydrive_share_urls_v1',
@@ -23,8 +27,12 @@ const MAX_REMEMBERED_SHARE_URLS = 40;
 
 export interface PersistedSession {
   serverUrl: string | null;
+  lanUrl: string | null;
+  autoSwitchLan: boolean;
+  serverId: string | null;
   userEmail: string | null;
   csrfToken: string | null;
+  sessionToken: string | null;
   allowHttpForUrl: string | null;
 }
 
@@ -45,13 +53,35 @@ export function defaultSyncSettings(): SyncSettings {
 }
 
 export async function loadPersistedSession(): Promise<PersistedSession> {
-  const [serverUrl, userEmail, csrfToken, allowHttpForUrl] = await Promise.all([
+  const [
+    serverUrl,
+    lanUrl,
+    autoSwitchRaw,
+    serverId,
+    userEmail,
+    csrfToken,
+    sessionToken,
+    allowHttpForUrl,
+  ] = await Promise.all([
     SecureStore.getItemAsync(KEYS.serverUrl),
+    SecureStore.getItemAsync(KEYS.lanUrl),
+    SecureStore.getItemAsync(KEYS.autoSwitchLan),
+    SecureStore.getItemAsync(KEYS.serverId),
     SecureStore.getItemAsync(KEYS.userEmail),
     SecureStore.getItemAsync(KEYS.csrfToken),
+    SecureStore.getItemAsync(KEYS.sessionToken),
     SecureStore.getItemAsync(KEYS.allowHttpForUrl),
   ]);
-  return { serverUrl, userEmail, csrfToken, allowHttpForUrl };
+  return {
+    serverUrl,
+    lanUrl,
+    autoSwitchLan: autoSwitchRaw !== 'false',
+    serverId,
+    userEmail,
+    csrfToken,
+    sessionToken,
+    allowHttpForUrl,
+  };
 }
 
 export async function saveServerConfig(serverUrl: string, allowHttpUrl: string | null): Promise<void> {
@@ -63,12 +93,51 @@ export async function saveServerConfig(serverUrl: string, allowHttpUrl: string |
   }
 }
 
-export async function saveAuthCredentials(userEmail: string, csrfToken: string | null): Promise<void> {
+export async function saveLanConfig(params: {
+  lanUrl?: string | null;
+  autoSwitchLan?: boolean;
+  serverId?: string | null;
+}): Promise<void> {
+  const ops: Promise<void>[] = [];
+  if (params.lanUrl !== undefined) {
+    ops.push(
+      params.lanUrl
+        ? SecureStore.setItemAsync(KEYS.lanUrl, params.lanUrl)
+        : SecureStore.deleteItemAsync(KEYS.lanUrl),
+    );
+  }
+  if (params.autoSwitchLan !== undefined) {
+    ops.push(
+      SecureStore.setItemAsync(KEYS.autoSwitchLan, params.autoSwitchLan ? 'true' : 'false'),
+    );
+  }
+  if (params.serverId !== undefined) {
+    ops.push(
+      params.serverId
+        ? SecureStore.setItemAsync(KEYS.serverId, params.serverId)
+        : SecureStore.deleteItemAsync(KEYS.serverId),
+    );
+  }
+  await Promise.all(ops);
+}
+
+export async function saveAuthCredentials(
+  userEmail: string,
+  csrfToken: string | null,
+  sessionToken?: string | null,
+): Promise<void> {
   await SecureStore.setItemAsync(KEYS.userEmail, userEmail);
   if (csrfToken) {
     await SecureStore.setItemAsync(KEYS.csrfToken, csrfToken);
   } else {
     await SecureStore.deleteItemAsync(KEYS.csrfToken);
+  }
+  if (sessionToken !== undefined) {
+    if (sessionToken) {
+      await SecureStore.setItemAsync(KEYS.sessionToken, sessionToken);
+    } else {
+      await SecureStore.deleteItemAsync(KEYS.sessionToken);
+    }
   }
 }
 
@@ -83,6 +152,7 @@ export async function saveCsrfToken(csrfToken: string | null): Promise<void> {
 export async function clearAuthCredentials(): Promise<void> {
   await Promise.all([
     SecureStore.deleteItemAsync(KEYS.csrfToken),
+    SecureStore.deleteItemAsync(KEYS.sessionToken),
   ]);
 }
 

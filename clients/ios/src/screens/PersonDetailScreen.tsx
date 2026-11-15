@@ -97,17 +97,17 @@ export function PersonDetailScreen({ navigation, route }: Props) {
     ]);
   };
 
-  const avatarUrl = cluster.representativeFileId
-    ? client?.thumbnailUrl(cluster.representativeFileId)
+  const avatarSource = cluster.representativeFileId
+    ? client?.thumbnailSource(cluster.representativeFileId)
     : null;
 
   return (
     <View style={styles.container}>
       <View style={styles.hero}>
         <View style={styles.avatarWrap}>
-          {avatarUrl ? (
+          {avatarSource ? (
             <Image
-              source={{ uri: avatarUrl }}
+              source={avatarSource}
               style={styles.avatar}
               contentFit="cover"
               cachePolicy="memory-disk"

@@ -23,21 +23,25 @@ import {
   TextField,
 } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
+import { discoverLanNasServers } from '../services/lanDiscovery';
 import { normalizeServerUrl } from '../services/serverUrl';
 import { colors, radius, spacing } from '../theme/tokens';
-import type { ServerCapabilities } from '../types/mydrive';
+import type { DiscoveredLanServer, ServerCapabilities } from '../types/mydrive';
 
 const QUICK_CHIPS = [
   { label: 'https://', value: 'https://' },
   { label: 'http://', value: 'http://' },
-  { label: '.local:8080', value: 'mynas.local:8080' },
-  { label: '192.168.x.x:8080', value: '192.168.1.100:8080' },
+  { label: '.local:3000', value: 'mydrive.local:3000' },
+  { label: '192.168.x.x:3000', value: '192.168.1.100:3000' },
 ];
 
 export function ServerSetupScreen() {
   const { serverUrl, connectServer, confirmServerConnection } = useAuth();
   const [rawUrl, setRawUrl] = useState(serverUrl ?? '');
   const [probing, setProbing] = useState(false);
+  const [scanningLan, setScanningLan] = useState(false);
+  const [lanResults, setLanResults] = useState<DiscoveredLanServer[]>([]);
+  const [scanAttempted, setScanAttempted] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [verifiedProbe, setVerifiedProbe] = useState<{
     normalizedUrl: string;
@@ -66,16 +70,35 @@ export function ServerSetupScreen() {
     setRawUrl(value);
   };
 
-  const handleProbeAndConnect = async () => {
-    if (!rawUrl.trim()) {
+  const handleScanLan = async () => {
+    setScanningLan(true);
+    setScanAttempted(true);
+    setErrorMsg(null);
+    try {
+      const servers = await discoverLanNasServers();
+      setLanResults(servers);
+      if (servers.length > 0 && !rawUrl.trim()) {
+        setRawUrl(servers[0].url);
+      }
+      if (servers.length > 0) {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+    } finally {
+      setScanningLan(false);
+    }
+  };
+
+  const handleProbeUrl = async (targetUrl: string) => {
+    if (!targetUrl.trim()) {
       setErrorMsg('Enter your MyDrive NAS domain, Tailscale IP, or LAN address.');
       return;
     }
+    setRawUrl(targetUrl);
     setErrorMsg(null);
     setProbing(true);
 
     try {
-      const result = await connectServer(rawUrl);
+      const result = await connectServer(targetUrl);
       setVerifiedProbe(result);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
@@ -150,7 +173,7 @@ export function ServerSetupScreen() {
               autoCorrect={false}
               keyboardType="url"
               returnKeyType="go"
-              onSubmitEditing={handleProbeAndConnect}
+              onSubmitEditing={() => void handleProbeUrl(rawUrl)}
               error={errorMsg}
               helper="Supports reverse-proxy HTTPS domains, Tailscale IPs (100.x), and LAN HTTP servers."
               rightAccessory={
@@ -209,10 +232,54 @@ export function ServerSetupScreen() {
             <AppButton
               title={probing ? 'Testing NAS Connection…' : 'Verify & Connect'}
               icon="server-outline"
-              onPress={handleProbeAndConnect}
+              onPress={() => void handleProbeUrl(rawUrl)}
               loading={probing}
               style={styles.connectButton}
             />
+
+            <AppButton
+              title={scanningLan ? 'Scanning Local Wi-Fi (LAN)…' : 'Scan Local Network (LAN)'}
+              icon="wifi-outline"
+              variant="secondary"
+              compact
+              onPress={() => void handleScanLan()}
+              loading={scanningLan}
+            />
+
+            {scanAttempted ? (
+              lanResults.length > 0 ? (
+                <View style={styles.lanList}>
+                  <Text style={styles.lanListTitle}>
+                    Discovered on LAN ({lanResults.length})
+                  </Text>
+                  {lanResults.map((srv) => (
+                    <Pressable
+                      key={srv.url}
+                      onPress={() => void handleProbeUrl(srv.url)}
+                      style={({ pressed }) => [
+                        styles.lanItem,
+                        pressed && styles.chipPressed,
+                      ]}
+                    >
+                      <View style={styles.lanItemMeta}>
+                        <Text style={styles.lanItemUrl} numberOfLines={1}>
+                          {srv.url}
+                        </Text>
+                        <Text style={styles.lanItemSub}>
+                          {srv.serverVersion ? `v${srv.serverVersion} · ` : ''}
+                          {srv.latencyMs}ms LAN ping
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color={colors.accent} />
+                    </Pressable>
+                  ))}
+                </View>
+              ) : !scanningLan ? (
+                <Text style={styles.lanEmptyText}>
+                  No MyDrive NAS found on the current Wi-Fi subnet. Ensure your phone and NAS are on the same LAN, or enter your NAS address above.
+                </Text>
+              ) : null
+            ) : null}
           </Card>
 
           {verifiedProbe?.capabilities ? (
@@ -350,5 +417,45 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: colors.muted,
+  },
+  lanList: {
+    marginTop: spacing.xs,
+    gap: spacing.xs + 2,
+  },
+  lanListTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.muted,
+    textTransform: 'uppercase',
+  },
+  lanItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceSubtle,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  lanItemMeta: {
+    flex: 1,
+  },
+  lanItemUrl: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.ink,
+  },
+  lanItemSub: {
+    fontSize: 12,
+    color: colors.success,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  lanEmptyText: {
+    fontSize: 12.5,
+    color: colors.muted,
+    lineHeight: 18,
   },
 });
