@@ -85,29 +85,30 @@ function Write-AsciiNoNewline {
 
 function Set-GitHubSecret {
   param([string]$Name, [string]$Value)
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = (Get-Command gh.exe).Source
-  $psi.Arguments = "secret set $Name"
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardInput = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-
-  $proc = [System.Diagnostics.Process]::Start($psi)
+  if ($Name -notmatch '^[A-Za-z0-9_]+$') {
+    throw "Invalid GitHub secret name: $Name"
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  $bytes = $utf8NoBom.GetBytes($Value)
+  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("gh-secret-" + [System.Guid]::NewGuid().ToString('N') + ".bin")
   try {
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $bytes = $utf8NoBom.GetBytes($Value)
-    $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-    $proc.StandardInput.BaseStream.Close()
-    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-    $null = $stdoutTask.Result
-    if ($proc.ExitCode -ne 0) {
-      throw "gh secret set $Name failed: $stderr"
+    [System.IO.File]::WriteAllBytes($tmp, $bytes)
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      # Redirect exact raw bytes via cmd.exe to bypass .NET StreamWriter Console.InputEncoding BOM.
+      $output = & cmd.exe /d /c "gh secret set $Name < `"$tmp`"" 2>&1
+      $exitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $prevPref
+    }
+    if ($exitCode -ne 0) {
+      throw "gh secret set $Name failed: $(($output | Out-String).Trim())"
     }
   } finally {
-    $proc.Dispose()
+    if (Test-Path $tmp) {
+      Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
+    }
   }
 }
 
@@ -314,6 +315,7 @@ $p12Base64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($p12Path))
 $profileBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($resolvedProfile))
 
 Set-GitHubSecret -Name 'IOS_P12_PASSWORD' -Value $cleanPass
+Set-GitHubSecret -Name 'IOS_KEYCHAIN_PASSWORD' -Value (New-RandomSecret -ByteCount 24)
 Set-GitHubSecret -Name 'IOS_BUILD_CERTIFICATE_BASE64' -Value $p12Base64
 Set-GitHubSecret -Name 'IOS_BUILD_PROVISION_PROFILE_BASE64' -Value $profileBase64
 
