@@ -30,16 +30,35 @@ RUN cc -O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
     -o /usr/local/bin/my-drive-vips-thumbnailer
 
 FROM debian:bookworm-slim AS face-model
-ARG FACE_MODEL_URL=https://raw.githubusercontent.com/atomashpolskiy/rustface/fa3d5b5d576c91d1c8a099af381e0f0906a0d3a3/model/seeta_fd_frontal_v1.0.bin
-ARG FACE_MODEL_SHA256=c4619d066ed35e84d9a8e842860b0dff567aba0cbb139881075538761db3ff5d
+ARG FACE_MODEL_BUNDLE_URL=https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+ARG FACE_MODEL_BUNDLE_SHA256=80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f
+ARG FACE_DET_MODEL_SHA256=5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91
+ARG FACE_REC_MODEL_SHA256=4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43
+ARG ORT_VERSION=1.31.0
+ARG ORT_ARCHIVE_URL=https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-linux-x64-1.31.0.tgz
+ARG ORT_ARCHIVE_SHA256=cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /usr/local/share/my-drive \
-    && curl --fail --silent --show-error --location --retry 3 "$FACE_MODEL_URL" \
-        --output /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin \
-    && echo "$FACE_MODEL_SHA256  /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin" \
-        | sha256sum --check --status
+    && mkdir -p /usr/local/share/my-drive/face-models /tmp/ort \
+    && curl --fail --silent --show-error --location --retry 3 "$FACE_MODEL_BUNDLE_URL" \
+        --output /tmp/buffalo_l.zip \
+    && echo "$FACE_MODEL_BUNDLE_SHA256  /tmp/buffalo_l.zip" \
+        | sha256sum --check --status \
+    && unzip -q -j /tmp/buffalo_l.zip det_10g.onnx w600k_r50.onnx -d /usr/local/share/my-drive/face-models \
+    && echo "$FACE_DET_MODEL_SHA256  /usr/local/share/my-drive/face-models/det_10g.onnx" \
+        | sha256sum --check --status \
+    && echo "$FACE_REC_MODEL_SHA256  /usr/local/share/my-drive/face-models/w600k_r50.onnx" \
+        | sha256sum --check --status \
+    && rm -f /tmp/buffalo_l.zip \
+    && curl --fail --silent --show-error --location --retry 3 "$ORT_ARCHIVE_URL" \
+        --output /tmp/ort.tgz \
+    && echo "$ORT_ARCHIVE_SHA256  /tmp/ort.tgz" \
+        | sha256sum --check --status \
+    && tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1 \
+    && install -m 0755 "/tmp/ort/lib/libonnxruntime.so.${ORT_VERSION}" "/usr/local/lib/libonnxruntime.so.${ORT_VERSION}" \
+    && ln -sf "libonnxruntime.so.${ORT_VERSION}" /usr/local/lib/libonnxruntime.so \
+    && rm -rf /tmp/ort /tmp/ort.tgz
 
 FROM debian:bookworm-slim AS runtime
 ARG MY_DRIVE_VERSION=0.1.0
@@ -72,12 +91,16 @@ ENTRYPOINT ["/usr/local/bin/my-drive-document-preview"]
 
 FROM debian:bookworm-slim AS media-indexer-runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg libvips42=8.14.1-3+deb12u3 webp=1.2.4-0.2+deb12u1 \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg libstdc++6 libvips42=8.14.1-3+deb12u3 webp=1.2.4-0.2+deb12u1 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin mydrive
 COPY --from=builder /app/target/release/my-drive-media-indexer /usr/local/bin/my-drive-media-indexer
 COPY --from=media-thumbnailer-builder /usr/local/bin/my-drive-vips-thumbnailer /usr/local/bin/my-drive-vips-thumbnailer
-COPY --from=face-model /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin /usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin
+COPY --from=face-model /usr/local/share/my-drive/face-models /usr/local/share/my-drive/face-models
+COPY --from=face-model /usr/local/lib/libonnxruntime.so* /usr/local/lib/
+RUN ldconfig
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
+    FACE_MODEL_DIR=/usr/local/share/my-drive/face-models
 WORKDIR /app
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/my-drive-media-indexer"]

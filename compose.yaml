@@ -176,7 +176,7 @@ services:
     security_opt:
       - no-new-privileges:true
     cpus: 1.0
-    mem_limit: 768m
+    mem_limit: 1536m
     pids_limit: 32
     stop_grace_period: 30s
 

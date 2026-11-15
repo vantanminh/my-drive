@@ -1,16 +1,43 @@
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
-use rustface::ImageData;
+use ort::{
+    environment::Environment,
+    session::{Session, builder::GraphOptimizationLevel},
+    value::Tensor,
+};
 use thiserror::Error;
 
-pub(crate) const DEFAULT_MODEL_PATH: &str = "/usr/local/share/my-drive/seeta_fd_frontal_v1.0.bin";
+pub(crate) const DEFAULT_MODEL_DIR: &str = "/usr/local/share/my-drive/face-models";
+pub(crate) const DEFAULT_ORT_DYLIB_PATH: &str = "/usr/local/lib/libonnxruntime.so";
+pub(crate) const DETECTOR_MODEL_FILE: &str = "det_10g.onnx";
+pub(crate) const RECOGNIZER_MODEL_FILE: &str = "w600k_r50.onnx";
 pub(crate) const MAX_FRAME_SIDE: u32 = 1280;
-pub(crate) const MAX_FRAME_BYTES: usize = (MAX_FRAME_SIDE as usize) * (MAX_FRAME_SIDE as usize);
-pub(crate) const DESCRIPTOR_LEN: usize = 256;
-pub(crate) const FACE_INDEX_RECIPE_VERSION: i16 = 3;
-const PATCH_SIDE: usize = 32;
-const HOG_CELLS: usize = 8;
-const HOG_BINS: usize = 4;
+pub(crate) const MAX_FRAME_BYTES: usize = (MAX_FRAME_SIDE as usize) * (MAX_FRAME_SIDE as usize) * 3;
+pub(crate) const EMBEDDING_DIM: usize = 512;
+pub(crate) const DESCRIPTOR_LEN: usize = EMBEDDING_DIM * 4;
+pub(crate) const FACE_INDEX_RECIPE_VERSION: i16 = 4;
+pub(crate) const MIN_DET_SCORE: f32 = 0.45;
+const DET_INPUT_SIZE: u32 = 640;
+const NMS_IOU_THRESHOLD: f32 = 0.40;
+const ALIGN_SIZE: usize = 112;
+const MIN_FACE_PIXEL_SIDE: f32 = 16.0;
+const MAX_FACE_ASPECT_RATIO: f32 = 3.5;
+const MAX_FACES_PER_FRAME: usize = 32;
+
+const SCRFD_STRIDES: [u32; 3] = [8, 16, 32];
+const SCRFD_NUM_ANCHORS: usize = 2;
+
+const ARCFACE_DST: [[f64; 2]; 5] = [
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+];
 
 #[derive(Debug, Clone)]
 pub(crate) struct DetectedFace {
@@ -33,16 +60,25 @@ pub(crate) enum FaceDetectionError {
 }
 
 #[derive(Debug)]
-pub(crate) struct GrayFrame {
+pub(crate) struct RgbFrame {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) pixels: Vec<u8>,
 }
 
-pub(crate) fn parse_pgm(bytes: &[u8]) -> Result<GrayFrame, FaceDetectionError> {
+struct FaceEngine {
+    _env: Environment,
+    detector: Session,
+    recognizer: Session,
+}
+
+static ENGINE_CACHE: OnceLock<Mutex<Option<(PathBuf, FaceEngine)>>> = OnceLock::new();
+static ORT_INIT: OnceLock<Result<Environment, String>> = OnceLock::new();
+
+pub(crate) fn parse_ppm(bytes: &[u8]) -> Result<RgbFrame, FaceDetectionError> {
     let mut cursor = 0;
     let magic = next_token(bytes, &mut cursor).ok_or(FaceDetectionError::InvalidFrame)?;
-    if magic != b"P5" {
+    if magic != b"P6" {
         return Err(FaceDetectionError::InvalidFrame);
     }
     let width = parse_dimension(next_token(bytes, &mut cursor))?;
@@ -51,16 +87,13 @@ pub(crate) fn parse_pgm(bytes: &[u8]) -> Result<GrayFrame, FaceDetectionError> {
     if max_value != b"255" || width > MAX_FRAME_SIDE || height > MAX_FRAME_SIDE {
         return Err(FaceDetectionError::InvalidFrame);
     }
-    let pixel_count = usize::try_from(width)
+    let byte_count = usize::try_from(width)
         .ok()
-        .and_then(|width| {
-            usize::try_from(height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
+        .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))
+        .and_then(|pixels| pixels.checked_mul(3))
         .ok_or(FaceDetectionError::InvalidFrame)?;
-    // The PGM header ends with one required whitespace delimiter. Consume
-    // exactly that delimiter so a leading whitespace-valued pixel is not
+    // The PPM header ends with one required whitespace delimiter. Consume
+    // exactly that delimiter so a leading whitespace-valued byte is not
     // mistaken for additional header padding.
     if bytes
         .get(cursor)
@@ -74,13 +107,13 @@ pub(crate) fn parse_pgm(bytes: &[u8]) -> Result<GrayFrame, FaceDetectionError> {
         cursor += 1;
     }
     let end = cursor
-        .checked_add(pixel_count)
+        .checked_add(byte_count)
         .filter(|end| *end <= bytes.len())
         .ok_or(FaceDetectionError::InvalidFrame)?;
-    if pixel_count == 0 || pixel_count > MAX_FRAME_BYTES {
+    if byte_count == 0 || byte_count > MAX_FRAME_BYTES {
         return Err(FaceDetectionError::InvalidFrame);
     }
-    Ok(GrayFrame {
+    Ok(RgbFrame {
         width,
         height,
         pixels: bytes[cursor..end].to_vec(),
@@ -88,113 +121,420 @@ pub(crate) fn parse_pgm(bytes: &[u8]) -> Result<GrayFrame, FaceDetectionError> {
 }
 
 pub(crate) fn detect_frames(
-    model_path: &Path,
-    frames: &[GrayFrame],
+    model_dir: &Path,
+    frames: &[RgbFrame],
 ) -> Result<Vec<DetectedFace>, FaceDetectionError> {
-    if !model_path.is_file() {
+    let detector_path = model_dir.join(DETECTOR_MODEL_FILE);
+    let recognizer_path = model_dir.join(RECOGNIZER_MODEL_FILE);
+    if !detector_path.is_file() {
         return Err(FaceDetectionError::ModelUnavailable(io::Error::new(
             io::ErrorKind::NotFound,
-            model_path.display().to_string(),
+            detector_path.display().to_string(),
         )));
     }
-    let model_path = model_path.to_str().ok_or_else(|| {
-        FaceDetectionError::ModelUnavailable(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "face detector model path is not valid UTF-8",
-        ))
+    if !recognizer_path.is_file() {
+        return Err(FaceDetectionError::ModelUnavailable(io::Error::new(
+            io::ErrorKind::NotFound,
+            recognizer_path.display().to_string(),
+        )));
+    }
+
+    let cache = ENGINE_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().map_err(|_| {
+        FaceDetectionError::ModelInvalid(io::Error::other("face engine mutex poisoned"))
     })?;
-    let mut detector =
-        rustface::create_detector(model_path).map_err(FaceDetectionError::ModelInvalid)?;
-    // A lower minimum size and score catch smaller and dimmer faces. Overlap
-    // suppression below drops the duplicate boxes this more sensitive pass creates.
-    detector.set_min_face_size(20);
-    detector.set_score_thresh(2.0);
-    detector.set_pyramid_scale_factor(0.75);
-    detector.set_slide_window_step(4, 4);
+    let needs_load = guard
+        .as_ref()
+        .is_none_or(|(cached_dir, _)| cached_dir != model_dir);
+    if needs_load {
+        let engine = load_face_engine(&detector_path, &recognizer_path)?;
+        *guard = Some((model_dir.to_path_buf(), engine));
+    }
+    let engine = &mut guard
+        .as_mut()
+        .ok_or_else(|| FaceDetectionError::ModelInvalid(io::Error::other("missing face engine")))?
+        .1;
+
     let mut detected = Vec::new();
     for frame in frames {
-        let enhanced = contrast_stretch(frame);
-        let image = ImageData::new(&enhanced.pixels, frame.width, frame.height);
-        let mut faces = detector.detect(&image);
-        faces.sort_by(|left, right| right.score().total_cmp(&left.score()));
-        detected.extend(faces.into_iter().take(32).filter_map(|face| {
-            let bbox = face.bbox();
-            let left = bbox.x().max(0) as f32 / frame.width as f32;
-            let top = bbox.y().max(0) as f32 / frame.height as f32;
-            let right = (bbox.x().max(0) as u32)
-                .saturating_add(bbox.width())
-                .min(frame.width) as f32
-                / frame.width as f32;
-            let bottom = (bbox.y().max(0) as u32)
-                .saturating_add(bbox.height())
-                .min(frame.height) as f32
-                / frame.height as f32;
-            let width = right - left;
-            let height = bottom - top;
-            if width <= 0.0 || height <= 0.0 {
-                return None;
-            }
-            let score = face.score().max(0.0) as f32;
-            Some(DetectedFace {
-                left,
-                top,
-                width,
-                height,
-                confidence: (score / 10.0).clamp(0.0, 1.0),
-                descriptor: sample_descriptor(frame, left, top, width, height),
-            })
-        }));
+        detected.extend(detect_single_frame(engine, frame)?);
     }
     Ok(suppress_overlaps(detected))
 }
 
-/// Build a 256-byte histogram-of-gradients descriptor. Gradients survive
-/// brightness changes better than raw pixels, so the same person is less likely
-/// to split across lighting, while a different face still lands far away.
-/// The descriptor is an implementation detail and is never returned by the API.
-fn sample_descriptor(frame: &GrayFrame, left: f32, top: f32, width: f32, height: f32) -> Vec<u8> {
-    // Keep a margin inside the detector box so background pixels do not
-    // dominate the signature, but never shrink a tiny face to nothing.
-    let inset_x = width * 0.08;
-    let inset_y = height * 0.08;
-    let crop_left = (left + inset_x).clamp(0.0, 0.98);
-    let crop_top = (top + inset_y).clamp(0.0, 0.98);
-    let crop_width = (width - inset_x * 2.0)
-        .max(width * 0.64)
-        .min(1.0 - crop_left);
-    let crop_height = (height - inset_y * 2.0)
-        .max(height * 0.64)
-        .min(1.0 - crop_top);
-    let mut patch = sample_patch(frame, crop_left, crop_top, crop_width, crop_height);
-    stretch_bytes(&mut patch);
-    histogram_of_gradients(&patch).to_vec()
+fn load_face_engine(
+    detector_path: &Path,
+    recognizer_path: &Path,
+) -> Result<FaceEngine, FaceDetectionError> {
+    let dylib_path = std::env::var_os("ORT_DYLIB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ORT_DYLIB_PATH));
+    let env_result = ORT_INIT.get_or_init(|| {
+        if !dylib_path.is_file() {
+            return Err(format!(
+                "ONNX Runtime library not found at {}",
+                dylib_path.display()
+            ));
+        }
+        let builder = ort::init_from(&dylib_path)
+            .map_err(|error| format!("failed to load {}: {error}", dylib_path.display()))?;
+        builder
+            .with_name("my-drive-face")
+            .with_telemetry(false)
+            .build()
+            .map_err(|error| format!("failed to initialize ONNX Runtime: {error}"))
+    });
+    let env = match env_result {
+        Ok(env) => env.clone(),
+        Err(message) => {
+            return Err(FaceDetectionError::ModelUnavailable(io::Error::new(
+                io::ErrorKind::NotFound,
+                message.clone(),
+            )));
+        }
+    };
+
+    let detector = build_session(&env, detector_path)?;
+    let recognizer = build_session(&env, recognizer_path)?;
+    Ok(FaceEngine {
+        _env: env,
+        detector,
+        recognizer,
+    })
 }
 
-fn sample_patch(
-    frame: &GrayFrame,
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-) -> [u8; PATCH_SIDE * PATCH_SIDE] {
-    let mut patch = [0_u8; PATCH_SIDE * PATCH_SIDE];
-    let origin_x = left.clamp(0.0, 1.0) * frame.width.max(1) as f32;
-    let origin_y = top.clamp(0.0, 1.0) * frame.height.max(1) as f32;
-    let span_x = ((left + width).clamp(0.0, 1.0) * frame.width.max(1) as f32 - origin_x).max(1.0);
-    let span_y = ((top + height).clamp(0.0, 1.0) * frame.height.max(1) as f32 - origin_y).max(1.0);
-    for row in 0..PATCH_SIDE {
-        for column in 0..PATCH_SIDE {
-            let x = origin_x + (column as f32 + 0.5) * span_x / PATCH_SIDE as f32;
-            let y = origin_y + (row as f32 + 0.5) * span_y / PATCH_SIDE as f32;
-            patch[row * PATCH_SIDE + column] = bilinear(frame, x, y);
+fn build_session(env: &Environment, model_path: &Path) -> Result<Session, FaceDetectionError> {
+    let to_invalid = |error: ort::Error<ort::session::builder::SessionBuilder>| {
+        FaceDetectionError::ModelInvalid(io::Error::other(error.to_string()))
+    };
+    let builder = Session::builder(env)
+        .map_err(|error| FaceDetectionError::ModelInvalid(io::Error::other(error.to_string())))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(to_invalid)?
+        .with_intra_threads(1)
+        .map_err(to_invalid)?
+        .with_inter_threads(1)
+        .map_err(to_invalid)?;
+    let mut builder = builder;
+    builder
+        .commit_from_file(model_path)
+        .map_err(|error| FaceDetectionError::ModelInvalid(io::Error::other(error.to_string())))
+}
+
+#[derive(Debug, Clone)]
+struct ScrfdCandidate {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    score: f32,
+    kps: [[f32; 2]; 5],
+}
+
+fn detect_single_frame(
+    engine: &mut FaceEngine,
+    frame: &RgbFrame,
+) -> Result<Vec<DetectedFace>, FaceDetectionError> {
+    if frame.width == 0 || frame.height == 0 || frame.pixels.len() < 3 {
+        return Err(FaceDetectionError::InvalidFrame);
+    }
+    let (det_input, det_scale) = prepare_scrfd_input(frame);
+    let det_tensor = Tensor::from_array((
+        [1_usize, 3, DET_INPUT_SIZE as usize, DET_INPUT_SIZE as usize],
+        det_input.into_boxed_slice(),
+    ))
+    .map_err(|error| FaceDetectionError::ModelInvalid(io::Error::other(error.to_string())))?;
+
+    let outputs = engine
+        .detector
+        .run(ort::inputs![det_tensor])
+        .map_err(|error| FaceDetectionError::ModelInvalid(io::Error::other(error.to_string())))?;
+    if outputs.len() < 9 {
+        return Err(FaceDetectionError::ModelInvalid(io::Error::other(
+            "unexpected SCRFD output tensor count",
+        )));
+    }
+
+    let mut raw_tensors: Vec<Vec<f32>> = Vec::with_capacity(9);
+    for index in 0..9 {
+        let (_, data) = outputs[index]
+            .try_extract_tensor::<f32>()
+            .map_err(|error| {
+                FaceDetectionError::ModelInvalid(io::Error::other(error.to_string()))
+            })?;
+        raw_tensors.push(data.to_vec());
+    }
+    drop(outputs);
+
+    let candidates = decode_scrfd_outputs(&raw_tensors, det_scale, MIN_DET_SCORE)?;
+    let kept = nms_scrfd(candidates, NMS_IOU_THRESHOLD);
+
+    let mut faces = Vec::new();
+    for candidate in kept.into_iter().take(MAX_FACES_PER_FRAME) {
+        let x1 = candidate.x1.clamp(0.0, frame.width as f32);
+        let y1 = candidate.y1.clamp(0.0, frame.height as f32);
+        let x2 = candidate.x2.clamp(0.0, frame.width as f32);
+        let y2 = candidate.y2.clamp(0.0, frame.height as f32);
+        let box_w = x2 - x1;
+        let box_h = y2 - y1;
+        if box_w < MIN_FACE_PIXEL_SIDE || box_h < MIN_FACE_PIXEL_SIDE {
+            continue;
+        }
+        let aspect = (box_w / box_h).max(box_h / box_w);
+        if aspect > MAX_FACE_ASPECT_RATIO {
+            continue;
+        }
+        let aligned = align_face_arcface(frame, &candidate.kps);
+        let embedding = extract_arcface_embedding(&mut engine.recognizer, aligned)?;
+        let left = (x1 / frame.width as f32).clamp(0.0, 1.0);
+        let top = (y1 / frame.height as f32).clamp(0.0, 1.0);
+        let width = (box_w / frame.width as f32).min(1.0 - left);
+        let height = (box_h / frame.height as f32).min(1.0 - top);
+        if width <= 0.0 || height <= 0.0 {
+            continue;
+        }
+        faces.push(DetectedFace {
+            left,
+            top,
+            width,
+            height,
+            confidence: candidate.score.clamp(0.0, 1.0),
+            descriptor: encode_embedding(&embedding),
+        });
+    }
+    Ok(faces)
+}
+
+fn prepare_scrfd_input(frame: &RgbFrame) -> (Vec<f32>, f32) {
+    let side = DET_INPUT_SIZE as usize;
+    let plane_size = side * side;
+    // OpenCV blobFromImage on a zero-padded 640x640 uint8 canvas normalizes
+    // black padding pixels as (0.0 - 127.5) / 128.0.
+    let pad_value = -127.5_f32 / 128.0_f32;
+    let mut tensor = vec![pad_value; 3 * plane_size];
+
+    let im_ratio = frame.height as f32 / frame.width as f32;
+    let (new_w, new_h) = if im_ratio > 1.0 {
+        let h = DET_INPUT_SIZE;
+        let w = ((h as f32 / im_ratio) as u32).clamp(1, DET_INPUT_SIZE);
+        (w, h)
+    } else {
+        let w = DET_INPUT_SIZE;
+        let h = ((w as f32 * im_ratio) as u32).clamp(1, DET_INPUT_SIZE);
+        (w, h)
+    };
+    let det_scale = new_h as f32 / frame.height as f32;
+
+    let scale_x = frame.width as f32 / new_w as f32;
+    let scale_y = frame.height as f32 / new_h as f32;
+    for y in 0..new_h {
+        let src_y = ((y as f32 + 0.5) * scale_y - 0.5).clamp(0.0, (frame.height - 1) as f32);
+        let row_offset = y as usize * side;
+        for x in 0..new_w {
+            let src_x = ((x as f32 + 0.5) * scale_x - 0.5).clamp(0.0, (frame.width - 1) as f32);
+            let [r, g, b] = bilinear_rgb(frame, src_x, src_y);
+            let idx = row_offset + x as usize;
+            tensor[idx] = (r - 127.5) / 128.0;
+            tensor[plane_size + idx] = (g - 127.5) / 128.0;
+            tensor[2 * plane_size + idx] = (b - 127.5) / 128.0;
         }
     }
-    patch
+    (tensor, det_scale)
 }
 
-fn bilinear(frame: &GrayFrame, x: f32, y: f32) -> u8 {
-    if frame.width == 0 || frame.height == 0 || frame.pixels.is_empty() {
-        return 0;
+fn decode_scrfd_outputs(
+    outputs: &[Vec<f32>],
+    det_scale: f32,
+    score_threshold: f32,
+) -> Result<Vec<ScrfdCandidate>, FaceDetectionError> {
+    let fmc = SCRFD_STRIDES.len();
+    let mut candidates = Vec::new();
+    for (idx, &stride) in SCRFD_STRIDES.iter().enumerate() {
+        let scores = &outputs[idx];
+        let bboxes = &outputs[idx + fmc];
+        let kps = &outputs[idx + fmc * 2];
+        let grid_side = DET_INPUT_SIZE / stride;
+        let expected_anchors = (grid_side * grid_side) as usize * SCRFD_NUM_ANCHORS;
+        if scores.len() != expected_anchors
+            || bboxes.len() != expected_anchors * 4
+            || kps.len() != expected_anchors * 10
+        {
+            return Err(FaceDetectionError::ModelInvalid(io::Error::other(
+                "SCRFD output tensor shape mismatch",
+            )));
+        }
+        let stride_f = stride as f32;
+        for (anchor_idx, &score) in scores.iter().enumerate() {
+            if score < score_threshold {
+                continue;
+            }
+            let cell = anchor_idx / SCRFD_NUM_ANCHORS;
+            let cy = (cell as u32 / grid_side) as f32 * stride_f;
+            let cx = (cell as u32 % grid_side) as f32 * stride_f;
+
+            let bbox_base = anchor_idx * 4;
+            let x1 = (cx - bboxes[bbox_base] * stride_f) / det_scale;
+            let y1 = (cy - bboxes[bbox_base + 1] * stride_f) / det_scale;
+            let x2 = (cx + bboxes[bbox_base + 2] * stride_f) / det_scale;
+            let y2 = (cy + bboxes[bbox_base + 3] * stride_f) / det_scale;
+
+            let kps_base = anchor_idx * 10;
+            let mut points = [[0.0_f32; 2]; 5];
+            for (k, point) in points.iter_mut().enumerate() {
+                point[0] = (cx + kps[kps_base + k * 2] * stride_f) / det_scale;
+                point[1] = (cy + kps[kps_base + k * 2 + 1] * stride_f) / det_scale;
+            }
+            candidates.push(ScrfdCandidate {
+                x1,
+                y1,
+                x2,
+                y2,
+                score,
+                kps: points,
+            });
+        }
+    }
+    Ok(candidates)
+}
+
+fn nms_scrfd(mut candidates: Vec<ScrfdCandidate>, iou_threshold: f32) -> Vec<ScrfdCandidate> {
+    candidates.sort_by(|left, right| right.score.total_cmp(&left.score));
+    let mut kept: Vec<ScrfdCandidate> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let area_c = (candidate.x2 - candidate.x1 + 1.0).max(0.0)
+            * (candidate.y2 - candidate.y1 + 1.0).max(0.0);
+        let suppressed = kept.iter().any(|existing| {
+            let xx1 = existing.x1.max(candidate.x1);
+            let yy1 = existing.y1.max(candidate.y1);
+            let xx2 = existing.x2.min(candidate.x2);
+            let yy2 = existing.y2.min(candidate.y2);
+            let w = (xx2 - xx1 + 1.0).max(0.0);
+            let h = (yy2 - yy1 + 1.0).max(0.0);
+            let inter = w * h;
+            let area_e = (existing.x2 - existing.x1 + 1.0).max(0.0)
+                * (existing.y2 - existing.y1 + 1.0).max(0.0);
+            let denom = area_e + area_c - inter;
+            denom > 0.0 && (inter / denom) > iou_threshold
+        });
+        if !suppressed {
+            kept.push(candidate);
+        }
+    }
+    kept
+}
+
+/// 2D Umeyama similarity transform mapping detected 5-point landmarks to
+/// InsightFace's 112x112 canonical ArcFace alignment template.
+fn estimate_arcface_affine(src: &[[f32; 2]; 5]) -> Option<[f64; 4]> {
+    let mut mean_src = [0.0_f64; 2];
+    let mut mean_dst = [0.0_f64; 2];
+    for i in 0..5 {
+        mean_src[0] += f64::from(src[i][0]);
+        mean_src[1] += f64::from(src[i][1]);
+        mean_dst[0] += ARCFACE_DST[i][0];
+        mean_dst[1] += ARCFACE_DST[i][1];
+    }
+    mean_src[0] /= 5.0;
+    mean_src[1] /= 5.0;
+    mean_dst[0] /= 5.0;
+    mean_dst[1] /= 5.0;
+
+    let mut src_var = 0.0_f64;
+    let mut num_a = 0.0_f64;
+    let mut num_b = 0.0_f64;
+    for i in 0..5 {
+        let sx = f64::from(src[i][0]) - mean_src[0];
+        let sy = f64::from(src[i][1]) - mean_src[1];
+        let dx = ARCFACE_DST[i][0] - mean_dst[0];
+        let dy = ARCFACE_DST[i][1] - mean_dst[1];
+        src_var += sx * sx + sy * sy;
+        num_a += dx * sx + dy * sy;
+        num_b += dy * sx - dx * sy;
+    }
+    if src_var <= 1e-9 {
+        return None;
+    }
+    let a = num_a / src_var;
+    let b = num_b / src_var;
+    let norm_sq = a * a + b * b;
+    if norm_sq <= 1e-12 {
+        return None;
+    }
+    let tx = mean_dst[0] - (a * mean_src[0] - b * mean_src[1]);
+    let ty = mean_dst[1] - (b * mean_src[0] + a * mean_src[1]);
+    Some([a, b, tx, ty])
+}
+
+fn align_face_arcface(frame: &RgbFrame, kps: &[[f32; 2]; 5]) -> Vec<f32> {
+    let plane_size = ALIGN_SIZE * ALIGN_SIZE;
+    let mut tensor = vec![0.0_f32; 3 * plane_size];
+    let Some([a, b, tx, ty]) = estimate_arcface_affine(kps) else {
+        return tensor;
+    };
+    let det = a * a + b * b;
+    for y in 0..ALIGN_SIZE {
+        let v = y as f64 - ty;
+        let row_offset = y * ALIGN_SIZE;
+        for x in 0..ALIGN_SIZE {
+            let u = x as f64 - tx;
+            let src_x = ((a * u + b * v) / det) as f32;
+            let src_y = ((-b * u + a * v) / det) as f32;
+            let [r, g, bl] = if src_x >= 0.0
+                && src_y >= 0.0
+                && src_x <= (frame.width.saturating_sub(1)) as f32
+                && src_y <= (frame.height.saturating_sub(1)) as f32
+            {
+                bilinear_rgb(frame, src_x, src_y)
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+            let idx = row_offset + x;
+            tensor[idx] = (r - 127.5) / 127.5;
+            tensor[plane_size + idx] = (g - 127.5) / 127.5;
+            tensor[2 * plane_size + idx] = (bl - 127.5) / 127.5;
+        }
+    }
+    tensor
+}
+
+fn extract_arcface_embedding(
+    recognizer: &mut Session,
+    aligned_nchw: Vec<f32>,
+) -> Result<[f32; EMBEDDING_DIM], FaceDetectionError> {
+    let rec_tensor = Tensor::from_array((
+        [1_usize, 3, ALIGN_SIZE, ALIGN_SIZE],
+        aligned_nchw.into_boxed_slice(),
+    ))
+    .map_err(|error| FaceDetectionError::ModelInvalid(io::Error::other(error.to_string())))?;
+    let outputs = recognizer
+        .run(ort::inputs![rec_tensor])
+        .map_err(|error| FaceDetectionError::ModelInvalid(io::Error::other(error.to_string())))?;
+    if outputs.len() == 0 {
+        return Err(FaceDetectionError::ModelInvalid(io::Error::other(
+            "ArcFace model returned no outputs",
+        )));
+    }
+    let (_, data) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|error| FaceDetectionError::ModelInvalid(io::Error::other(error.to_string())))?;
+    if data.len() != EMBEDDING_DIM {
+        return Err(FaceDetectionError::ModelInvalid(io::Error::other(
+            "ArcFace output length mismatch",
+        )));
+    }
+    let mut embedding = [0.0_f32; EMBEDDING_DIM];
+    embedding.copy_from_slice(data);
+    if !l2_normalize(&mut embedding) {
+        return Err(FaceDetectionError::ModelInvalid(io::Error::other(
+            "ArcFace embedding has near-zero norm",
+        )));
+    }
+    Ok(embedding)
+}
+
+fn bilinear_rgb(frame: &RgbFrame, x: f32, y: f32) -> [f32; 3] {
+    if frame.width == 0 || frame.height == 0 || frame.pixels.len() < 3 {
+        return [0.0, 0.0, 0.0];
     }
     let max_x = frame.width.saturating_sub(1) as f32;
     let max_y = frame.height.saturating_sub(1) as f32;
@@ -206,121 +546,91 @@ fn bilinear(frame: &GrayFrame, x: f32, y: f32) -> u8 {
     let y1 = (y0 + 1).min(frame.height.saturating_sub(1));
     let tx = x - x0 as f32;
     let ty = y - y0 as f32;
-    let sample = |px: u32, py: u32| -> f32 {
-        let index = py as usize * frame.width as usize + px as usize;
-        f32::from(frame.pixels.get(index).copied().unwrap_or(0))
+    let w00 = (1.0 - tx) * (1.0 - ty);
+    let w10 = tx * (1.0 - ty);
+    let w01 = (1.0 - tx) * ty;
+    let w11 = tx * ty;
+    let sample = |px: u32, py: u32| -> [f32; 3] {
+        let base = (py as usize * frame.width as usize + px as usize) * 3;
+        [
+            f32::from(frame.pixels.get(base).copied().unwrap_or(0)),
+            f32::from(frame.pixels.get(base + 1).copied().unwrap_or(0)),
+            f32::from(frame.pixels.get(base + 2).copied().unwrap_or(0)),
+        ]
     };
-    let top = sample(x0, y0) * (1.0 - tx) + sample(x1, y0) * tx;
-    let bottom = sample(x0, y1) * (1.0 - tx) + sample(x1, y1) * tx;
-    (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8
+    let p00 = sample(x0, y0);
+    let p10 = sample(x1, y0);
+    let p01 = sample(x0, y1);
+    let p11 = sample(x1, y1);
+    [
+        p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11,
+        p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11,
+        p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11,
+    ]
 }
 
-fn stretch_bytes(samples: &mut [u8]) {
-    let Some(min) = samples.iter().copied().min() else {
-        return;
-    };
-    let Some(max) = samples.iter().copied().max() else {
-        return;
-    };
-    let span = u16::from(max.saturating_sub(min)).max(1);
-    if span > 220 {
-        return;
+pub(crate) fn l2_normalize(vector: &mut [f32]) -> bool {
+    let norm_sq: f32 = vector.iter().map(|v| v * v).sum();
+    let norm = norm_sq.sqrt();
+    if !norm.is_finite() || norm < 1e-8 {
+        return false;
     }
-    for sample in samples {
-        *sample = ((u16::from(sample.saturating_sub(min)) * 255) / span).min(255) as u8;
+    for value in vector {
+        *value /= norm;
     }
+    true
 }
 
-fn contrast_stretch(frame: &GrayFrame) -> GrayFrame {
-    let mut pixels = frame.pixels.clone();
-    stretch_bytes(&mut pixels);
-    GrayFrame {
-        width: frame.width,
-        height: frame.height,
-        pixels,
+pub(crate) fn encode_embedding(vector: &[f32; EMBEDDING_DIM]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(DESCRIPTOR_LEN);
+    for &value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
     }
+    bytes
 }
 
-fn histogram_of_gradients(patch: &[u8; PATCH_SIDE * PATCH_SIDE]) -> [u8; DESCRIPTOR_LEN] {
-    let mut histogram = [0_f32; DESCRIPTOR_LEN];
-    let cell = PATCH_SIDE / HOG_CELLS;
-    for cell_y in 0..HOG_CELLS {
-        for cell_x in 0..HOG_CELLS {
-            for py in 0..cell {
-                for px in 0..cell {
-                    let x = cell_x * cell + px;
-                    let y = cell_y * cell + py;
-                    let left = patch_at(patch, x.saturating_sub(1), y);
-                    let right = patch_at(patch, (x + 1).min(PATCH_SIDE - 1), y);
-                    let up = patch_at(patch, x, y.saturating_sub(1));
-                    let down = patch_at(patch, x, (y + 1).min(PATCH_SIDE - 1));
-                    let gx = f32::from(right) - f32::from(left);
-                    let gy = f32::from(down) - f32::from(up);
-                    let magnitude = gx.hypot(gy);
-                    if magnitude < 1.0 {
-                        continue;
-                    }
-                    let mut angle = gy.atan2(gx);
-                    if angle < 0.0 {
-                        angle += std::f32::consts::PI;
-                    }
-                    let bin = ((angle / std::f32::consts::PI) * HOG_BINS as f32).floor() as usize
-                        % HOG_BINS;
-                    histogram[(cell_y * HOG_CELLS + cell_x) * HOG_BINS + bin] += magnitude;
-                }
-            }
+pub(crate) fn decode_embedding(bytes: &[u8]) -> Option<[f32; EMBEDDING_DIM]> {
+    if bytes.len() != DESCRIPTOR_LEN {
+        return None;
+    }
+    let mut vector = [0.0_f32; EMBEDDING_DIM];
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        if !value.is_finite() {
+            return None;
         }
+        vector[index] = value;
     }
-
-    let mut accumulated = [0_f32; DESCRIPTOR_LEN];
-    let mut counts = [0_u8; DESCRIPTOR_LEN];
-    for block_y in 0..HOG_CELLS.saturating_sub(1) {
-        for block_x in 0..HOG_CELLS.saturating_sub(1) {
-            let mut energy = 1e-4_f32;
-            for offset_y in 0..2 {
-                for offset_x in 0..2 {
-                    for bin in 0..HOG_BINS {
-                        let index = ((block_y + offset_y) * HOG_CELLS + block_x + offset_x)
-                            * HOG_BINS
-                            + bin;
-                        energy += histogram[index] * histogram[index];
-                    }
-                }
-            }
-            let norm = energy.sqrt();
-            for offset_y in 0..2 {
-                for offset_x in 0..2 {
-                    for bin in 0..HOG_BINS {
-                        let index = ((block_y + offset_y) * HOG_CELLS + block_x + offset_x)
-                            * HOG_BINS
-                            + bin;
-                        accumulated[index] += (histogram[index] / norm).min(0.2);
-                        counts[index] = counts[index].saturating_add(1);
-                    }
-                }
-            }
-        }
+    if !l2_normalize(&mut vector) {
+        return None;
     }
-
-    let mut values = [0_f32; DESCRIPTOR_LEN];
-    let mut peak = 1e-6_f32;
-    for index in 0..DESCRIPTOR_LEN {
-        values[index] = if counts[index] == 0 {
-            0.0
-        } else {
-            accumulated[index] / f32::from(counts[index])
-        };
-        peak = peak.max(values[index]);
-    }
-    let mut descriptor = [0_u8; DESCRIPTOR_LEN];
-    for index in 0..DESCRIPTOR_LEN {
-        descriptor[index] = ((values[index] / peak) * 255.0).round().clamp(0.0, 255.0) as u8;
-    }
-    descriptor
+    Some(vector)
 }
 
-fn patch_at(patch: &[u8; PATCH_SIDE * PATCH_SIDE], x: usize, y: usize) -> u8 {
-    patch[y * PATCH_SIDE + x]
+pub(crate) fn cosine_similarity(left: &[f32; EMBEDDING_DIM], right: &[f32; EMBEDDING_DIM]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| a * b)
+        .sum::<f32>()
+        .clamp(-1.0, 1.0)
+}
+
+pub(crate) fn blend_centroid(
+    current: &[f32; EMBEDDING_DIM],
+    current_weight: usize,
+    addition: &[f32; EMBEDDING_DIM],
+    addition_weight: usize,
+) -> [f32; EMBEDDING_DIM] {
+    let w1 = current_weight.max(1) as f32;
+    let w2 = addition_weight.max(1) as f32;
+    let mut blended = [0.0_f32; EMBEDDING_DIM];
+    for i in 0..EMBEDDING_DIM {
+        blended[i] = current[i] * w1 + addition[i] * w2;
+    }
+    if !l2_normalize(&mut blended) {
+        return *current;
+    }
+    blended
 }
 
 pub(crate) fn suppress_overlaps(mut faces: Vec<DetectedFace>) -> Vec<DetectedFace> {
@@ -395,108 +705,63 @@ fn next_token<'a>(bytes: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DESCRIPTOR_LEN, DetectedFace, GrayFrame, MAX_FRAME_SIDE, parse_pgm, sample_descriptor,
+        ARCFACE_DST, DESCRIPTOR_LEN, DetectedFace, EMBEDDING_DIM, MAX_FRAME_SIDE, blend_centroid,
+        cosine_similarity, decode_embedding, encode_embedding, estimate_arcface_affine, parse_ppm,
         suppress_overlaps,
     };
 
     #[test]
-    fn parses_bounded_binary_pgm_with_comments() {
-        let bytes = b"P5\n# generated\n2 1\n255\n\x00\xff";
-        let frame = parse_pgm(bytes).unwrap();
+    fn parses_bounded_binary_ppm_with_comments() {
+        let bytes = b"P6\n# generated\n2 1\n255\n\x01\x02\x03\xff\x80\x00";
+        let frame = parse_ppm(bytes).unwrap();
         assert_eq!((frame.width, frame.height), (2, 1));
-        assert_eq!(frame.pixels, [0, 255]);
+        assert_eq!(frame.pixels, [1, 2, 3, 255, 128, 0]);
     }
 
     #[test]
-    fn accepts_crlf_pgm_headers_without_dropping_pixels() {
-        let frame = parse_pgm(b"P5\r\n2 1\r\n255\r\n\x20\xff").unwrap();
-        assert_eq!(frame.pixels, [0x20, 0xff]);
+    fn accepts_crlf_ppm_headers_without_dropping_pixels() {
+        let frame = parse_ppm(b"P6\r\n1 1\r\n255\r\n\x20\x40\xff").unwrap();
+        assert_eq!(frame.pixels, [0x20, 0x40, 0xff]);
     }
 
     #[test]
     fn rejects_wrong_format_and_oversized_frames() {
-        assert!(parse_pgm(b"P2\n1 1\n255\n0").is_err());
-        let header = format!("P5\n{} 1\n255\n", MAX_FRAME_SIDE + 1);
-        assert!(parse_pgm(header.as_bytes()).is_err());
+        assert!(parse_ppm(b"P5\n1 1\n255\n0").is_err());
+        let header = format!("P6\n{} 1\n255\n", MAX_FRAME_SIDE + 1);
+        assert!(parse_ppm(header.as_bytes()).is_err());
     }
 
     #[test]
-    fn descriptor_is_bounded_and_contrast_normalized() {
-        let frame = GrayFrame {
-            width: 32,
-            height: 32,
-            pixels: (0..1024).map(|value| (value % 251) as u8).collect(),
-        };
-        let descriptor = sample_descriptor(&frame, 0.25, 0.25, 0.5, 0.5);
-        assert_eq!(descriptor.len(), DESCRIPTOR_LEN);
-        assert!(descriptor.iter().any(|value| *value != 128));
+    fn embedding_round_trips_and_computes_cosine_similarity() {
+        let mut a = [0.0_f32; EMBEDDING_DIM];
+        a[0] = 1.0;
+        let mut b = [0.0_f32; EMBEDDING_DIM];
+        b[0] = 0.6;
+        b[1] = 0.8;
+        let bytes_a = encode_embedding(&a);
+        assert_eq!(bytes_a.len(), DESCRIPTOR_LEN);
+        let decoded_a = decode_embedding(&bytes_a).unwrap();
+        assert!((cosine_similarity(&decoded_a, &b) - 0.6).abs() < 1e-5);
+        let blended = blend_centroid(&decoded_a, 1, &b, 1);
+        let norm: f32 = blended.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+        assert!(decode_embedding(&[0_u8; 256]).is_none());
     }
 
     #[test]
-    fn descriptor_is_stable_for_identical_crop_and_changes_for_other_crop() {
-        let pixels = (0..4096)
-            .map(|value| ((value * 17 + value / 31) % 251) as u8)
-            .collect();
-        let frame = GrayFrame {
-            width: 64,
-            height: 64,
-            pixels,
-        };
-        let first = sample_descriptor(&frame, 0.1, 0.1, 0.3, 0.3);
-        let same = sample_descriptor(&frame, 0.1, 0.1, 0.3, 0.3);
-        let other = sample_descriptor(&frame, 0.6, 0.6, 0.3, 0.3);
-        assert_eq!(first, same);
-        assert_ne!(first, other);
-    }
-
-    fn mean_distance(left: &[u8], right: &[u8]) -> u32 {
-        left.iter()
-            .zip(right)
-            .map(|(left, right)| u32::from(left.abs_diff(*right)))
-            .sum::<u32>()
-            / left.len() as u32
-    }
-
-    #[test]
-    fn similar_faces_are_closer_than_a_different_pattern() {
-        let mut face = vec![40_u8; 96 * 96];
-        for y in 20..76 {
-            for x in 24..72 {
-                let dx = x as i32 - 48;
-                let dy = y as i32 - 48;
-                if dx * dx + dy * dy < 28 * 28 {
-                    face[y * 96 + x] = 180;
-                }
-            }
+    fn umeyama_affine_recovers_exact_similarity_transform() {
+        let scale = 2.0_f32;
+        let offset = [15.0_f32, 24.0_f32];
+        let mut src = [[0.0_f32; 2]; 5];
+        for i in 0..5 {
+            src[i][0] = ARCFACE_DST[i][0] as f32 * scale + offset[0];
+            src[i][1] = ARCFACE_DST[i][1] as f32 * scale + offset[1];
         }
-        let frame = GrayFrame {
-            width: 96,
-            height: 96,
-            pixels: face,
-        };
-        let shifted = sample_descriptor(&frame, 0.18, 0.16, 0.52, 0.58);
-        let again = sample_descriptor(&frame, 0.2, 0.18, 0.5, 0.56);
-        let mut stripes = vec![20_u8; 96 * 96];
-        for y in 0..96 {
-            for x in 0..96 {
-                stripes[y * 96 + x] = if y % 8 < 4 { 30 } else { 210 };
-            }
-        }
-        let other = sample_descriptor(
-            &GrayFrame {
-                width: 96,
-                height: 96,
-                pixels: stripes,
-            },
-            0.2,
-            0.18,
-            0.5,
-            0.56,
-        );
-        let close = mean_distance(&shifted, &again);
-        let far = mean_distance(&shifted, &other);
-        assert!(close < far, "close {close} should be below far {far}");
-        assert!(close < 48, "similar crops drifted by {close}");
+        let [a, b, tx, ty] = estimate_arcface_affine(&src).unwrap();
+        assert!((a - 0.5).abs() < 1e-6);
+        assert!(b.abs() < 1e-6);
+        assert!((tx + 7.5).abs() < 1e-5);
+        assert!((ty + 12.0).abs() < 1e-5);
     }
 
     #[test]

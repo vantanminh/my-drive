@@ -312,7 +312,10 @@ async fn fetch_clusters(
                    AND representative_entry.deleted_at IS NULL \
                    AND representative_entry.kind = 'file' \
                  WHERE representative_observation.cluster_id = cluster.id \
-                 ORDER BY representative_observation.created_at DESC, representative_observation.id DESC \
+                 ORDER BY representative_observation.confidence DESC, \
+                          (representative_observation.box_width * representative_observation.box_height) DESC, \
+                          representative_observation.created_at DESC, \
+                          representative_observation.id DESC \
                  LIMIT 1 \
            ) AS representative ON TRUE \
           WHERE ($1::UUID IS NULL OR cluster.owner_id = $1) \
@@ -442,6 +445,7 @@ async fn merge_faces(
     .await
     .map_err(FaceError::Database)?
     .rows_affected();
+    refresh_cluster_anchor(&mut transaction, request.target_id).await?;
     sqlx::query("UPDATE face_clusters SET updated_at = now() WHERE id = $1")
         .bind(request.target_id)
         .execute(&mut *transaction)
@@ -506,7 +510,7 @@ async fn separate_faces(
         return Err(FaceError::NotFound);
     }
     let new_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO face_clusters (id, owner_id) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO face_clusters (id, owner_id, auto_merge) VALUES ($1, $2, FALSE)")
         .bind(new_id)
         .bind(user.id)
         .execute(&mut *transaction)
@@ -533,6 +537,8 @@ async fn separate_faces(
     if moved == 0 {
         return Err(FaceError::NotFound);
     }
+    refresh_cluster_anchor(&mut transaction, new_id).await?;
+    refresh_cluster_anchor(&mut transaction, cluster_id).await?;
     sqlx::query(
         "DELETE FROM face_clusters AS cluster \
           WHERE cluster.id = $1 AND cluster.owner_id = $2 AND cluster.label IS NULL \
@@ -546,6 +552,7 @@ async fn separate_faces(
     .execute(&mut *transaction)
     .await
     .map_err(FaceError::Database)?;
+
     sqlx::query(
         "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
          VALUES ('face_cluster_separated', $1, $2, jsonb_build_object('source_id', $3, 'moved_faces', $4))",
@@ -562,6 +569,44 @@ async fn separate_faces(
         "clusterId": new_id,
         "movedFaces": moved,
     }))))
+}
+
+async fn refresh_cluster_anchor(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cluster_id: Uuid,
+) -> Result<(), FaceError> {
+    let descriptors: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT descriptor \
+           FROM face_observations \
+          WHERE cluster_id = $1 AND recipe_version = $2",
+    )
+    .bind(cluster_id)
+    .bind(crate::face_indexer::FACE_INDEX_RECIPE_VERSION)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(FaceError::Database)?;
+
+    let mut sum = [0.0_f32; crate::face_indexer::EMBEDDING_DIM];
+    let mut count = 0usize;
+    for bytes in descriptors {
+        if let Some(vector) = crate::face_indexer::decode_embedding(&bytes) {
+            for (acc, value) in sum.iter_mut().zip(vector.iter()) {
+                *acc += *value;
+            }
+            count += 1;
+        }
+    }
+    if count == 0 || !crate::face_indexer::l2_normalize(&mut sum) {
+        return Ok(());
+    }
+    let anchor = crate::face_indexer::encode_embedding(&sum);
+    sqlx::query("UPDATE face_clusters SET anchor_embedding = $2 WHERE id = $1")
+        .bind(cluster_id)
+        .bind(anchor)
+        .execute(&mut **transaction)
+        .await
+        .map_err(FaceError::Database)?;
+    Ok(())
 }
 
 fn require_owner(user: &AuthenticatedUser) -> Result<(), FaceError> {

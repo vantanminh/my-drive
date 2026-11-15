@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 17);
+    assert_eq!(migrator.iter().len(), 18);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -93,4 +93,9 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     let updates = include_str!("../migrations/0017_system_updates.sql");
     assert!(updates.contains("CREATE TABLE system_update_settings"));
     assert!(updates.contains("INSERT INTO system_update_settings (singleton) VALUES (TRUE)"));
+
+    let face_arcface = include_str!("../migrations/0018_face_arcface_embeddings.sql");
+    assert!(face_arcface.contains("octet_length(descriptor) IN (256, 2048)"));
+    assert!(face_arcface.contains("anchor_embedding"));
+    assert!(face_arcface.contains("auto_merge"));
 }
