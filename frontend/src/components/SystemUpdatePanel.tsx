@@ -6,6 +6,7 @@ import {
   Cpu,
   ExternalLink,
   HardDriveDownload,
+  Network,
   RefreshCw,
   RotateCw,
   Server,
@@ -15,7 +16,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
-import type { HostOverview, SystemUpdatesStatus } from '../types';
+import type { HostNetworkStatus, HostOverview, SystemUpdatesStatus } from '../types';
 
 type Props = {
   onClose: () => void;
@@ -66,6 +67,7 @@ function updaterPhaseLabel(status: SystemUpdatesStatus['hostUpdater']): string {
 export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
   const [data, setData] = useState<SystemUpdatesStatus | null>(null);
   const [overview, setOverview] = useState<HostOverview | null>(null);
+  const [network, setNetwork] = useState<HostNetworkStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -80,6 +82,38 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
   const [logLines, setLogLines] = useState<string[] | null>(null);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
+  const [lanEnabled, setLanEnabled] = useState(true);
+  const [lanPort, setLanPort] = useState('3000');
+  const [lanBind, setLanBind] = useState('');
+  const [configureUfw, setConfigureUfw] = useState(true);
+
+  const [netIface, setNetIface] = useState('');
+  const [netMode, setNetMode] = useState<'dhcp' | 'static'>('static');
+  const [netCidr, setNetCidr] = useState('');
+  const [netGateway, setNetGateway] = useState('');
+  const [netDns, setNetDns] = useState('');
+
+  function applyNetworkState(net: HostNetworkStatus) {
+    setNetwork(net);
+    setLanEnabled(net.lan.enabled);
+    setLanPort(String(net.lan.port || 3000));
+    setLanBind(net.lan.bind || '');
+    const primary = net.interfaces.find((iface) => iface.state === 'up') || net.interfaces[0];
+    if (primary) {
+      setNetIface((current) => current || primary.name);
+      setNetCidr((current) => current || primary.ipv4[0] || '');
+      setNetGateway((current) => current || primary.gateway || '');
+      if (net.pendingRollback?.mode === 'dhcp' || net.pendingRollback?.mode === 'static') {
+        setNetMode(net.pendingRollback.mode);
+      } else {
+        setNetMode(primary.dhcp ? 'dhcp' : 'static');
+      }
+    }
+    if (net.dnsServers.length > 0) {
+      setNetDns((current) => current || net.dnsServers.join(', '));
+    }
+  }
+
   function applySnapshot(snapshot: SystemUpdatesStatus) {
     setData(snapshot);
     setAutoCheckEnabled(snapshot.settings.autoCheckEnabled);
@@ -90,10 +124,17 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
 
   async function loadOverview(signal?: AbortSignal) {
     try {
-      const host = await api.hostOverview(signal);
+      const [host, net] = await Promise.all([
+        api.hostOverview(signal),
+        api.hostNetwork(signal).catch(() => null),
+      ]);
       setOverview(host);
+      if (net) applyNetworkState(net);
     } catch {
-      if (!signal?.aborted) setOverview(null);
+      if (!signal?.aborted) {
+        setOverview(null);
+        setNetwork(null);
+      }
     }
   }
 
@@ -197,6 +238,102 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
       setError(friendlyError(cause));
     } finally {
       setLoadingLogs(false);
+    }
+  }
+
+  async function saveLanSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const port = Number(lanPort);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      setError('LAN port must be an integer between 1024 and 65535.');
+      return;
+    }
+    setBusyAction('lan');
+    setError('');
+    setNotice('');
+    try {
+      const updated = await api.updateHostLan({
+        enabled: lanEnabled,
+        port,
+        bind: lanBind.trim(),
+        configureUfw
+      });
+      applyNetworkState(updated);
+      setNotice('LAN endpoint settings saved. Restarting app container if port binding changed.');
+      window.setTimeout(() => void loadOverview(), 2500);
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function applyNetplan(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!netIface) {
+      setError('Select a network interface first.');
+      return;
+    }
+    if (
+      netMode === 'static' &&
+      !window.confirm(
+        `Apply static IP ${netCidr.trim()} on ${netIface}? You will have 90 seconds to confirm before Netplan automatically rolls back.`
+      )
+    ) {
+      return;
+    }
+    setBusyAction('netplan');
+    setError('');
+    setNotice('');
+    try {
+      const dns = netDns
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const updated = await api.applyHostNetplan({
+        interface: netIface,
+        mode: netMode,
+        addressCidr: netMode === 'static' ? netCidr.trim() : undefined,
+        gateway: netMode === 'static' ? netGateway.trim() : undefined,
+        dns: netMode === 'static' ? dns : undefined,
+        confirmTimeoutSeconds: 90
+      });
+      applyNetworkState(updated);
+      setNotice('Network configuration applied. Confirm within 90s to keep the changes permanently.');
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function confirmNetplan() {
+    setBusyAction('confirm-netplan');
+    setError('');
+    setNotice('');
+    try {
+      const updated = await api.confirmHostNetplan();
+      applyNetworkState(updated);
+      setNotice('Network configuration confirmed permanently.');
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function rollbackNetplan() {
+    setBusyAction('rollback-netplan');
+    setError('');
+    setNotice('');
+    try {
+      const updated = await api.rollbackHostNetplan();
+      applyNetworkState(updated);
+      setNotice('Previous Netplan network configuration restored.');
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -674,6 +811,220 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
                   </details>
                 ) : null}
               </div>
+
+              {network ? (
+                <div className="security-card">
+                  <div className="security-card-heading">
+                    <span className="security-card-icon"><Network size={17} /></span>
+                    <div>
+                      <h3>Host network &amp; static IP</h3>
+                      <p>
+                        Manage LAN port publishing, firewall rules, and Netplan static IPv4 settings with auto-rollback.
+                      </p>
+                    </div>
+                  </div>
+
+                  {network.pendingRollback ? (
+                    <div className="system-update-progress" role="status" aria-live="polite" style={{ marginBottom: '12px' }}>
+                      <div>
+                        <strong>
+                          Confirm new Netplan configuration ({network.pendingRollback.interface}:{' '}
+                          {network.pendingRollback.addressCidr || 'DHCP'})
+                        </strong>
+                        <small>
+                          Auto-reverting in{' '}
+                          {network.pendingRollback.remainingSeconds ?? network.pendingRollback.timeoutSeconds}s unless
+                          confirmed.
+                        </small>
+                        <div className="system-update-actions" style={{ marginTop: '8px' }}>
+                          <button
+                            className="button button-primary"
+                            type="button"
+                            disabled={busyAction !== null}
+                            onClick={() => void confirmNetplan()}
+                          >
+                            {busyAction === 'confirm-netplan' ? 'Confirming…' : 'Keep new network settings'}
+                          </button>
+                          <button
+                            className="button button-quiet-danger"
+                            type="button"
+                            disabled={busyAction !== null}
+                            onClick={() => void rollbackNetplan()}
+                          >
+                            {busyAction === 'rollback-netplan' ? 'Reverting…' : 'Revert now'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <dl className="system-update-facts">
+                    {network.interfaces.map((iface) => (
+                      <div key={iface.name}>
+                        <dt>
+                          <code>{iface.name}</code> ({iface.state})
+                        </dt>
+                        <dd>
+                          {iface.ipv4.length > 0 ? iface.ipv4.join(', ') : 'No IPv4'}{' '}
+                          <small>
+                            · {iface.dhcp ? 'DHCP' : 'Static'}
+                            {iface.gateway ? ` · gw ${iface.gateway}` : ''}
+                            {iface.mac ? ` · ${iface.mac}` : ''}
+                          </small>
+                        </dd>
+                      </div>
+                    ))}
+                    <div>
+                      <dt>UFW Firewall</dt>
+                      <dd>
+                        {!network.ufw.installed
+                          ? 'Not installed'
+                          : network.ufw.active
+                            ? `Active (${network.ufw.rules.length} rules)`
+                            : 'Inactive'}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <form className="system-update-form" onSubmit={(event) => void saveLanSettings(event)} style={{ marginTop: '12px' }}>
+                    <label className="system-update-toggle">
+                      <input
+                        type="checkbox"
+                        checked={lanEnabled}
+                        onChange={(event) => setLanEnabled(event.target.checked)}
+                      />
+                      <span>
+                        <strong>Publish LAN port directly ({network.lan.tlsMode === 'cloudflare' ? 'recommended for Tunnel' : 'direct LAN'})</strong>
+                        <small>Allows mobile and LAN clients to reach this NAS on port {lanPort || '3000'} directly.</small>
+                      </span>
+                    </label>
+                    <div className="system-update-actions" style={{ alignItems: 'flex-end' }}>
+                      <label className="account-form-field">
+                        <span>LAN TCP port</span>
+                        <input
+                          className="text-input"
+                          type="number"
+                          min={1024}
+                          max={65535}
+                          value={lanPort}
+                          onChange={(event) => setLanPort(event.target.value)}
+                          disabled={!lanEnabled}
+                        />
+                      </label>
+                      <label className="account-form-field">
+                        <span>Bind IPv4 (blank = all)</span>
+                        <input
+                          className="text-input"
+                          type="text"
+                          placeholder="0.0.0.0 / 192.168.0.151"
+                          value={lanBind}
+                          onChange={(event) => setLanBind(event.target.value)}
+                          disabled={!lanEnabled}
+                        />
+                      </label>
+                    </div>
+                    {network.ufw.installed && network.ufw.active ? (
+                      <label className="system-update-toggle">
+                        <input
+                          type="checkbox"
+                          checked={configureUfw}
+                          onChange={(event) => setConfigureUfw(event.target.checked)}
+                        />
+                        <span>
+                          <strong>Allow private RFC1918 LAN subnets in UFW</strong>
+                          <small>Permits 10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16 on port {lanPort || '3000'}.</small>
+                        </span>
+                      </label>
+                    ) : null}
+                    <button className="button button-secondary" type="submit" disabled={busyAction !== null}>
+                      {busyAction === 'lan' ? 'Applying LAN…' : 'Save LAN endpoint'}
+                    </button>
+                  </form>
+
+                  {network.netplanAvailable && network.interfaces.length > 0 ? (
+                    <form className="system-update-form" onSubmit={(event) => void applyNetplan(event)} style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--line, #e6ece9)' }}>
+                      <strong>Host IPv4 interface configuration (Netplan)</strong>
+                      <div className="system-update-actions">
+                        <label className="account-form-field">
+                          <span>Interface</span>
+                          <select
+                            className="text-input"
+                            value={netIface}
+                            onChange={(event) => {
+                              const nextName = event.target.value;
+                              setNetIface(nextName);
+                              const chosen = network.interfaces.find((item) => item.name === nextName);
+                              if (chosen) {
+                                setNetCidr(chosen.ipv4[0] || '');
+                                setNetGateway(chosen.gateway || '');
+                                setNetMode(chosen.dhcp ? 'dhcp' : 'static');
+                              }
+                            }}
+                          >
+                            {network.interfaces.map((iface) => (
+                              <option key={iface.name} value={iface.name}>
+                                {iface.name} ({iface.ipv4[0] || 'no IP'})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="account-form-field">
+                          <span>Addressing mode</span>
+                          <select
+                            className="text-input"
+                            value={netMode}
+                            onChange={(event) => setNetMode(event.target.value as 'dhcp' | 'static')}
+                          >
+                            <option value="static">Static IPv4</option>
+                            <option value="dhcp">Automatic (DHCP)</option>
+                          </select>
+                        </label>
+                      </div>
+                      {netMode === 'static' ? (
+                        <>
+                          <div className="system-update-actions">
+                            <label className="account-form-field">
+                              <span>Static IPv4 / CIDR</span>
+                              <input
+                                className="text-input"
+                                type="text"
+                                placeholder="192.168.0.151/24"
+                                value={netCidr}
+                                onChange={(event) => setNetCidr(event.target.value)}
+                                required
+                              />
+                            </label>
+                            <label className="account-form-field">
+                              <span>Default Gateway</span>
+                              <input
+                                className="text-input"
+                                type="text"
+                                placeholder="192.168.0.1"
+                                value={netGateway}
+                                onChange={(event) => setNetGateway(event.target.value)}
+                                required
+                              />
+                            </label>
+                          </div>
+                          <label className="account-form-field">
+                            <span>DNS Servers (comma-separated)</span>
+                            <input
+                              className="text-input"
+                              type="text"
+                              placeholder="192.168.0.1, 1.1.1.1"
+                              value={netDns}
+                              onChange={(event) => setNetDns(event.target.value)}
+                            />
+                          </label>
+                        </>
+                      ) : null}
+                      <button className="button button-primary" type="submit" disabled={busyAction !== null}>
+                        {busyAction === 'netplan' ? 'Applying Netplan…' : 'Apply Netplan (90s auto-rollback)'}
+                      </button>
+                    </form>
+                  ) : null}
+                </div>
+              ) : null}
             </>
           ) : null}
         </div>

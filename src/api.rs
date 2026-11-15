@@ -29,7 +29,10 @@ pub(crate) fn router(state: AppState) -> Router {
             post(crate::auth::login).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/api/auth/me", get(crate::auth::me))
-        .route("/api/auth/mobile-token", post(crate::auth::issue_mobile_token))
+        .route(
+            "/api/auth/mobile-token",
+            post(crate::auth::issue_mobile_token),
+        )
         .route("/api/auth/logout", post(crate::auth::logout))
         .route("/api/auth/sessions", get(crate::auth::list_sessions))
         .route(

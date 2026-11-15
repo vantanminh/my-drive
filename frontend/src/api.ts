@@ -11,6 +11,7 @@ import type {
   EntryPage,
   FaceCluster,
   FaceClusterPage,
+  HostNetworkStatus,
   HostOverview,
   HostServiceLogs,
   ManagedAccountPage,
@@ -732,7 +733,42 @@ export const api = {
     request<HostServiceLogs>(
       '/api/admin/host/services/logs?service=' + encodeURIComponent(service) + '&tail=' + encodeURIComponent(String(tail)),
       { signal, cache: 'no-store' }
-    )
+    ),
+  hostNetwork: (signal?: AbortSignal) =>
+    request<HostNetworkStatus>('/api/admin/host/network', { signal, cache: 'no-store' }),
+  updateHostLan: (payload: { enabled: boolean; port: number; bind: string; configureUfw: boolean }) =>
+    request<HostNetworkStatus>('/api/admin/host/network/lan', {
+      method: 'POST',
+      json: payload,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  applyHostNetplan: (payload: {
+    interface: string;
+    mode: 'dhcp' | 'static';
+    addressCidr?: string;
+    gateway?: string;
+    dns?: string[];
+    confirmTimeoutSeconds?: number;
+  }) =>
+    request<HostNetworkStatus>('/api/admin/host/network/netplan', {
+      method: 'POST',
+      json: payload,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  confirmHostNetplan: () =>
+    request<HostNetworkStatus>('/api/admin/host/network/confirm', {
+      method: 'POST',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  rollbackHostNetplan: () =>
+    request<HostNetworkStatus>('/api/admin/host/network/rollback', {
+      method: 'POST',
+      csrf: true,
+      cache: 'no-store'
+    })
 };
 
 export function downloadUrl(id: string): string {

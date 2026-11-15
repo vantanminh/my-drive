@@ -393,6 +393,51 @@ export type HostServiceLogs = {
   lines: string[];
 };
 
+export type HostNetworkInterface = {
+  name: string;
+  state: string;
+  mac: string | null;
+  ipv4: string[];
+  gateway: string | null;
+  dhcp: boolean;
+};
+
+export type HostUfwStatus = {
+  installed: boolean;
+  active: boolean;
+  rules: string[];
+};
+
+export type HostLanConfig = {
+  enabled: boolean;
+  port: number;
+  bind: string;
+  tlsMode: string | null;
+  host: string | null;
+};
+
+export type PendingNetplanRollback = {
+  interface: string;
+  mode: string;
+  addressCidr: string | null;
+  gateway: string | null;
+  dns: string[];
+  appliedAt: string;
+  expiresAt: string;
+  timeoutSeconds: number;
+  remainingSeconds: number | null;
+};
+
+export type HostNetworkStatus = {
+  connected: boolean;
+  netplanAvailable: boolean;
+  interfaces: HostNetworkInterface[];
+  dnsServers: string[];
+  ufw: HostUfwStatus;
+  lan: HostLanConfig;
+  pendingRollback: PendingNetplanRollback | null;
+};
+
 export type NetworkDriveStatus = {
   enabled: boolean;
   path: string;

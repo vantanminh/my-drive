@@ -22,8 +22,13 @@ INSTALL = Path('/opt/my-drive')
 UPDATER_RUN_DIR = Path('/run/my-drive-updater')
 UPDATER_SOCKET = UPDATER_RUN_DIR / 'updater.sock'
 UPDATER_STATUS_PATH = INSTALL / 'updater-status.json'
+NETPLAN_DIR = Path('/etc/netplan')
+NETPLAN_MANAGED_FILE = NETPLAN_DIR / '99-my-drive-managed.yaml'
+NETPLAN_BACKUP_DIR = INSTALL / 'netplan-backup'
+NETPLAN_PENDING_PATH = INSTALL / 'netplan-pending.json'
 HOST_BUNDLE_CONTAINER_DIR = '/usr/local/share/my-drive/host-bundle'
 ALLOWED_SERVICES = ('app', 'db', 'proxy', 'document-preview', 'media-indexer', 'cloudflared', 'smb')
+IFACE_RE = re.compile(r'^[a-zA-Z0-9._-]{1,20}$')
 PATH_RE = re.compile(r'/[A-Za-z0-9_./-]+')
 CLOUDFLARED_IMAGE = 'cloudflare/cloudflared:2026.10.0'
 IMAGE_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]+')
@@ -985,6 +990,275 @@ def host_overview_payload(state):
     }
 
 
+def is_virtual_interface(name):
+    return (
+        name == 'lo'
+        or name == 'docker0'
+        or name.startswith(('br-', 'veth', 'tun', 'tap', 'wg', 'tailscale', 'virbr'))
+    )
+
+
+def parse_ip_addr_json(addr_raw, route_raw='[]'):
+    interfaces = []
+    default_gateways = {}
+    try:
+        routes = json.loads(route_raw or '[]')
+        for route in routes:
+            if isinstance(route, dict) and route.get('dst') == 'default' and route.get('dev'):
+                if route.get('gateway'):
+                    default_gateways[route['dev']] = str(route['gateway'])
+    except (json.JSONDecodeError, TypeError):
+        pass
+    try:
+        items = json.loads(addr_raw or '[]')
+    except (json.JSONDecodeError, TypeError):
+        items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('ifname') or '')
+        if not name or is_virtual_interface(name):
+            continue
+        ipv4 = []
+        is_dhcp = False
+        for info in item.get('addr_info') or []:
+            if not isinstance(info, dict) or info.get('family') != 'inet':
+                continue
+            local = info.get('local')
+            prefix = info.get('prefixlen')
+            if local and prefix is not None:
+                ipv4.append(f'{local}/{prefix}')
+            if info.get('dynamic'):
+                is_dhcp = True
+        interfaces.append({
+            'name': name,
+            'state': str(item.get('operstate') or 'unknown').lower(),
+            'mac': str(item.get('address') or '') or None,
+            'ipv4': ipv4,
+            'gateway': default_gateways.get(name),
+            'dhcp': is_dhcp,
+        })
+    return interfaces
+
+
+def read_resolv_dns(path=Path('/etc/resolv.conf')):
+    servers = []
+    try:
+        for line in Path(path).read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == 'nameserver':
+                try:
+                    ip = str(ipaddress.IPv4Address(parts[1]))
+                    if ip not in {'127.0.0.53', '127.0.0.54'} and ip not in servers:
+                        servers.append(ip)
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return servers
+
+
+def build_netplan_yaml(interface, mode, address_cidr=None, gateway=None, dns=None):
+    iface = (interface or '').strip()
+    if not IFACE_RE.fullmatch(iface) or is_virtual_interface(iface):
+        raise ValueError('select a valid physical network interface')
+    mode = (mode or '').strip().lower()
+    if mode not in {'dhcp', 'static'}:
+        raise ValueError('network mode must be dhcp or static')
+    if mode == 'dhcp':
+        return {
+            'interface': iface,
+            'mode': 'dhcp',
+            'addressCidr': None,
+            'gateway': None,
+            'dns': [],
+            'yaml': (
+                'network:\n'
+                '  version: 2\n'
+                '  ethernets:\n'
+                f'    {iface}:\n'
+                '      dhcp4: true\n'
+            ),
+        }
+    if not address_cidr or not gateway:
+        raise ValueError('static mode requires IPv4 address/CIDR and gateway')
+    try:
+        iface_addr = ipaddress.IPv4Interface(str(address_cidr).strip())
+    except ValueError:
+        raise ValueError('invalid IPv4 CIDR (for example 192.168.0.151/24)') from None
+    if iface_addr.network.prefixlen < 8 or iface_addr.network.prefixlen > 32:
+        raise ValueError('subnet prefix length must be between /8 and /32')
+    if iface_addr.ip.is_unspecified or iface_addr.ip.is_loopback or iface_addr.ip.is_multicast:
+        raise ValueError('invalid host IPv4 address')
+    if iface_addr.network.prefixlen <= 30 and iface_addr.ip in {iface_addr.network.network_address, iface_addr.network.broadcast_address}:
+        raise ValueError('IP address cannot be network or broadcast address')
+    normalized_cidr = f'{iface_addr.ip}/{iface_addr.network.prefixlen}'
+    try:
+        gw_ip = str(ipaddress.IPv4Address(str(gateway).strip()))
+    except ValueError:
+        raise ValueError('invalid gateway IPv4 address') from None
+    dns_list = []
+    for raw_dns in (dns or [gw_ip, '1.1.1.1']):
+        raw_dns = str(raw_dns).strip()
+        if not raw_dns:
+            continue
+        try:
+            ip_str = str(ipaddress.IPv4Address(raw_dns))
+        except ValueError:
+            raise ValueError(f'invalid DNS IPv4 address: {raw_dns}') from None
+        if ip_str not in dns_list:
+            dns_list.append(ip_str)
+    if len(dns_list) > 4:
+        raise ValueError('specify at most 4 DNS servers')
+    dns_block = ''
+    if dns_list:
+        dns_items = ', '.join(dns_list)
+        dns_block = (
+            '      nameservers:\n'
+            f'        addresses: [{dns_items}]\n'
+        )
+    yaml_text = (
+        'network:\n'
+        '  version: 2\n'
+        '  ethernets:\n'
+        f'    {iface}:\n'
+        '      dhcp4: false\n'
+        f'      addresses:\n        - {normalized_cidr}\n'
+        '      routes:\n'
+        '        - to: default\n'
+        f'          via: {gw_ip}\n'
+        f'{dns_block}'
+    )
+    return {
+        'interface': iface,
+        'mode': 'static',
+        'addressCidr': normalized_cidr,
+        'gateway': gw_ip,
+        'dns': dns_list,
+        'yaml': yaml_text,
+    }
+
+
+def read_ufw_status():
+    if not shutil.which('ufw'):
+        return {'installed': False, 'active': False, 'rules': []}
+    res = subprocess.run(['ufw', 'status'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    output = (res.stdout or '').strip()
+    lines = output.splitlines()
+    active = any(line.lower().startswith('status: active') for line in lines)
+    rules = [line.strip() for line in lines[3:] if line.strip() and not line.strip().startswith('--')] if active and len(lines) > 3 else []
+    return {'installed': True, 'active': active, 'rules': rules[:30]}
+
+
+def read_pending_netplan():
+    if not NETPLAN_PENDING_PATH.is_file():
+        return None
+    try:
+        data = json.loads(NETPLAN_PENDING_PATH.read_text())
+        if not isinstance(data, dict):
+            return None
+        from datetime import datetime, timezone
+        expires_at = data.get('expiresAt')
+        remaining = None
+        if expires_at:
+            dt = datetime.fromisoformat(expires_at)
+            remaining = max(0, int((dt - datetime.now(timezone.utc)).total_seconds()))
+        return {**data, 'remainingSeconds': remaining}
+    except Exception:
+        return None
+
+
+def network_status_payload(state):
+    cfg = state.get('config', {}) if isinstance(state, dict) else {}
+    addr_res = subprocess.run(['ip', '-j', 'addr', 'show'], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    route_res = subprocess.run(['ip', '-j', 'route', 'show'], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    interfaces = parse_ip_addr_json(addr_res.stdout or '[]', route_res.stdout or '[]')
+    netplan_available = shutil.which('netplan') is not None and NETPLAN_DIR.is_dir()
+    return {
+        'connected': True,
+        'netplanAvailable': netplan_available,
+        'interfaces': interfaces,
+        'dnsServers': read_resolv_dns(),
+        'ufw': read_ufw_status(),
+        'lan': {
+            'enabled': bool(cfg.get('lan_enabled', cfg.get('tls') == 'cloudflare')),
+            'port': int(cfg.get('lan_port', 3000) or 3000),
+            'bind': str(cfg.get('lan_bind') or ''),
+            'tlsMode': cfg.get('tls'),
+            'host': cfg.get('host'),
+        },
+        'pendingRollback': read_pending_netplan(),
+    }
+
+
+def _restore_netplan_backup():
+    if not NETPLAN_BACKUP_DIR.is_dir():
+        return False
+    for existing in NETPLAN_DIR.glob('*.yaml'):
+        existing.unlink(missing_ok=True)
+    for backup in NETPLAN_BACKUP_DIR.glob('*.yaml'):
+        shutil.copy2(backup, NETPLAN_DIR / backup.name)
+        os.chmod(NETPLAN_DIR / backup.name, 0o600)
+    NETPLAN_PENDING_PATH.unlink(missing_ok=True)
+    if shutil.which('netplan'):
+        subprocess.run(['netplan', 'apply'], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+def apply_netplan_with_rollback(spec, timeout_seconds=90):
+    from datetime import datetime, timedelta, timezone
+    if not shutil.which('netplan') or not NETPLAN_DIR.is_dir():
+        raise ValueError('netplan is not available on this host')
+    timeout_seconds = max(45, min(180, int(timeout_seconds)))
+    NETPLAN_BACKUP_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for old in NETPLAN_BACKUP_DIR.glob('*.yaml'):
+        old.unlink()
+    for existing in NETPLAN_DIR.glob('*.yaml'):
+        shutil.copy2(existing, NETPLAN_BACKUP_DIR / existing.name)
+        os.chmod(NETPLAN_BACKUP_DIR / existing.name, 0o600)
+
+    # Move non-managed netplan files temporarily or keep override in 99-my-drive-managed.yaml?
+    # Replacing existing netplan ethernets cleanly avoids conflicting DHCP + static routes on the same NIC.
+    for existing in NETPLAN_DIR.glob('*.yaml'):
+        if existing != NETPLAN_MANAGED_FILE:
+            existing.unlink()
+    atomic(NETPLAN_MANAGED_FILE, spec['yaml'], mode=0o600)
+
+    gen = subprocess.run(['netplan', 'generate'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    if gen.returncode != 0:
+        _restore_netplan_backup()
+        raise ValueError(f"netplan validation failed: {(gen.stdout or '').strip()[:300]}")
+
+    now = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(seconds=timeout_seconds)).isoformat()
+    pending = {
+        'interface': spec['interface'],
+        'mode': spec['mode'],
+        'addressCidr': spec['addressCidr'],
+        'gateway': spec['gateway'],
+        'dns': spec['dns'],
+        'appliedAt': now.isoformat(),
+        'expiresAt': expires_at,
+        'timeoutSeconds': timeout_seconds,
+    }
+    atomic(NETPLAN_PENDING_PATH, json.dumps(pending, indent=2) + '\n')
+
+    app = subprocess.run(['netplan', 'apply'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    if app.returncode != 0:
+        _restore_netplan_backup()
+        raise ValueError(f"netplan apply failed and previous config was restored: {(app.stdout or '').strip()[:300]}")
+
+    # Schedule durable safety rollback if the operator does not confirm before timeout.
+    subprocess.Popen(
+        ['systemd-run', '--quiet', f'--on-active={timeout_seconds}', '/usr/local/bin/my-drive', 'netplan-rollback-if-pending'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return pending
+
+
 def updater_serve():
     import fcntl
     import http.server
@@ -1122,6 +1396,13 @@ def updater_serve():
                 except Exception as error:
                     self.send_json(500, {'error': 'internal_error', 'message': str(error)})
                 return
+            if parsed_url.path == '/network':
+                try:
+                    state = load_install_state()
+                    self.send_json(200, network_status_payload(state))
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
             if parsed_url.path == '/services/logs':
                 try:
                     qs = parse_qs(parsed_url.query)
@@ -1156,6 +1437,91 @@ def updater_serve():
             self.send_json(404, {'error': 'not_found'})
 
         def do_POST(self):
+            if self.path == '/network/lan':
+                try:
+                    body = self.read_json_body()
+                    lan_enabled = bool(body.get('enabled'))
+                    lan_port = int(body.get('port', 3000))
+                    if lan_port < 1024 or lan_port > 65535:
+                        raise ValueError('LAN port must be between 1024 and 65535')
+                    lan_bind = str(body.get('bind') or '').strip()
+                    if lan_bind:
+                        try:
+                            lan_bind = str(ipaddress.IPv4Address(lan_bind))
+                        except ValueError:
+                            raise ValueError('LAN bind address must be a valid IPv4 address') from None
+                    configure_ufw = bool(body.get('configureUfw'))
+
+                    with job_lock:
+                        state = load_install_state()
+                        state['config']['lan_enabled'] = lan_enabled
+                        state['config']['lan_port'] = lan_port
+                        state['config']['lan_bind'] = lan_bind
+                        save(state)
+                        compose_path = INSTALL / 'compose.yaml'
+                        model = json.loads(compose_path.read_text())
+                        ensure_lan_compose(model, state['config'], force=True)
+                        atomic(compose_path, json.dumps(model, indent=2) + '\n')
+
+                    if configure_ufw and shutil.which('ufw'):
+                        ufw = read_ufw_status()
+                        if ufw.get('active') and lan_enabled:
+                            for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'):
+                                subprocess.run(['ufw', 'allow', 'from', cidr, 'to', 'any', 'port', str(lan_port), 'proto', 'tcp'],
+                                               check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                    def _apply_lan():
+                        time.sleep(0.25)
+                        compose('up', '-d', 'app')
+
+                    threading.Thread(target=_apply_lan, daemon=True).start()
+                    self.send_json(202, network_status_payload(state))
+                except ValueError as error:
+                    self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
+            if self.path == '/network/apply':
+                try:
+                    body = self.read_json_body()
+                    spec = build_netplan_yaml(
+                        body.get('interface'),
+                        body.get('mode'),
+                        body.get('addressCidr'),
+                        body.get('gateway'),
+                        body.get('dns'),
+                    )
+                    timeout_seconds = int(body.get('confirmTimeoutSeconds', 90))
+                    with job_lock:
+                        pending = apply_netplan_with_rollback(spec, timeout_seconds)
+                        state = load_install_state()
+                    self.send_json(202, {**network_status_payload(state), 'pendingRollback': {**pending, 'remainingSeconds': timeout_seconds}})
+                except ValueError as error:
+                    self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
+            if self.path == '/network/confirm':
+                try:
+                    with job_lock:
+                        NETPLAN_PENDING_PATH.unlink(missing_ok=True)
+                        state = load_install_state()
+                    self.send_json(200, network_status_payload(state))
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
+            if self.path == '/network/rollback':
+                try:
+                    with job_lock:
+                        restored = _restore_netplan_backup()
+                        state = load_install_state()
+                    if not restored:
+                        self.send_json(400, {'error': 'invalid_request', 'message': 'No netplan backup available to restore.'})
+                        return
+                    self.send_json(200, network_status_payload(state))
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
             if self.path == '/services/restart':
                 try:
                     body = self.read_json_body()
@@ -1250,12 +1616,17 @@ def main():
     mode.add_argument('--source', help='reviewed checkout of the release to build; no automatic git pull')
     mode.add_argument('--images', help='JSON map of own registry image references for this release')
     sub.add_parser('updater-serve', help='run the local Unix-socket host updater bridge')
+    sub.add_parser('netplan-rollback-if-pending', help='revert unconfirmed netplan changes on timeout')
     args = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         parser.error('run as root on Linux')
     os.umask(0o077)
     if args.command == 'updater-serve':
         updater_serve()
+        return
+    if args.command == 'netplan-rollback-if-pending':
+        if NETPLAN_PENDING_PATH.is_file():
+            _restore_netplan_backup()
         return
     # Serialize install/start/update/backup so a reboot or second wizard cannot race secrets/config.
     import fcntl

@@ -1,4 +1,4 @@
-use std::{env, path::Path, time::Duration};
+use std::{env, net::Ipv4Addr, path::Path, time::Duration};
 
 use axum::{
     Json, Router,
@@ -30,8 +30,22 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/admin/updates/check", post(check_now))
         .route("/api/admin/updates/apply", post(apply_update))
         .route("/api/admin/host/overview", get(host_overview))
-        .route("/api/admin/host/services/restart", post(restart_host_service))
+        .route(
+            "/api/admin/host/services/restart",
+            post(restart_host_service),
+        )
         .route("/api/admin/host/services/logs", get(host_service_logs))
+        .route("/api/admin/host/network", get(host_network))
+        .route("/api/admin/host/network/lan", post(update_host_lan))
+        .route("/api/admin/host/network/netplan", post(apply_host_netplan))
+        .route(
+            "/api/admin/host/network/confirm",
+            post(confirm_host_netplan),
+        )
+        .route(
+            "/api/admin/host/network/rollback",
+            post(rollback_host_netplan),
+        )
 }
 
 #[derive(Debug, Error)]
@@ -297,6 +311,84 @@ struct ServiceLogsResponse {
     lines: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostNetworkInterface {
+    pub name: String,
+    pub state: String,
+    pub mac: Option<String>,
+    pub ipv4: Vec<String>,
+    pub gateway: Option<String>,
+    pub dhcp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostUfwStatus {
+    pub installed: bool,
+    pub active: bool,
+    pub rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostLanConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub bind: String,
+    pub tls_mode: Option<String>,
+    pub host: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingNetplanRollback {
+    pub interface: String,
+    pub mode: String,
+    pub address_cidr: Option<String>,
+    pub gateway: Option<String>,
+    pub dns: Vec<String>,
+    pub applied_at: String,
+    pub expires_at: String,
+    pub timeout_seconds: u16,
+    pub remaining_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostNetworkStatus {
+    pub connected: bool,
+    pub netplan_available: bool,
+    pub interfaces: Vec<HostNetworkInterface>,
+    pub dns_servers: Vec<String>,
+    pub ufw: HostUfwStatus,
+    pub lan: HostLanConfig,
+    pub pending_rollback: Option<PendingNetplanRollback>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateHostLanRequest {
+    enabled: bool,
+    port: u16,
+    #[serde(default)]
+    bind: String,
+    #[serde(default)]
+    configure_ufw: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplyHostNetplanRequest {
+    interface: String,
+    mode: String,
+    address_cidr: Option<String>,
+    gateway: Option<String>,
+    #[serde(default)]
+    dns: Vec<String>,
+    confirm_timeout_seconds: Option<u16>,
+}
+
 #[derive(FromRow)]
 struct SystemUpdateRow {
     auto_check_enabled: bool,
@@ -484,7 +576,14 @@ async fn apply_update(
 fn valid_service_name(service: &str, allow_updater: bool) -> bool {
     matches!(
         service,
-        "all" | "app" | "db" | "proxy" | "document-preview" | "media-indexer" | "cloudflared" | "smb"
+        "all"
+            | "app"
+            | "db"
+            | "proxy"
+            | "document-preview"
+            | "media-indexer"
+            | "cloudflared"
+            | "smb"
     ) || (allow_updater && service == "updater")
 }
 
@@ -552,6 +651,194 @@ async fn host_service_logs(
     let logs: ServiceLogsResponse =
         send_updater_json(&state.update_settings, "GET", &path, None).await?;
     Ok(no_store_json(logs))
+}
+
+fn valid_interface_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 20
+        && trimmed != "lo"
+        && trimmed != "docker0"
+        && !trimmed.starts_with("br-")
+        && !trimmed.starts_with("veth")
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_ipv4_cidr(cidr: &str) -> bool {
+    let Some((ip_str, prefix_str)) = cidr.trim().split_once('/') else {
+        return false;
+    };
+    let Ok(ip) = ip_str.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix_str.parse::<u8>() else {
+        return false;
+    };
+    (8..=32).contains(&prefix) && !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast()
+}
+
+async fn host_network(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    let network: HostNetworkStatus =
+        send_updater_json(&state.update_settings, "GET", "/network", None).await?;
+    Ok(no_store_json(network))
+}
+
+async fn update_host_lan(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(request): Json<UpdateHostLanRequest>,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    drive::require_request_csrf(&headers, &user, state.auth_settings)
+        .map_err(|_| UpdateError::Csrf)?;
+    if request.port < 1024 {
+        return Err(UpdateError::BadRequest("LAN port must be >= 1024"));
+    }
+    let bind = request.bind.trim().to_owned();
+    if !bind.is_empty() && bind.parse::<Ipv4Addr>().is_err() {
+        return Err(UpdateError::BadRequest("invalid LAN bind IPv4 address"));
+    }
+
+    let payload = serde_json::json!({
+        "enabled": request.enabled,
+        "port": request.port,
+        "bind": bind,
+        "configureUfw": request.configure_ufw,
+    });
+    let updated: HostNetworkStatus = send_updater_json(
+        &state.update_settings,
+        "POST",
+        "/network/lan",
+        Some(payload),
+    )
+    .await?;
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, details) \
+         VALUES ('host_lan_updated', $1, jsonb_build_object('enabled', $2, 'port', $3))",
+    )
+    .bind(user.id)
+    .bind(request.enabled)
+    .bind(i32::from(request.port))
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(error = %error, "failed to record host_lan_updated audit event");
+    }
+    Ok(no_store_json(updated))
+}
+
+async fn apply_host_netplan(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(request): Json<ApplyHostNetplanRequest>,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    drive::require_request_csrf(&headers, &user, state.auth_settings)
+        .map_err(|_| UpdateError::Csrf)?;
+    let iface = request.interface.trim().to_owned();
+    if !valid_interface_name(&iface) {
+        return Err(UpdateError::BadRequest("invalid network interface name"));
+    }
+    let mode = request.mode.trim().to_ascii_lowercase();
+    if mode != "dhcp" && mode != "static" {
+        return Err(UpdateError::BadRequest("mode must be dhcp or static"));
+    }
+    if mode == "static" {
+        let cidr = request.address_cidr.as_deref().unwrap_or("").trim();
+        let gw = request.gateway.as_deref().unwrap_or("").trim();
+        if !valid_ipv4_cidr(cidr) || gw.parse::<Ipv4Addr>().is_err() {
+            return Err(UpdateError::BadRequest(
+                "static mode requires a valid IPv4/CIDR and gateway",
+            ));
+        }
+        if request.dns.len() > 4
+            || request
+                .dns
+                .iter()
+                .any(|entry| !entry.trim().is_empty() && entry.trim().parse::<Ipv4Addr>().is_err())
+        {
+            return Err(UpdateError::BadRequest(
+                "DNS entries must be valid IPv4 addresses",
+            ));
+        }
+    }
+    let timeout_seconds = request.confirm_timeout_seconds.unwrap_or(90).clamp(45, 180);
+    let payload = serde_json::json!({
+        "interface": iface,
+        "mode": mode,
+        "addressCidr": request.address_cidr,
+        "gateway": request.gateway,
+        "dns": request.dns,
+        "confirmTimeoutSeconds": timeout_seconds,
+    });
+    let updated: HostNetworkStatus = send_updater_json(
+        &state.update_settings,
+        "POST",
+        "/network/apply",
+        Some(payload),
+    )
+    .await?;
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, details) \
+         VALUES ('host_netplan_applied', $1, jsonb_build_object('interface', $2, 'mode', $3))",
+    )
+    .bind(user.id)
+    .bind(&iface)
+    .bind(&mode)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(error = %error, "failed to record host_netplan_applied audit event");
+    }
+    Ok(no_store_json(updated))
+}
+
+async fn confirm_host_netplan(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    drive::require_request_csrf(&headers, &user, state.auth_settings)
+        .map_err(|_| UpdateError::Csrf)?;
+    let updated: HostNetworkStatus =
+        send_updater_json(&state.update_settings, "POST", "/network/confirm", None).await?;
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id) VALUES ('host_netplan_confirmed', $1)",
+    )
+    .bind(user.id)
+    .execute(&state.pool)
+    .await;
+    Ok(no_store_json(updated))
+}
+
+async fn rollback_host_netplan(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    drive::require_request_csrf(&headers, &user, state.auth_settings)
+        .map_err(|_| UpdateError::Csrf)?;
+    let updated: HostNetworkStatus =
+        send_updater_json(&state.update_settings, "POST", "/network/rollback", None).await?;
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id) VALUES ('host_netplan_rolled_back', $1)",
+    )
+    .bind(user.id)
+    .execute(&state.pool)
+    .await;
+    Ok(no_store_json(updated))
 }
 
 pub(crate) async fn run_worker(pool: PgPool, settings: UpdateSettings) {
@@ -1497,5 +1784,22 @@ mod tests {
                 .await
                 .expect("service logs");
         assert_eq!(logs.lines, vec!["ready"]);
+    }
+
+    #[test]
+    fn validates_host_network_inputs() {
+        assert!(valid_interface_name("enp2s0"));
+        assert!(valid_interface_name("eth0"));
+        assert!(!valid_interface_name("lo"));
+        assert!(!valid_interface_name("docker0"));
+        assert!(!valid_interface_name("br-123"));
+        assert!(!valid_interface_name("eth0;rm -rf /"));
+
+        assert!(valid_ipv4_cidr("192.168.0.151/24"));
+        assert!(valid_ipv4_cidr("10.0.0.5/8"));
+        assert!(!valid_ipv4_cidr("192.168.0.151"));
+        assert!(!valid_ipv4_cidr("127.0.0.1/8"));
+        assert!(!valid_ipv4_cidr("0.0.0.0/24"));
+        assert!(!valid_ipv4_cidr("192.168.0.1/4"));
     }
 }

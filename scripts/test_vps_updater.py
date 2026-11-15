@@ -102,6 +102,37 @@ class VpsUpdaterTests(unittest.TestCase):
         self.assertEqual(services[0]['health'], 'healthy')
         self.assertIsNone(services[1]['health'])
 
+    def test_netplan_yaml_and_ip_addr_parser_validate_physical_interfaces(self):
+        parsed = vps.parse_ip_addr_json(
+            '[{"ifname":"lo","operstate":"unknown","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8}]},'
+            '{"ifname":"br-124e8982","operstate":"up","addr_info":[{"family":"inet","local":"172.19.0.1","prefixlen":16}]},'
+            '{"ifname":"enp2s0","operstate":"up","address":"74:d4:35:43:e1:1a","addr_info":[{"family":"inet","local":"192.168.0.151","prefixlen":24,"dynamic":true}]}]',
+            '[{"dst":"default","gateway":"192.168.0.1","dev":"enp2s0"}]',
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]['name'], 'enp2s0')
+        self.assertEqual(parsed[0]['ipv4'], ['192.168.0.151/24'])
+        self.assertEqual(parsed[0]['gateway'], '192.168.0.1')
+        self.assertTrue(parsed[0]['dhcp'])
+
+        static_spec = vps.build_netplan_yaml('enp2s0', 'static', '192.168.0.151/24', '192.168.0.1', ['192.168.0.1', '1.1.1.1'])
+        self.assertIn('dhcp4: false', static_spec['yaml'])
+        self.assertIn('192.168.0.151/24', static_spec['yaml'])
+        self.assertIn('via: 192.168.0.1', static_spec['yaml'])
+        self.assertIn('addresses: [192.168.0.1, 1.1.1.1]', static_spec['yaml'])
+
+        dhcp_spec = vps.build_netplan_yaml('enp2s0', 'dhcp')
+        self.assertIn('dhcp4: true', dhcp_spec['yaml'])
+
+        for bad_args in [
+            ('docker0', 'dhcp', None, None),
+            ('enp2s0', 'static', '192.168.0.0/24', '192.168.0.1'),
+            ('enp2s0', 'static', 'not-an-ip', '192.168.0.1'),
+            ('enp2s0', 'static', '192.168.0.151/24', 'bad-gw'),
+        ]:
+            with self.assertRaises(ValueError):
+                vps.build_netplan_yaml(*bad_args)
+
 
 if __name__ == '__main__':
     unittest.main()

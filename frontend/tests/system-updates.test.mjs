@@ -75,6 +75,26 @@ test('system update API client sends CSRF, JSON, and credentials', async () => {
     assert.equal(requests[4].options.headers.get('X-CSRF-Token'), 'csrf-123');
     assert.deepEqual(JSON.parse(requests[4].options.body), { service: 'app' });
     assert.equal(requests[5].url, '/api/admin/host/services/logs?service=updater&tail=50');
+
+    await api.hostNetwork();
+    await api.updateHostLan({ enabled: true, port: 3000, bind: '', configureUfw: true });
+    await api.applyHostNetplan({
+      interface: 'enp2s0',
+      mode: 'static',
+      addressCidr: '192.168.0.151/24',
+      gateway: '192.168.0.1',
+      dns: ['192.168.0.1', '1.1.1.1'],
+      confirmTimeoutSeconds: 90
+    });
+    await api.confirmHostNetplan();
+    await api.rollbackHostNetplan();
+
+    assert.equal(requests.length, 11);
+    assert.equal(requests[6].url, '/api/admin/host/network');
+    assert.equal(requests[7].url, '/api/admin/host/network/lan');
+    assert.equal(requests[8].url, '/api/admin/host/network/netplan');
+    assert.equal(requests[9].url, '/api/admin/host/network/confirm');
+    assert.equal(requests[10].url, '/api/admin/host/network/rollback');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalDocument === undefined) delete globalThis.document;
