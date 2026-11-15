@@ -105,7 +105,8 @@ def valid_path(raw):
 def validate(config):
     allowed = {'host', 'tls', 'email', 'owner_password', 'storage', 'database',
                'previews', 'media_indexing', 'images', 'quota_gib', 'max_file_gib',
-               'min_free_gib', 'trash_days', 'cf_token', 'cf_replicas'}
+               'min_free_gib', 'trash_days', 'cf_token', 'cf_replicas',
+               'lan_enabled', 'lan_port', 'lan_bind'}
     if set(config) - allowed:
         raise ValueError(f'unknown configuration fields: {sorted(set(config) - allowed)}')
     result = dict(config)
@@ -127,6 +128,25 @@ def validate(config):
             if not re.fullmatch(r'[A-Za-z0-9_-]{20,200}', token):
                 raise ValueError('Cloudflare API token looks invalid')
             result['cf_token'] = token
+    lan_enabled = config.get('lan_enabled')
+    if lan_enabled is None:
+        lan_enabled = result['tls'] == 'cloudflare'
+    elif not isinstance(lan_enabled, bool):
+        raise ValueError('lan_enabled must be a boolean')
+    result['lan_enabled'] = lan_enabled
+    lan_port = config.get('lan_port', 3000)
+    if type(lan_port) is not int or not 1 <= lan_port <= 65535:
+        raise ValueError('lan_port must be an integer from 1 to 65535')
+    result['lan_port'] = lan_port
+    lan_bind = config.get('lan_bind')
+    if lan_bind is not None and lan_bind != '':
+        try:
+            ip = ipaddress.IPv4Address(str(lan_bind).strip())
+        except ValueError:
+            raise ValueError('lan_bind must be a valid IPv4 address') from None
+        result['lan_bind'] = str(ip)
+    else:
+        result.pop('lan_bind', None)
     if result['tls'] in ('acme', 'cloudflare'):
         try:
             ipaddress.IPv4Address(result['host'])
@@ -284,7 +304,8 @@ def make_compose(model, config):
             if key.startswith('MEDIA_PREVIEW_'):
                 del env[key]
         # Keep the unused, empty preview bind for compatibility with backup/restore.
-    services['app']['ports'] = []  # Only the reverse proxy is published.
+    services['app']['ports'] = []  # Only the reverse proxy is published by default.
+    ensure_lan_compose(model, config)
     services['app']['environment']['COOKIE_SECURE'] = 'false' if config['tls'] == 'http' else 'true'
     for service in services.values():
         service['logging'] = {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}
@@ -315,6 +336,26 @@ def ensure_updater_runtime_dir():
     UPDATER_RUN_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
     os.chmod(UPDATER_RUN_DIR, 0o750)
     os.chown(UPDATER_RUN_DIR, 0, 10001)
+
+
+def ensure_lan_compose(model, config, force=False):
+    app = model['services']['app']
+    existing = list(app.get('ports') or [])
+    if 'lan_enabled' in config:
+        enabled = bool(config['lan_enabled'])
+    else:
+        enabled = config.get('tls') == 'cloudflare'
+    port = int(config.get('lan_port', 3000) or 3000)
+    bind_ip = str(config.get('lan_bind') or '').strip()
+    mapping = f'{bind_ip}:{port}:3000' if bind_ip else f'{port}:3000'
+    if enabled:
+        if force:
+            app['ports'] = [mapping]
+        elif not existing:
+            app['ports'] = [mapping]
+    elif force:
+        app['ports'] = []
+    return model
 
 
 def ensure_updater_compose(model):
@@ -1018,16 +1059,27 @@ def main():
             image_env = {'app': 'MY_DRIVE_IMAGE', 'document-preview': 'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE',
                          'media-indexer': 'MY_DRIVE_INDEXER_IMAGE'}
             # Keep compose.yaml and host updater unit in sync even when migrating from older installs.
-            model = json.loads((INSTALL / 'compose.yaml').read_text())
+            compose_path = INSTALL / 'compose.yaml'
+            before_compose = compose_path.read_text()
+            model = json.loads(before_compose)
             ensure_updater_compose(model)
-            atomic(INSTALL / 'compose.yaml', json.dumps(model, indent=2) + '\n')
+            ensure_lan_compose(model, candidate)
+            after_compose = json.dumps(model, indent=2) + '\n'
+            compose_changed = after_compose != before_compose
+            if compose_changed:
+                atomic(compose_path, after_compose)
             if SOURCE != INSTALL and (SOURCE / 'scripts').is_dir():
                 for directory in ('scripts', 'docker'):
                     shutil.copytree(SOURCE / directory, INSTALL / directory, dirs_exist_ok=True)
             if os.environ.get('MY_DRIVE_UPDATER_SUBPROCESS') != '1':
                 install_updater_service(prepare_only=False, restart=True)
             if all(state['env'].get(image_env[service]) == image for service, image in images.items()):
-                print('Already up to date; no services were restarted.')
+                if compose_changed:
+                    print('phase: restarting Applying updated Compose configuration', flush=True)
+                    start(state)
+                    print('Compose configuration updated and verified.')
+                else:
+                    print('Already up to date; no services were restarted.')
                 return
             atomic(INSTALL / 'state.previous.json', json.dumps(state, indent=2) + '\n')
             state['config']['images'] = candidate['images']

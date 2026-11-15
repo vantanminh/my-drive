@@ -57,6 +57,29 @@ class VpsUpdaterTests(unittest.TestCase):
         self.assertNotIn('backupConfigured', payload)
         self.assertNotIn('backupRootHint', payload)
 
+    def test_ensure_lan_compose_enables_port_3000_for_cloudflare_without_clobbering_custom_ports(self):
+        model = {'services': {'app': {'ports': []}}}
+        vps.ensure_lan_compose(model, {'tls': 'cloudflare'})
+        self.assertEqual(model['services']['app']['ports'], ['3000:3000'])
+
+        # Respect existing custom ports unless force=True.
+        custom = {'services': {'app': {'ports': ['192.168.0.151:3000:3000']}}}
+        vps.ensure_lan_compose(custom, {'tls': 'cloudflare', 'lan_port': 3000})
+        self.assertEqual(custom['services']['app']['ports'], ['192.168.0.151:3000:3000'])
+
+        # Force mode updates bind IP / port or disables ports cleanly.
+        vps.ensure_lan_compose(custom, {'tls': 'cloudflare', 'lan_enabled': True, 'lan_bind': '192.168.0.10', 'lan_port': 3001}, force=True)
+        self.assertEqual(custom['services']['app']['ports'], ['192.168.0.10:3001:3000'])
+        vps.ensure_lan_compose(custom, {'tls': 'cloudflare', 'lan_enabled': False}, force=True)
+        self.assertEqual(custom['services']['app']['ports'], [])
+
+        # ACME keeps app ports closed unless lan_enabled is explicitly True.
+        acme = {'services': {'app': {'ports': []}}}
+        vps.ensure_lan_compose(acme, {'tls': 'acme'})
+        self.assertEqual(acme['services']['app']['ports'], [])
+        vps.ensure_lan_compose(acme, {'tls': 'acme', 'lan_enabled': True, 'lan_port': 3000})
+        self.assertEqual(acme['services']['app']['ports'], ['3000:3000'])
+
 
 if __name__ == '__main__':
     unittest.main()
