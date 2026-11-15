@@ -786,24 +786,15 @@ async fn authenticate_session_token(
     token: &str,
     path: &str,
     is_bearer_session: bool,
-) -> Result<AuthenticatedUser, Response> {
+) -> Result<AuthenticatedUser, (StatusCode, &'static str)> {
     if token.len() != 43 {
-        return Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_required",
-        ));
+        return Err((StatusCode::UNAUTHORIZED, "authentication_required"));
     }
     let Ok(raw_token) = URL_SAFE_NO_PAD.decode(token) else {
-        return Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_required",
-        ));
+        return Err((StatusCode::UNAUTHORIZED, "authentication_required"));
     };
     if raw_token.len() != SESSION_TOKEN_BYTES {
-        return Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_required",
-        ));
+        return Err((StatusCode::UNAUTHORIZED, "authentication_required"));
     }
     let token_digest = Sha256::digest(raw_token).to_vec();
     let session = sqlx::query_as::<_, SessionUser>(
@@ -850,21 +841,15 @@ async fn authenticate_session_token(
                 "/api/auth/me" | "/api/auth/password" | "/api/auth/logout"
             );
             if user.must_change_password && !allowed_while_changing_password {
-                Err(api_error(StatusCode::FORBIDDEN, "password_change_required"))
+                Err((StatusCode::FORBIDDEN, "password_change_required"))
             } else {
                 Ok(user)
             }
         }
-        Ok(None) => Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "authentication_required",
-        )),
+        Ok(None) => Err((StatusCode::UNAUTHORIZED, "authentication_required")),
         Err(error) => {
             tracing::error!(error = %error, "session lookup failed");
-            Err(api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "service_unavailable",
-            ))
+            Err((StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"))
         }
     }
 }
@@ -882,7 +867,8 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         if let Some(token) = bearer_token(&parts.headers) {
             if let Some(session_token) = token.strip_prefix(MOBILE_SESSION_PREFIX) {
                 return authenticate_session_token(state, session_token, parts.uri.path(), true)
-                    .await;
+                    .await
+                    .map_err(|(status, code)| api_error(status, code));
             }
             if !token.starts_with("mdb_") {
                 return Err(api_error(
@@ -925,7 +911,9 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                 "authentication_required",
             ));
         };
-        authenticate_session_token(state, token, parts.uri.path(), false).await
+        authenticate_session_token(state, token, parts.uri.path(), false)
+            .await
+            .map_err(|(status, code)| api_error(status, code))
     }
 }
 
