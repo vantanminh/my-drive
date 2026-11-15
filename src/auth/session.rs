@@ -149,6 +149,7 @@ pub struct AuthenticatedUser {
     csrf_token_digest: Vec<u8>,
     pub api_key_id: Option<Uuid>,
     pub device_id: Option<Uuid>,
+    pub is_bearer_session: bool,
 }
 
 #[derive(FromRow)]
@@ -206,6 +207,17 @@ struct UserResponse {
 struct LoginResponse {
     user: UserResponse,
     csrf_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_token: Option<String>,
+}
+
+const MOBILE_SESSION_PREFIX: &str = "mds_";
+
+fn is_mobile_client(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-mydrive-client")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("mobile"))
 }
 
 #[derive(Serialize)]
@@ -213,7 +225,11 @@ struct ErrorResponse {
     error: &'static str,
 }
 
-pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginRequest>) -> Response {
+pub async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<LoginRequest>,
+) -> Response {
     let email = payload.email.trim().to_lowercase();
     if let Some(retry_after) = state.login_rate_limiter.retry_after_seconds(&email) {
         let mut response = api_error(StatusCode::TOO_MANY_REQUESTS, "too_many_attempts");
@@ -353,11 +369,14 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
         return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
     }
 
+    let mobile_token =
+        is_mobile_client(&headers).then(|| format!("{MOBILE_SESSION_PREFIX}{session_token}"));
     let mut response = (
         StatusCode::OK,
         Json(LoginResponse {
             user: public_user(&user),
             csrf_token: csrf_token.clone(),
+            session_token: mobile_token,
         }),
     )
         .into_response();
@@ -690,7 +709,7 @@ pub async fn logout(
 }
 
 pub fn require_csrf(headers: &HeaderMap, user: &AuthenticatedUser, settings: AuthSettings) -> bool {
-    if user.api_key_id.is_some() || user.device_id.is_some() {
+    if user.api_key_id.is_some() || user.device_id.is_some() || user.is_bearer_session {
         return true;
     }
     let Some(cookie_token) = cookie_value(headers, settings.csrf_cookie_name()) else {
@@ -737,6 +756,7 @@ impl AuthenticatedUser {
             csrf_token_digest: vec![],
             api_key_id: Some(key_id),
             device_id: None,
+            is_bearer_session: false,
         }
     }
 
@@ -756,6 +776,95 @@ impl AuthenticatedUser {
             csrf_token_digest: Vec::new(),
             api_key_id: None,
             device_id: Some(device_id),
+            is_bearer_session: false,
+        }
+    }
+}
+
+async fn authenticate_session_token(
+    state: &AppState,
+    token: &str,
+    path: &str,
+    is_bearer_session: bool,
+) -> Result<AuthenticatedUser, Response> {
+    if token.len() != 43 {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+        ));
+    }
+    let Ok(raw_token) = URL_SAFE_NO_PAD.decode(token) else {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+        ));
+    };
+    if raw_token.len() != SESSION_TOKEN_BYTES {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+        ));
+    }
+    let token_digest = Sha256::digest(raw_token).to_vec();
+    let session = sqlx::query_as::<_, SessionUser>(
+        "SELECT sessions.id AS session_id, users.id, users.email, users.role, \
+                users.must_change_password, sessions.csrf_token_digest, sessions.last_seen_at \
+           FROM sessions JOIN users ON users.id = sessions.user_id \
+          WHERE sessions.token_digest = $1 AND sessions.revoked_at IS NULL \
+            AND sessions.expires_at > now() AND users.disabled_at IS NULL",
+    )
+    .bind(token_digest)
+    .fetch_optional(&state.pool)
+    .await;
+
+    match session {
+        Ok(Some(session)) => {
+            let should_update_last_seen = session
+                .last_seen_at
+                .as_ref()
+                .is_none_or(|seen_at| *seen_at < Utc::now() - ChronoDuration::minutes(5));
+            let user = AuthenticatedUser {
+                id: session.id,
+                session_id: session.session_id,
+                email: session.email,
+                role: session.role,
+                must_change_password: session.must_change_password,
+                csrf_token_digest: session.csrf_token_digest,
+                api_key_id: None,
+                device_id: None,
+                is_bearer_session,
+            };
+            if should_update_last_seen
+                && let Err(error) = sqlx::query(
+                    "UPDATE sessions SET last_seen_at = now() \
+                      WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')",
+                )
+                .bind(user.session_id)
+                .execute(&state.pool)
+                .await
+            {
+                tracing::warn!(error = %error, "could not update session activity");
+            }
+            let allowed_while_changing_password = matches!(
+                path,
+                "/api/auth/me" | "/api/auth/password" | "/api/auth/logout"
+            );
+            if user.must_change_password && !allowed_while_changing_password {
+                Err(api_error(StatusCode::FORBIDDEN, "password_change_required"))
+            } else {
+                Ok(user)
+            }
+        }
+        Ok(None) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+        )),
+        Err(error) => {
+            tracing::error!(error = %error, "session lookup failed");
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+            ))
         }
     }
 }
@@ -771,6 +880,10 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
             return Ok(user.clone());
         }
         if let Some(token) = bearer_token(&parts.headers) {
+            if let Some(session_token) = token.strip_prefix(MOBILE_SESSION_PREFIX) {
+                return authenticate_session_token(state, session_token, parts.uri.path(), true)
+                    .await;
+            }
             if !token.starts_with("mdb_") {
                 return Err(api_error(
                     StatusCode::UNAUTHORIZED,
@@ -812,85 +925,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                 "authentication_required",
             ));
         };
-        if token.len() != 43 {
-            return Err(api_error(
-                StatusCode::UNAUTHORIZED,
-                "authentication_required",
-            ));
-        }
-        let Ok(raw_token) = URL_SAFE_NO_PAD.decode(token) else {
-            return Err(api_error(
-                StatusCode::UNAUTHORIZED,
-                "authentication_required",
-            ));
-        };
-        if raw_token.len() != SESSION_TOKEN_BYTES {
-            return Err(api_error(
-                StatusCode::UNAUTHORIZED,
-                "authentication_required",
-            ));
-        }
-        let token_digest = Sha256::digest(raw_token).to_vec();
-        let session = sqlx::query_as::<_, SessionUser>(
-            "SELECT sessions.id AS session_id, users.id, users.email, users.role, \
-                    users.must_change_password, sessions.csrf_token_digest, sessions.last_seen_at \
-               FROM sessions JOIN users ON users.id = sessions.user_id \
-              WHERE sessions.token_digest = $1 AND sessions.revoked_at IS NULL \
-                AND sessions.expires_at > now() AND users.disabled_at IS NULL",
-        )
-        .bind(token_digest)
-        .fetch_optional(&state.pool)
-        .await;
-
-        match session {
-            Ok(Some(session)) => {
-                let should_update_last_seen = session
-                    .last_seen_at
-                    .as_ref()
-                    .is_none_or(|seen_at| *seen_at < Utc::now() - ChronoDuration::minutes(5));
-                let user = Self {
-                    id: session.id,
-                    session_id: session.session_id,
-                    email: session.email,
-                    role: session.role,
-                    must_change_password: session.must_change_password,
-                    csrf_token_digest: session.csrf_token_digest,
-                    api_key_id: None,
-                    device_id: None,
-                };
-                if should_update_last_seen
-                    && let Err(error) = sqlx::query(
-                        "UPDATE sessions SET last_seen_at = now() \
-                          WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')",
-                    )
-                    .bind(user.session_id)
-                    .execute(&state.pool)
-                    .await
-                    {
-                        tracing::warn!(error = %error, "could not update browser session activity");
-                    }
-                let allowed_while_changing_password = matches!(
-                    parts.uri.path(),
-                    "/api/auth/me" | "/api/auth/password" | "/api/auth/logout"
-                );
-                if user.must_change_password && !allowed_while_changing_password {
-                    Err(api_error(StatusCode::FORBIDDEN, "password_change_required"))
-                } else {
-                    Ok(user)
-                }
-            }
-            Ok(None) => Err(api_error(
-                StatusCode::UNAUTHORIZED,
-                "authentication_required",
-            )),
-            Err(error) => {
-                tracing::error!(error = %error, "session lookup failed");
-                Err(api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "service_unavailable",
-                ))
-            }
-        }
+        authenticate_session_token(state, token, parts.uri.path(), false).await
     }
 }
 
@@ -1087,6 +1122,7 @@ mod tests {
             must_change_password: false,
             api_key_id: None,
             device_id: None,
+            is_bearer_session: false,
             csrf_token_digest: Sha256::digest(raw_token).to_vec(),
         };
         let settings = AuthSettings {
@@ -1103,6 +1139,31 @@ mod tests {
 
         headers.insert("x-csrf-token", HeaderValue::from_static("wrong-token"));
         assert!(!require_csrf(&headers, &user, settings));
+    }
+
+    #[test]
+    fn mobile_bearer_sessions_bypass_cookie_csrf_and_require_client_header() {
+        let user = AuthenticatedUser {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            email: "owner@example.test".to_owned(),
+            role: "owner".to_owned(),
+            must_change_password: false,
+            api_key_id: None,
+            device_id: None,
+            is_bearer_session: true,
+            csrf_token_digest: Vec::new(),
+        };
+        let settings = AuthSettings {
+            cookie_secure: true,
+            session_ttl_seconds: 3600,
+        };
+        let mut headers = HeaderMap::new();
+        assert!(require_csrf(&headers, &user, settings));
+        assert!(!is_mobile_client(&headers));
+
+        headers.insert("x-mydrive-client", HeaderValue::from_static("Mobile"));
+        assert!(is_mobile_client(&headers));
     }
 
     #[test]

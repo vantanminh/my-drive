@@ -103,11 +103,12 @@ pub(crate) fn router() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 
-async fn capabilities() -> Response {
+async fn capabilities(State(state): State<AppState>) -> Response {
     no_store(Json(json!({
         "product": "my-drive",
         "apiVersion": SUPPORTED_API_VERSION,
         "serverVersion": env!("CARGO_PKG_VERSION"),
+        "serverId": state.storage.server_id(),
         "minClientApi": SUPPORTED_API_VERSION,
         "maxClientApi": SUPPORTED_API_VERSION,
         "features": {

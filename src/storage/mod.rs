@@ -33,6 +33,7 @@ pub struct LocalStorage {
     expected_device: Option<String>,
     min_free_bytes: u64,
     min_free_percent: f64,
+    server_id: Uuid,
 }
 
 #[derive(Debug, Error)]
@@ -67,11 +68,15 @@ pub enum StorageError {
 }
 
 impl LocalStorage {
-    /// Provision a persistent server secret on the verified data volume.
-    /// The exclusive file lock prevents concurrent startups from choosing different keys.
-    pub(crate) fn google_drive_token_key(&self) -> Result<[u8; 32], StorageError> {
+    /// Provision or load a fixed-length persistent file under `.secrets/` on the verified data volume.
+    /// The exclusive file lock prevents concurrent startups from choosing different values.
+    fn load_or_create_secret_bytes(
+        &self,
+        filename: &str,
+        expected_len: usize,
+        init_bytes: impl FnOnce(&mut [u8]),
+    ) -> Result<Vec<u8>, StorageError> {
         use fs2::FileExt;
-        use rand_core::{OsRng, RngCore};
         use std::io::{Read, Write};
 
         self.ensure_mounted()?;
@@ -93,7 +98,7 @@ impl LocalStorage {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(StorageError::UnsafeKey);
         }
-        let path = directory.join("google-drive-token.key");
+        let path = directory.join(filename);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 return Err(StorageError::UnsafeKey);
@@ -118,18 +123,32 @@ impl LocalStorage {
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
         let length = file.metadata()?.len();
-        let mut key = [0_u8; 32];
-        match length {
-            0 => {
-                OsRng.fill_bytes(&mut key);
-                file.write_all(&key)?;
+        let mut bytes = vec![0_u8; expected_len];
+        match usize::try_from(length) {
+            Ok(0) => {
+                init_bytes(&mut bytes);
+                file.write_all(&bytes)?;
                 file.sync_all()?;
                 sync_directory(&directory)?;
             }
-            32 => file.read_exact(&mut key)?,
+            Ok(len) if len == expected_len => file.read_exact(&mut bytes)?,
             _ => return Err(StorageError::UnsafeKey),
         }
+        Ok(bytes)
+    }
+
+    pub(crate) fn google_drive_token_key(&self) -> Result<[u8; 32], StorageError> {
+        use rand_core::{OsRng, RngCore};
+        let bytes = self.load_or_create_secret_bytes("google-drive-token.key", 32, |buf| {
+            OsRng.fill_bytes(buf);
+        })?;
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(&bytes);
         Ok(key)
+    }
+
+    pub fn server_id(&self) -> Uuid {
+        self.server_id
     }
 
     pub fn initialize(config: &Config) -> Result<Self, StorageError> {
@@ -141,6 +160,7 @@ impl LocalStorage {
             expected_device: config.expected_device.clone(),
             min_free_bytes: config.min_free_bytes,
             min_free_percent: config.min_free_percent,
+            server_id: Uuid::nil(),
         };
 
         if storage.require_mount {
@@ -154,6 +174,10 @@ impl LocalStorage {
             fs::create_dir_all(storage.root.join(child))?;
         }
         sync_directory(&storage.root)?;
+        let id_bytes = storage.load_or_create_secret_bytes("server-id", 16, |buf| {
+            buf.copy_from_slice(Uuid::new_v4().as_bytes());
+        })?;
+        storage.server_id = Uuid::from_slice(&id_bytes).map_err(|_| StorageError::UnsafeKey)?;
         storage.health()?;
         Ok(storage)
     }
@@ -167,6 +191,7 @@ impl LocalStorage {
             expected_device: config.expected_device.clone(),
             min_free_bytes: config.min_free_bytes,
             min_free_percent: config.min_free_percent,
+            server_id: Uuid::nil(),
         };
         if storage.require_mount {
             storage.validate_mount()?;
@@ -177,6 +202,11 @@ impl LocalStorage {
             }
         }
         storage.root = fs::canonicalize(&storage.root)?;
+        if let Ok(bytes) = fs::read(storage.root.join(".secrets/server-id"))
+            && let Ok(id) = Uuid::from_slice(&bytes)
+        {
+            storage.server_id = id;
+        }
         Ok(storage)
     }
 
@@ -547,6 +577,18 @@ mod tests {
         fs::write(&path, b"corrupt").unwrap();
         assert!(storage.google_drive_token_key().is_err());
         assert_eq!(fs::read(path).unwrap(), b"corrupt");
+    }
+
+    #[test]
+    fn server_id_persists_across_restarts() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = config(temp.path().to_path_buf(), false);
+        let first = LocalStorage::initialize(&cfg).unwrap();
+        let second = LocalStorage::initialize(&cfg).unwrap();
+        let readonly = LocalStorage::open_readonly(&cfg).unwrap();
+        assert_ne!(first.server_id(), Uuid::nil());
+        assert_eq!(first.server_id(), second.server_id());
+        assert_eq!(first.server_id(), readonly.server_id());
     }
 
     #[cfg(unix)]
