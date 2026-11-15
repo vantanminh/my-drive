@@ -26,7 +26,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/admin/accounts",
             get(list_accounts).post(create_account),
         )
-        .route("/api/admin/accounts/{id}", patch(update_account))
+        .route(
+            "/api/admin/accounts/{id}",
+            patch(update_account).delete(delete_account),
+        )
         .route(
             "/api/admin/accounts/{id}/reset-password",
             post(reset_password),
@@ -47,6 +50,8 @@ enum AdminAccountError {
     NotFound,
     #[error("quota is below current usage and active reservations")]
     QuotaBelowCurrentUsage,
+    #[error("account still owns files; move or delete them before removing the account")]
+    AccountHasFiles,
     #[error("database operation failed")]
     Database(#[source] sqlx::Error),
     #[error("password operation failed")]
@@ -62,6 +67,7 @@ impl IntoResponse for AdminAccountError {
             Self::EmailExists => (StatusCode::CONFLICT, "email_exists"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::QuotaBelowCurrentUsage => (StatusCode::CONFLICT, "quota_below_current_usage"),
+            Self::AccountHasFiles => (StatusCode::CONFLICT, "account_has_files"),
             Self::Database(error) => {
                 tracing::error!(error = %error, "account administration query failed");
                 (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
@@ -89,6 +95,9 @@ struct ErrorBody {
 struct AccountsQuery {
     offset: Option<u32>,
     limit: Option<u8>,
+    q: Option<String>,
+    role: Option<String>,
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +105,7 @@ struct AccountsQuery {
 struct CreateAccountRequest {
     email: String,
     quota_bytes: u64,
+    role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -103,12 +113,14 @@ struct CreateAccountRequest {
 struct UpdateAccountRequest {
     quota_bytes: Option<u64>,
     disabled: Option<bool>,
+    role: Option<String>,
 }
 
 #[derive(FromRow)]
 struct AccountRow {
     id: Uuid,
     email: String,
+    role: String,
     quota_bytes: i64,
     used_bytes: i64,
     reserved_bytes: i64,
@@ -121,6 +133,7 @@ struct AccountRow {
 struct AccountSummary {
     id: Uuid,
     email: String,
+    role: String,
     quota_bytes: i64,
     used_bytes: i64,
     reserved_bytes: i64,
@@ -148,6 +161,23 @@ struct TemporaryPasswordResponse {
     temporary_password: String,
 }
 
+pub(crate) fn parse_child_account_role(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "admin" => Some("admin"),
+        "member" => Some("member"),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_account_status_filter(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "" | "all" => Some("all"),
+        "active" => Some("active"),
+        "disabled" => Some("disabled"),
+        _ => None,
+    }
+}
+
 async fn list_accounts(
     State(state): State<AppState>,
     user: AuthenticatedUser,
@@ -159,9 +189,21 @@ async fn list_accounts(
     if limit == 0 || limit > MAX_PAGE_SIZE || offset > 100_000 {
         return Err(AdminAccountError::BadRequest);
     }
+    let search_pattern = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("%{}%", value.to_lowercase()));
+    let role_filter = match query.role.as_deref().map(str::trim) {
+        None | Some("" | "all") => None,
+        Some(raw) => Some(parse_child_account_role(raw).ok_or(AdminAccountError::BadRequest)?),
+    };
+    let status_filter = parse_account_status_filter(query.status.as_deref().unwrap_or("all"))
+        .ok_or(AdminAccountError::BadRequest)?;
 
     let mut rows = sqlx::query_as::<_, AccountRow>(
-        "SELECT account.id, account.email, account.quota_bytes, account.disabled_at, account.created_at, \
+        "SELECT account.id, account.email, account.role, account.quota_bytes, account.disabled_at, account.created_at, \
             (SELECT COALESCE(SUM(version.size_bytes), 0)::BIGINT \
                FROM drive_entries AS entry \
                JOIN files AS file ON file.id = entry.id \
@@ -175,12 +217,20 @@ async fn list_accounts(
                 AND (state = 'finalizing' OR (state = 'active' AND expires_at > now()))) \
                 AS reserved_bytes \
            FROM users AS account \
-          WHERE account.managed_by = $1 AND account.role = 'member' \
+          WHERE account.managed_by = $1 \
+            AND account.role IN ('admin', 'member') \
+            AND account.is_workspace_service = FALSE \
+            AND ($4::TEXT IS NULL OR lower(account.email) LIKE $4) \
+            AND ($5::TEXT IS NULL OR account.role = $5) \
+            AND ($6 = 'all' OR ($6 = 'active' AND account.disabled_at IS NULL) OR ($6 = 'disabled' AND account.disabled_at IS NOT NULL)) \
           ORDER BY account.created_at DESC, account.id ASC LIMIT $2 OFFSET $3",
     )
     .bind(user.id)
     .bind(i64::from(limit) + 1)
     .bind(i64::from(offset))
+    .bind(search_pattern.as_deref())
+    .bind(role_filter)
+    .bind(status_filter)
     .fetch_all(&state.pool)
     .await
     .map_err(AdminAccountError::Database)?;
@@ -195,6 +245,7 @@ async fn list_accounts(
             reserved_bytes: row.reserved_bytes,
             id: row.id,
             email: row.email,
+            role: row.role,
             quota_bytes: row.quota_bytes,
             disabled_at: row.disabled_at,
             created_at: row.created_at,
@@ -218,6 +269,10 @@ async fn create_account(
     if !auth::valid_email(&email) || request.quota_bytes > MAX_ACCOUNT_QUOTA_BYTES {
         return Err(AdminAccountError::BadRequest);
     }
+    let role = match request.role.as_deref() {
+        None => "member",
+        Some(raw) => parse_child_account_role(raw).ok_or(AdminAccountError::BadRequest)?,
+    };
     let quota_bytes =
         i64::try_from(request.quota_bytes).map_err(|_| AdminAccountError::BadRequest)?;
     let (temporary_password, password_hash) = create_temporary_password_hash().await?;
@@ -229,11 +284,12 @@ async fn create_account(
         .map_err(AdminAccountError::Database)?;
     let inserted = sqlx::query(
         "INSERT INTO users (id, email, password_hash, role, managed_by, quota_bytes, must_change_password) \
-         VALUES ($1, $2, $3, 'member', $4, $5, TRUE)",
+         VALUES ($1, $2, $3, $4, $5, $6, TRUE)",
     )
     .bind(account_id)
     .bind(&email)
     .bind(password_hash)
+    .bind(role)
     .bind(user.id)
     .bind(quota_bytes)
     .execute(&mut *transaction)
@@ -246,11 +302,12 @@ async fn create_account(
     }
     sqlx::query(
         "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
-         VALUES ('child_account_created', $1, $2, jsonb_build_object('quota_bytes', $3))",
+         VALUES ('child_account_created', $1, $2, jsonb_build_object('quota_bytes', $3, 'role', $4))",
     )
     .bind(user.id)
     .bind(account_id)
     .bind(quota_bytes)
+    .bind(role)
     .execute(&mut *transaction)
     .await
     .map_err(AdminAccountError::Database)?;
@@ -263,6 +320,7 @@ async fn create_account(
         account: AccountSummary {
             id: account_id,
             email,
+            role: role.to_owned(),
             quota_bytes,
             used_bytes: 0,
             reserved_bytes: 0,
@@ -283,13 +341,20 @@ async fn update_account(
 ) -> Result<Response, AdminAccountError> {
     require_owner(&user)?;
     require_csrf(&headers, &user, state.auth_settings)?;
-    if request.quota_bytes.is_none() && request.disabled.is_none() {
+    if request.quota_bytes.is_none() && request.disabled.is_none() && request.role.is_none() {
         return Err(AdminAccountError::BadRequest);
     }
     let updating_self = account_id == user.id;
-    if updating_self && (request.disabled.is_some() || request.quota_bytes.is_none()) {
+    if updating_self
+        && (request.disabled.is_some() || request.role.is_some() || request.quota_bytes.is_none())
+    {
         return Err(AdminAccountError::BadRequest);
     }
+    let next_role = request
+        .role
+        .as_deref()
+        .map(|raw| parse_child_account_role(raw).ok_or(AdminAccountError::BadRequest))
+        .transpose()?;
     let quota_bytes = request
         .quota_bytes
         .map(|quota| {
@@ -321,7 +386,7 @@ async fn update_account(
     } else {
         sqlx::query_scalar(
             "SELECT disabled_at IS NOT NULL FROM users \
-              WHERE id = $1 AND managed_by = $2 AND role = 'member' FOR UPDATE",
+              WHERE id = $1 AND managed_by = $2 AND role IN ('admin', 'member') AND is_workspace_service = FALSE FOR UPDATE",
         )
         .bind(account_id)
         .bind(user.id)
@@ -385,18 +450,20 @@ async fn update_account(
         sqlx::query(
             "UPDATE users \
                 SET quota_bytes = COALESCE($3, quota_bytes), \
+                    role = COALESCE($5, role), \
                     disabled_at = CASE \
                         WHEN $4::BOOLEAN IS NULL THEN disabled_at \
                         WHEN $4 THEN COALESCE(disabled_at, now()) \
                         ELSE NULL \
                     END, \
                     updated_at = now() \
-              WHERE id = $1 AND managed_by = $2 AND role = 'member'",
+              WHERE id = $1 AND managed_by = $2 AND role IN ('admin', 'member') AND is_workspace_service = FALSE",
         )
         .bind(account_id)
         .bind(user.id)
         .bind(quota_bytes)
         .bind(request.disabled)
+        .bind(next_role)
         .execute(&mut *transaction)
         .await
         .map_err(AdminAccountError::Database)?;
@@ -413,12 +480,13 @@ async fn update_account(
         }
         sqlx::query(
             "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
-             VALUES ('child_account_updated', $1, $2, jsonb_build_object('quota_bytes', $3, 'disabled', $4))",
+             VALUES ('child_account_updated', $1, $2, jsonb_build_object('quota_bytes', $3, 'disabled', $4, 'role', $5))",
         )
         .bind(user.id)
         .bind(account_id)
         .bind(quota_bytes)
         .bind(request.disabled)
+        .bind(next_role)
         .execute(&mut *transaction)
         .await
         .map_err(AdminAccountError::Database)?;
@@ -428,6 +496,119 @@ async fn update_account(
         .await
         .map_err(AdminAccountError::Database)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn delete_account(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Path(account_id): Path<Uuid>,
+) -> Result<Response, AdminAccountError> {
+    require_owner(&user)?;
+    require_csrf(&headers, &user, state.auth_settings)?;
+    if account_id == user.id {
+        return Err(AdminAccountError::BadRequest);
+    }
+
+    let mut transaction = state
+        .pool
+        .begin()
+        .await
+        .map_err(AdminAccountError::Database)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+            SELECT 1 FROM users \
+             WHERE id = $1 AND managed_by = $2 AND role IN ('admin', 'member') AND is_workspace_service = FALSE \
+             FOR UPDATE \
+        )",
+    )
+    .bind(account_id)
+    .bind(user.id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(AdminAccountError::Database)?;
+    if !exists {
+        return Err(AdminAccountError::NotFound);
+    }
+
+    let has_files: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM drive_entries WHERE owner_id = $1 AND kind = 'file')",
+    )
+    .bind(account_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(AdminAccountError::Database)?;
+    if has_files {
+        return Err(AdminAccountError::AccountHasFiles);
+    }
+
+    sqlx::query("DELETE FROM upload_sessions WHERE owner_id = $1")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+    sqlx::query("DELETE FROM shares WHERE owner_id = $1")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+    sqlx::query(
+        "DELETE FROM folders WHERE id IN (SELECT id FROM drive_entries WHERE owner_id = $1)",
+    )
+    .bind(account_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AdminAccountError::Database)?;
+    sqlx::query("UPDATE drive_entries SET parent_id = NULL WHERE owner_id = $1")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+    sqlx::query("DELETE FROM drive_entries WHERE owner_id = $1")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+    sqlx::query("DELETE FROM team_members WHERE user_id = $1")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+    sqlx::query(
+        "DELETE FROM users WHERE id = $1 AND managed_by = $2 AND role IN ('admin', 'member') AND is_workspace_service = FALSE",
+    )
+    .bind(account_id)
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AdminAccountError::Database)?;
+
+    sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id) \
+         VALUES ('child_account_deleted', $1, $2)",
+    )
+    .bind(user.id)
+    .bind(account_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AdminAccountError::Database)?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(AdminAccountError::Database)?;
+    Ok(no_store(StatusCode::NO_CONTENT))
 }
 
 async fn reset_password(
@@ -446,7 +627,7 @@ async fn reset_password(
         .map_err(AdminAccountError::Database)?;
     let updated = sqlx::query(
         "UPDATE users SET password_hash = $1, must_change_password = TRUE, updated_at = now() \
-          WHERE id = $2 AND managed_by = $3 AND role = 'member'",
+          WHERE id = $2 AND managed_by = $3 AND role IN ('admin', 'member') AND is_workspace_service = FALSE",
     )
     .bind(password_hash)
     .bind(account_id)
@@ -524,4 +705,26 @@ fn no_store(response: impl IntoResponse) -> Response {
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(database) if database.code().as_deref() == Some("23505"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_account_status_filter, parse_child_account_role};
+
+    #[test]
+    fn parse_child_account_role_allows_admin_and_member_only() {
+        assert_eq!(parse_child_account_role("admin"), Some("admin"));
+        assert_eq!(parse_child_account_role(" member "), Some("member"));
+        assert_eq!(parse_child_account_role("owner"), None);
+        assert_eq!(parse_child_account_role("guest"), None);
+    }
+
+    #[test]
+    fn parse_account_status_filter_validates_known_values() {
+        assert_eq!(parse_account_status_filter(""), Some("all"));
+        assert_eq!(parse_account_status_filter("all"), Some("all"));
+        assert_eq!(parse_account_status_filter("active"), Some("active"));
+        assert_eq!(parse_account_status_filter("disabled"), Some("disabled"));
+        assert_eq!(parse_account_status_filter("deleted"), None);
+    }
 }

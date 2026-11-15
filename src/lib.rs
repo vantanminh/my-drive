@@ -18,6 +18,7 @@ mod network_drive;
 mod shares;
 mod smb_share;
 mod storage;
+mod teams;
 mod transfers;
 mod updates;
 

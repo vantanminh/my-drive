@@ -21,6 +21,14 @@ pub(crate) fn router(state: AppState) -> Router {
     let static_files = ServeDir::new(&static_root)
         .append_index_html_on_directories(true)
         .not_found_service(ServeFile::new(static_root.join("index.html")));
+    let team_scoped = Router::new()
+        .merge(crate::drive::router())
+        .merge(crate::library::router())
+        .merge(crate::transfers::router())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::teams::scope_team_workspace,
+        ));
     Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
@@ -48,18 +56,18 @@ pub(crate) fn router(state: AppState) -> Router {
             post(crate::auth::change_password).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(crate::developer::router())
-        .merge(crate::drive::router())
-        .merge(crate::library::router())
+        .merge(team_scoped)
         .merge(crate::faces::router())
-        .merge(crate::transfers::router())
         .merge(crate::shares::router())
         .merge(crate::media_admin::router())
         .merge(crate::admin_accounts::router())
+        .merge(crate::teams::router())
         .merge(crate::google_drive::router())
         .merge(crate::devices::router())
         .merge(crate::updates::router())
         .merge(crate::network_drive::router())
         .route("/network-drive", get(serve_frontend_index))
+        .route("/teams", get(serve_frontend_index))
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found))
         .route("/s/{token}", get(serve_frontend_index))

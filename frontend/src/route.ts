@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 export type WorkspaceSection = 'drive' | 'shared' | 'trash' | 'photos' | 'storage';
-export type DrivePanel = 'accounts' | 'faces' | 'indexing' | 'google-drive' | 'security' | 'developer' | 'updates' | 'network-drive' | null;
+export type DrivePanel = 'accounts' | 'teams' | 'faces' | 'indexing' | 'google-drive' | 'security' | 'developer' | 'updates' | 'network-drive' | null;
 export type PhotosTab = 'timeline' | 'people' | 'albums';
 export type DriveSort = 'name' | 'updated_at' | 'created_at' | 'size';
 export type DriveOrder = 'asc' | 'desc';
@@ -124,7 +124,7 @@ function fileIdFromSearch(params: URLSearchParams): string | null {
 
 function panelFromSearch(params: URLSearchParams): DrivePanel {
   const panel = params.get('panel');
-  if (panel === 'accounts' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive' || panel === 'security' || panel === 'developer' || panel === 'updates' || panel === 'network-drive') return panel;
+  if (panel === 'accounts' || panel === 'teams' || panel === 'faces' || panel === 'indexing' || panel === 'google-drive' || panel === 'security' || panel === 'developer' || panel === 'updates' || panel === 'network-drive') return panel;
   return null;
 }
 
@@ -214,6 +214,7 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
   if (parts[0] === 'shared' && parts.length === 1) return blankRoute({ section: 'shared' });
   if (parts[0] === 'trash' && parts.length === 1) return blankRoute({ section: 'trash' });
   if (parts[0] === 'accounts' && parts.length === 1) return blankRoute({ panel: 'accounts' });
+  if (parts[0] === 'teams' && parts.length === 1) return blankRoute({ panel: 'teams' });
   if (parts[0] === 'faces' && parts.length === 1) return blankRoute({ panel: 'faces' });
   if (parts[0] === 'indexing' && parts.length === 1) return blankRoute({ panel: 'indexing' });
   if (parts[0] === 'google-drive' && parts.length === 1) return blankRoute({ panel: 'google-drive' });
@@ -256,6 +257,7 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
 
   if (folderPath.length === 0 && !query) {
     if (route.panel === 'accounts') return '/accounts';
+    if (route.panel === 'teams') return '/teams';
     if (route.panel === 'faces') return '/faces';
     if (route.panel === 'indexing') return '/indexing';
     if (route.panel === 'google-drive') return '/google-drive';

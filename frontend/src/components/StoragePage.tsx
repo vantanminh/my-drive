@@ -24,19 +24,19 @@ function categoryLabel(category: string): string {
   return category.charAt(0).toUpperCase() + category.slice(1);
 }
 
-export function QuotaCard() {
+export function QuotaCard({ teamName }: { teamName?: string | null }) {
   const [storage, setStorage] = useState<AccountStorage | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     api.accountStorage(controller.signal).then(setStorage).catch(() => undefined);
     return () => controller.abort();
-  }, []);
+  }, [teamName]);
   if (!storage) return null;
   const used = storage.used_bytes + storage.reserved_bytes;
   const percent = storage.percent_used == null ? null : Math.min(100, Math.max(0, storage.percent_used));
   return (
     <div className="quota-card">
-      <div className="quota-card-title"><HardDrive size={15} /> <span>Storage</span></div>
+      <div className="quota-card-title"><HardDrive size={15} /> <span>{teamName ? `${teamName} storage` : 'Storage'}</span></div>
       <strong>{formatSize(used)}{storage.quota_bytes != null ? ` of ${formatSize(storage.quota_bytes)}` : ''}</strong>
       {percent != null && (
         <div className="quota-meter" aria-hidden="true"><i style={{ width: percent + '%' }} /></div>

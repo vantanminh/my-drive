@@ -15,13 +15,66 @@ async function loadTsModule(relativePath) {
   return import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'));
 }
 
-test('route parser and builder support the owner updates panel', async () => {
+test('route parser and builder support the owner updates and teams panels', async () => {
   const { parseDriveRoute, buildDrivePath } = await loadTsModule('../src/route.ts');
   const parsed = parseDriveRoute('/updates');
   assert.equal(parsed.panel, 'updates');
   assert.equal(parsed.section, 'drive');
   assert.equal(buildDrivePath(parsed, []), '/updates');
   assert.equal(parseDriveRoute('/drive', '?panel=updates').panel, 'updates');
+
+  const teamsParsed = parseDriveRoute('/teams');
+  assert.equal(teamsParsed.panel, 'teams');
+  assert.equal(teamsParsed.section, 'drive');
+  assert.equal(buildDrivePath(teamsParsed, []), '/teams');
+  assert.equal(parseDriveRoute('/drive', '?panel=teams').panel, 'teams');
+});
+
+test('teams API client scopes workspace requests and URL builders cleanly', async () => {
+  const { api, setActiveTeamWorkspace, downloadUrl, previewUrl, thumbnailUrl } = await loadTsModule('../src/api.ts');
+  const originalFetch = globalThis.fetch;
+  const originalDocument = globalThis.document;
+  globalThis.document = { cookie: 'my_drive_csrf=csrf-123' };
+
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+
+  try {
+    await api.listTeams();
+    await api.createTeam({ name: 'Design', description: 'Assets', quotaBytes: 1024 });
+    await api.addTeamMember('team-1', { email: 'alice@example.com', role: 'admin' });
+    await api.deleteManagedAccount('user-2');
+
+    setActiveTeamWorkspace('team-1');
+    await api.listDrive(null);
+    await api.accountStorage();
+
+    assert.equal(requests[0].url, '/api/teams');
+    assert.equal(requests[1].url, '/api/teams');
+    assert.equal(requests[1].options.method, 'POST');
+    assert.equal(requests[2].url, '/api/teams/team-1/members');
+    assert.equal(requests[3].url, '/api/admin/accounts/user-2');
+    assert.equal(requests[3].options.method, 'DELETE');
+    assert.equal(requests[4].options.headers.get('X-MyDrive-Team'), 'team-1');
+    assert.equal(requests[5].options.headers.get('X-MyDrive-Team'), 'team-1');
+    assert.equal(downloadUrl('f1'), '/api/files/f1/download?team_id=team-1');
+    assert.equal(previewUrl('f1'), '/api/files/f1/preview?team_id=team-1');
+    assert.equal(thumbnailUrl('f1'), '/api/files/f1/thumbnail?team_id=team-1');
+
+    setActiveTeamWorkspace(null);
+    assert.equal(downloadUrl('f1'), '/api/files/f1/download');
+  } finally {
+    setActiveTeamWorkspace(null);
+    globalThis.fetch = originalFetch;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
 });
 
 test('system update API client sends CSRF, JSON, and credentials', async () => {

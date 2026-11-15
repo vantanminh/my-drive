@@ -23,6 +23,9 @@ import type {
   NetworkDriveStatus,
   SystemUpdateSettings,
   SystemUpdatesStatus,
+  TeamDetail,
+  TeamMemberSummary,
+  TeamSummary,
   UploadCreated,
   User
 } from './types';
@@ -139,6 +142,26 @@ export type MediaIndexStatus = {
 };
 
 let csrfToken: string | null = null;
+let activeTeamWorkspaceId: string | null = null;
+
+export function setActiveTeamWorkspace(teamId: string | null) {
+  activeTeamWorkspaceId = teamId;
+}
+
+export function activeTeamWorkspace(): string | null {
+  return activeTeamWorkspaceId;
+}
+
+function isTeamScopedPath(url: string): boolean {
+  return (
+    url.startsWith('/api/drive') ||
+    url.startsWith('/api/folders') ||
+    url.startsWith('/api/entries') ||
+    url.startsWith('/api/uploads') ||
+    url.startsWith('/api/files') ||
+    url === '/api/storage'
+  );
+}
 
 export function rememberCsrf(token: string | null) {
   csrfToken = token;
@@ -169,6 +192,9 @@ export async function request<T>(url: string, options: RequestOptions = {}): Pro
   if (options.json !== undefined) {
     headers.set('Content-Type', 'application/json');
     body = JSON.stringify(options.json);
+  }
+  if (activeTeamWorkspaceId && isTeamScopedPath(url) && !headers.has('X-MyDrive-Team')) {
+    headers.set('X-MyDrive-Team', activeTeamWorkspaceId);
   }
   if (options.csrf) {
     const token = currentCsrfToken();
@@ -253,6 +279,9 @@ function uploadChunkWithProgress(
     xhr.setRequestHeader('Content-Type', 'application/offset+octet-stream');
     xhr.setRequestHeader('Upload-Offset', String(offset));
     xhr.setRequestHeader('Tus-Resumable', '1.0.0');
+    if (activeTeamWorkspaceId) {
+      xhr.setRequestHeader('X-MyDrive-Team', activeTeamWorkspaceId);
+    }
     const token = currentCsrfToken();
     if (token) xhr.setRequestHeader('X-CSRF-Token', token);
     xhr.upload.addEventListener('progress', (event) => {
@@ -362,28 +391,100 @@ export const api = {
       csrf: true,
       cache: 'no-store'
     }),
-  managedAccounts: (offset = 0, signal?: AbortSignal) => {
+  managedAccounts: (
+    offset = 0,
+    signal?: AbortSignal,
+    options?: { q?: string; role?: string; status?: string }
+  ) => {
     const query = new URLSearchParams({ limit: '50' });
     if (offset) query.set('offset', String(offset));
+    if (options?.q?.trim()) query.set('q', options.q.trim());
+    if (options?.role && options.role !== 'all') query.set('role', options.role);
+    if (options?.status && options.status !== 'all') query.set('status', options.status);
     return request<ManagedAccountPage>('/api/admin/accounts?' + query.toString(), {
       signal,
       cache: 'no-store'
     });
   },
-  createManagedAccount: (email: string, quotaBytes: number) =>
+  createManagedAccount: (email: string, quotaBytes: number, role: 'member' | 'admin' = 'member') =>
     request<CreatedManagedAccount>('/api/admin/accounts', {
       method: 'POST',
-      json: { email, quotaBytes },
+      json: { email, quotaBytes, role },
       csrf: true,
       cache: 'no-store'
     }),
-  updateManagedAccount: (id: string, update: { quotaBytes?: number; disabled?: boolean }) =>
+  updateManagedAccount: (
+    id: string,
+    update: { quotaBytes?: number; disabled?: boolean; role?: 'member' | 'admin' }
+  ) =>
     request<void>('/api/admin/accounts/' + encodeURIComponent(id), {
       method: 'PATCH',
       json: update,
       csrf: true,
       cache: 'no-store'
     }),
+  deleteManagedAccount: (id: string) =>
+    request<void>('/api/admin/accounts/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  listTeams: (signal?: AbortSignal) =>
+    request<{ teams: TeamSummary[] }>('/api/teams', {
+      signal,
+      cache: 'no-store'
+    }),
+  createTeam: (input: { name: string; description?: string; quotaBytes?: number }) =>
+    request<TeamSummary>('/api/teams', {
+      method: 'POST',
+      json: input,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  getTeam: (id: string, signal?: AbortSignal) =>
+    request<TeamDetail>('/api/teams/' + encodeURIComponent(id), {
+      signal,
+      cache: 'no-store'
+    }),
+  updateTeam: (id: string, input: { name?: string; description?: string; quotaBytes?: number }) =>
+    request<TeamSummary>('/api/teams/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      json: input,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  deleteTeam: (id: string) =>
+    request<void>('/api/teams/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  addTeamMember: (teamId: string, input: { email: string; role?: 'admin' | 'member' }) =>
+    request<TeamMemberSummary>('/api/teams/' + encodeURIComponent(teamId) + '/members', {
+      method: 'POST',
+      json: input,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  updateTeamMember: (teamId: string, userId: string, role: 'admin' | 'member') =>
+    request<TeamMemberSummary>(
+      '/api/teams/' + encodeURIComponent(teamId) + '/members/' + encodeURIComponent(userId),
+      {
+        method: 'PATCH',
+        json: { role },
+        csrf: true,
+        cache: 'no-store'
+      }
+    ),
+  removeTeamMember: (teamId: string, userId: string) =>
+    request<void>(
+      '/api/teams/' + encodeURIComponent(teamId) + '/members/' + encodeURIComponent(userId),
+      {
+        method: 'DELETE',
+        csrf: true,
+        cache: 'no-store'
+      }
+    ),
   faceClusters: (offset = 0, signal?: AbortSignal, filter?: { q?: string; named?: boolean }) => {
     const query = new URLSearchParams({ limit: '60' });
     if (offset) query.set('offset', String(offset));
@@ -638,8 +739,11 @@ export const api = {
       csrf: true
     }),
   uploadHead: async (id: string) => {
+    const headers = new Headers();
+    if (activeTeamWorkspaceId) headers.set('X-MyDrive-Team', activeTeamWorkspaceId);
     const response = await fetch('/api/uploads/' + encodeURIComponent(id), {
       method: 'HEAD',
+      headers,
       credentials: 'same-origin'
     });
     if (!response.ok) {
@@ -771,16 +875,21 @@ export const api = {
     })
 };
 
+function withTeamQuery(path: string): string {
+  if (!activeTeamWorkspaceId) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'team_id=' + encodeURIComponent(activeTeamWorkspaceId);
+}
+
 export function downloadUrl(id: string): string {
-  return '/api/files/' + encodeURIComponent(id) + '/download';
+  return withTeamQuery('/api/files/' + encodeURIComponent(id) + '/download');
 }
 
 export function previewUrl(id: string): string {
-  return '/api/files/' + encodeURIComponent(id) + '/preview';
+  return withTeamQuery('/api/files/' + encodeURIComponent(id) + '/preview');
 }
 
 export function thumbnailUrl(id: string): string {
-  return '/api/files/' + encodeURIComponent(id) + '/thumbnail';
+  return withTeamQuery('/api/files/' + encodeURIComponent(id) + '/thumbnail');
 }
 
 export function publicDownloadUrl(token: string, id: string): string {

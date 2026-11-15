@@ -1242,7 +1242,16 @@ async fn server_storage(
         _ => 0,
     };
     let rows = sqlx::query_as::<_, UserUsageRow>(
-        "SELECT account.id, account.email, account.role, account.quota_bytes, \
+        "SELECT account.id, \
+                CASE \
+                    WHEN account.is_workspace_service THEN COALESCE('Team: ' || team.name, account.email) \
+                    ELSE account.email \
+                END AS email, \
+                CASE \
+                    WHEN account.is_workspace_service THEN 'team' \
+                    ELSE account.role \
+                END AS role, \
+                account.quota_bytes, \
             (SELECT COALESCE(SUM(version.size_bytes), 0)::BIGINT \
                FROM drive_entries AS entry \
                JOIN files AS file ON file.id = entry.id \
@@ -1251,7 +1260,8 @@ async fn server_storage(
                     AND object.state = 'ready' \
               WHERE entry.owner_id = account.id) AS used_bytes \
            FROM users AS account \
-          ORDER BY used_bytes DESC, account.email ASC",
+           LEFT JOIN teams AS team ON team.workspace_user_id = account.id \
+          ORDER BY used_bytes DESC, email ASC",
     )
     .fetch_all(&state.pool)
     .await

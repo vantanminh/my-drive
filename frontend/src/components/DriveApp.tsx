@@ -28,6 +28,9 @@ import DeveloperPanel from './DeveloperPanel';
 import AccountSecurityPanel from './AccountSecurityPanel';
 import SystemUpdatePanel from './SystemUpdatePanel';
 import NetworkDrivePanel from './NetworkDrivePanel';
+import TeamsPanel from './TeamsPanel';
+import { setActiveTeamWorkspace } from '../api';
+import type { TeamSummary } from '../types';
 
 type Props = {
   user: User;
@@ -582,6 +585,8 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const securityOpen = panel === 'security';
   const updatesOpen = panel === 'updates';
   const networkDriveOpen = panel === 'network-drive';
+  const teamsOpen = panel === 'teams';
+  const [activeTeam, setActiveTeam] = useState<TeamSummary | null>(null);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [latestUpdateTag, setLatestUpdateTag] = useState<string | null>(null);
   useEffect(() => {
@@ -652,7 +657,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   }, [jobs]);
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘ K' : 'Ctrl K';
   const activeSectionLabel = section === 'drive'
-    ? (!pathReady ? 'Opening folder…' : currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : 'My Drive')
+    ? (!pathReady ? 'Opening folder…' : currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : (activeTeam ? activeTeam.name : 'My Drive'))
     : section === 'shared' ? 'Shared links'
       : section === 'photos' ? 'Photos'
         : section === 'storage' ? 'Storage'
@@ -710,7 +715,9 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               ? 'Google Drive'
               : panel === 'security'
                 ? 'Account security'
-                : activeSectionLabel) + ' · My Drive';
+                : panel === 'teams'
+                  ? 'Teams'
+                  : activeSectionLabel) + ' · My Drive';
     document.title = !panel && activeSectionLabel === 'My Drive' ? 'My Drive' : title;
   }, [activeSectionLabel, panel]);
 
@@ -898,7 +905,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [section, currentFolderId, pathReady, query, route.filters, route.order, route.sort, refresh, shareRefresh, onLoggedOut]);
+  }, [section, currentFolderId, pathReady, query, route.filters, route.order, route.sort, refresh, shareRefresh, activeTeam?.id, onLoggedOut]);
 
   useEffect(() => {
     window.localStorage.setItem('my-drive-view', viewMode);
@@ -946,6 +953,16 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     } catch (cause) {
       setError(friendlyError(cause));
     }
+  }
+
+  function selectTeamWorkspace(team: TeamSummary | null) {
+    setActiveTeamWorkspace(team?.id ?? null);
+    setActiveTeam(team);
+    setDetailsId(null);
+    setSelectedIds([]);
+    setSelectionMode(false);
+    setRefresh((current) => current + 1);
+    showDrive({ folders: [], panel: null, query: '', fileId: null, filters: emptyFilters() });
   }
 
   function navigate(sectionValue: Section) {
@@ -1614,6 +1631,8 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     } catch {
       // Clearing the local view still sends the user back through sign-in.
     }
+    setActiveTeamWorkspace(null);
+    setActiveTeam(null);
     onLoggedOut();
   }
 
@@ -1686,6 +1705,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             )}
             <button onClick={(event) => {
               event.currentTarget.closest('details')?.removeAttribute('open');
+              showDrive({ folders: [], panel: 'teams', query: '', fileId: null });
+            }}><Users size={15} /> Teams &amp; workspaces</button>
+            <button onClick={(event) => {
+              event.currentTarget.closest('details')?.removeAttribute('open');
               showDrive({ folders: [], panel: 'security', query: '', fileId: null });
             }}><ShieldCheck size={15} /> Account security</button>
             <button onClick={(event) => { event.currentTarget.closest('details')?.removeAttribute('open'); showDrive({ folders: [], panel: 'network-drive', query: '', fileId: null }); }}><HardDrive size={15} /> Network drive</button>
@@ -1704,8 +1727,20 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       <div className="app-body">
         <aside className="side-nav" aria-label="Main navigation">
           <div className="nav-section-label">WORKSPACE</div>
-          <button className={'nav-item' + (section === 'drive' ? ' active' : '')} onClick={() => navigate('drive')}>
+          <button
+            className={'nav-item' + (section === 'drive' && !activeTeam && !teamsOpen ? ' active' : '')}
+            onClick={() => {
+              if (activeTeam) selectTeamWorkspace(null);
+              else navigate('drive');
+            }}
+          >
             <HardDrive size={18} /><span>My Drive</span>
+          </button>
+          <button
+            className={'nav-item' + (teamsOpen || Boolean(activeTeam) ? ' active' : '')}
+            onClick={() => showDrive({ panel: teamsOpen ? null : 'teams' })}
+          >
+            <Users size={18} /><span>Teams</span>
           </button>
           <button className={'nav-item' + (section === 'photos' ? ' active' : '')} onClick={() => navigate('photos')}>
             <Images size={18} /><span>Photos</span>
@@ -1723,7 +1758,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             <Cloud size={18} /><span>Google Drive</span>
           </button>
           <div className="sidebar-bottom">
-            <QuotaCard />
+            <QuotaCard teamName={activeTeam?.name} />
             <div className="privacy-card">
               <span className="privacy-icon"><LockKeyhole size={16} /></span>
               <span><strong>Your drive is private</strong><small>Only you can access your files.</small></span>
@@ -1823,7 +1858,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
           {section === 'drive' && breadcrumbs.length > 0 && !searchActive && (
             <nav className="breadcrumb-nav" aria-label="Folder path">
-              <button onClick={() => goToBreadcrumb(-1)}>My Drive</button>
+              <button onClick={() => goToBreadcrumb(-1)}>{activeTeam ? activeTeam.name : 'My Drive'}</button>
               {breadcrumbs.map((crumb, index) => (
                 <span className="breadcrumb-item" key={crumb.id}>
                   <ChevronRight size={14} className="breadcrumb-slash" />
@@ -1833,6 +1868,38 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             </nav>
           )}
 
+          {section === 'drive' && activeTeam ? (
+            <div className="team-workspace-banner" role="status">
+              <span>
+                Viewing shared team workspace <strong>{activeTeam.name}</strong> ({activeTeam.myRole})
+              </span>
+              <div className="account-access-actions">
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={() => showDrive({ panel: teamsOpen ? null : 'teams' })}
+                >
+                  Team settings
+                </button>
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={() => selectTeamWorkspace(null)}
+                >
+                  Return to My Drive
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {section === 'drive' && teamsOpen ? (
+            <TeamsPanel
+              user={user}
+              activeTeamId={activeTeam?.id ?? null}
+              onSelectWorkspace={selectTeamWorkspace}
+              onClose={() => showDrive({ panel: null })}
+            />
+          ) : null}
           {section === 'drive' && developerOpen ? <DeveloperPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
           {section === 'drive' && networkDriveOpen ? <NetworkDrivePanel email={user.email} onClose={() => showDrive({ panel: null })} onOpenDeveloper={() => showDrive({ panel: 'developer' })} /> : null}
           {section === 'drive' && securityOpen ? <AccountSecurityPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
@@ -2179,7 +2246,13 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       </div>
 
       <nav className="mobile-nav" aria-label="Main navigation">
-        <button className={section === 'drive' ? 'active' : ''} onClick={() => navigate('drive')}><HardDrive size={19} /><span>Drive</span></button>
+        <button
+          className={section === 'drive' && !activeTeam ? 'active' : ''}
+          onClick={() => {
+            if (activeTeam) selectTeamWorkspace(null);
+            else navigate('drive');
+          }}
+        ><HardDrive size={19} /><span>Drive</span></button>
         <button className={section === 'photos' ? 'active' : ''} onClick={() => navigate('photos')}><Images size={19} /><span>Photos</span></button>
         <button className={section === 'shared' ? 'active' : ''} onClick={() => navigate('shared')}><Users size={19} /><span>Shared</span></button>
         <button className={section === 'trash' ? 'active' : ''} onClick={() => navigate('trash')}><Trash2 size={19} /><span>Trash</span></button>

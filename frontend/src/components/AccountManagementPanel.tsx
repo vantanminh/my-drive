@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Check, Copy, KeyRound, Plus, RefreshCw, Shield, UserRoundPlus, Users, X } from 'lucide-react';
+import { Check, Copy, KeyRound, Plus, RefreshCw, Search, Shield, Trash2, UserRoundPlus, Users, X } from 'lucide-react';
 import { api } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import type { AccountStorage, ManagedAccount, User } from '../types';
@@ -31,7 +31,11 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [email, setEmail] = useState('');
+  const [newRole, setNewRole] = useState<'member' | 'admin'>('member');
   const [newQuotaGb, setNewQuotaGb] = useState('10');
+  const [filterQuery, setFilterQuery] = useState('');
+  const [filterRole, setFilterRole] = useState<'all' | 'admin' | 'member'>('all');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'disabled'>('all');
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -44,7 +48,11 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
     setLoading(true);
     setError('');
     Promise.all([
-      api.managedAccounts(0, controller.signal),
+      api.managedAccounts(0, controller.signal, {
+        q: filterQuery.trim() || undefined,
+        role: filterRole,
+        status: filterStatus,
+      }),
       api.accountStorage(controller.signal).catch(() => null),
     ])
       .then(([page, storage]) => {
@@ -59,7 +67,7 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [refreshKey]);
+  }, [refreshKey, filterQuery, filterRole, filterStatus]);
 
   async function createAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -73,11 +81,12 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
     setError('');
     setNotice('');
     try {
-      const result = await api.createManagedAccount(trimmedEmail, quotaBytes(gigabytes));
+      const result = await api.createManagedAccount(trimmedEmail, quotaBytes(gigabytes), newRole);
       setRefreshKey((current) => current + 1);
       setIssuedCredential({ email: result.account.email, password: result.temporaryPassword });
       setCopiedCredential(false);
       setEmail('');
+      setNewRole('member');
       setNewQuotaGb('10');
       setNotice('Account created. Share its temporary password securely.');
     } catch (cause: unknown) {
@@ -152,6 +161,46 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
     }
   }
 
+  async function updateRole(account: ManagedAccount, role: 'admin' | 'member') {
+    if (account.role === role) return;
+    setBusyKey(account.id + ':role');
+    setError('');
+    setNotice('');
+    try {
+      await api.updateManagedAccount(account.id, { role });
+      setAccounts((current) => current.map((item) => (item.id === account.id ? { ...item, role } : item)));
+      setNotice('Updated role for ' + account.email + ' to ' + role + '.');
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function deleteAccount(account: ManagedAccount) {
+    if (
+      !window.confirm(
+        'Permanently delete ' +
+          account.email +
+          '? Empty folders, sessions, and team memberships will be removed. Accounts that still own files cannot be deleted.'
+      )
+    ) {
+      return;
+    }
+    setBusyKey(account.id + ':delete');
+    setError('');
+    setNotice('');
+    try {
+      await api.deleteManagedAccount(account.id);
+      setAccounts((current) => current.filter((item) => item.id !== account.id));
+      setNotice('Deleted account ' + account.email + '.');
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   async function resetPassword(account: ManagedAccount) {
     if (!window.confirm('Reset ' + account.email + '’s password? Their current sessions will be revoked.')) return;
     setBusyKey(account.id + ':password');
@@ -174,7 +223,11 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
     setLoadingMore(true);
     setError('');
     try {
-      const page = await api.managedAccounts(nextOffset);
+      const page = await api.managedAccounts(nextOffset, undefined, {
+        q: filterQuery.trim() || undefined,
+        role: filterRole,
+        status: filterStatus,
+      });
       setAccounts((current) => {
         const existing = new Set(current.map((account) => account.id));
         return [...current, ...page.accounts.filter((account) => !existing.has(account.id))];
@@ -227,6 +280,18 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
         <label className="account-form-field account-email-field">
           <span>Email address</span>
           <input className="text-input" type="email" autoComplete="off" maxLength={254} required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="person@example.com" />
+        </label>
+        <label className="account-form-field account-role-field">
+          <span>Role</span>
+          <select
+            className="text-input"
+            value={newRole}
+            onChange={(event) => setNewRole(event.target.value === 'admin' ? 'admin' : 'member')}
+            aria-label="New account role"
+          >
+            <option value="member">Member</option>
+            <option value="admin">Admin</option>
+          </select>
         </label>
         <label className="account-form-field account-quota-field">
           <span>Storage quota <small>GB</small></span>
@@ -324,6 +389,38 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
         <span>Storage used includes active upload reservations</span>
       </div>
 
+      <div className="account-filter-bar">
+        <label className="account-filter-search" aria-label="Search accounts">
+          <Search size={14} />
+          <input
+            type="search"
+            value={filterQuery}
+            onChange={(event) => setFilterQuery(event.target.value)}
+            placeholder="Search by email..."
+          />
+        </label>
+        <select
+          className="account-role-select"
+          aria-label="Filter by role"
+          value={filterRole}
+          onChange={(event) => setFilterRole(event.target.value as 'all' | 'member' | 'admin')}
+        >
+          <option value="all">All roles</option>
+          <option value="member">Member</option>
+          <option value="admin">Admin</option>
+        </select>
+        <select
+          className="account-role-select"
+          aria-label="Filter by status"
+          value={filterStatus}
+          onChange={(event) => setFilterStatus(event.target.value as 'all' | 'active' | 'disabled')}
+        >
+          <option value="all">All statuses</option>
+          <option value="active">Active</option>
+          <option value="disabled">Disabled</option>
+        </select>
+      </div>
+
       {loading ? (
         <div className="account-admin-loading"><span className="spinner" />Loading accounts…</div>
       ) : accounts.length === 0 ? (
@@ -344,6 +441,9 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
                     <strong title={account.email}>{account.email}</strong>
                     <span>Created {formatDate(account.createdAt)}</span>
                   </div>
+                  <span className={'account-role-pill' + (account.role === 'admin' ? ' is-admin' : '')}>
+                    {account.role === 'admin' ? 'Admin' : 'Member'}
+                  </span>
                   <span className={'account-status' + (account.disabledAt ? ' is-disabled' : '')}>
                     <i />{account.disabledAt ? 'Disabled' : 'Active'}
                   </span>
@@ -376,11 +476,30 @@ export default function AccountManagementPanel({ user, onClose }: Props) {
                     </button>
                   </form>
                   <div className="account-access-actions">
+                    <select
+                      className="account-role-select"
+                      aria-label={'Role for ' + account.email}
+                      value={account.role}
+                      disabled={accountBusy || busyKey !== null || issuedCredential !== null}
+                      onChange={(event) => void updateRole(account, event.target.value as 'member' | 'admin')}
+                    >
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                    </select>
                     <button className="button button-secondary" type="button" disabled={accountBusy || busyKey !== null || issuedCredential !== null} onClick={() => void resetPassword(account)}>
                       <KeyRound size={14} />{busyKey === account.id + ':password' ? 'Resetting…' : 'Reset password'}
                     </button>
                     <button className={account.disabledAt ? 'button button-secondary' : 'button button-quiet-danger'} type="button" disabled={accountBusy || busyKey !== null || issuedCredential !== null} onClick={() => void setDisabled(account)}>
                       {account.disabledAt ? 'Enable account' : 'Disable'}
+                    </button>
+                    <button
+                      className="button button-quiet-danger"
+                      type="button"
+                      disabled={accountBusy || busyKey !== null || issuedCredential !== null}
+                      onClick={() => void deleteAccount(account)}
+                      title="Delete empty account"
+                    >
+                      <Trash2 size={14} />{busyKey === account.id + ':delete' ? 'Deleting…' : 'Delete'}
                     </button>
                   </div>
                 </div>

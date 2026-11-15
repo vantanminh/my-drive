@@ -45,11 +45,40 @@ export type DeviceAuthorizationRequest = {
 export type ManagedAccount = {
   id: string;
   email: string;
+  role: 'admin' | 'member' | string;
   quotaBytes: number;
   usedBytes: number;
   reservedBytes: number;
   disabledAt: string | null;
   createdAt: string;
+};
+
+export type TeamSummary = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  quotaBytes: number;
+  usedBytes: number;
+  reservedBytes: number;
+  memberCount: number;
+  myRole: 'owner' | 'admin' | 'member' | string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TeamMemberSummary = {
+  userId: string;
+  email: string;
+  accountRole: string;
+  role: 'admin' | 'member' | string;
+  disabledAt: string | null;
+  createdAt: string;
+};
+
+export type TeamDetail = {
+  team: TeamSummary;
+  members: TeamMemberSummary[];
 };
 
 export type ManagedAccountPage = {

@@ -387,7 +387,7 @@ pub async fn login(
 
     let user = match sqlx::query_as::<_, LoginUser>(
         "SELECT id, email, role, password_hash, must_change_password \
-           FROM users WHERE lower(email) = $1 AND disabled_at IS NULL",
+           FROM users WHERE lower(email) = $1 AND disabled_at IS NULL AND is_workspace_service = FALSE",
     )
     .bind(&email)
     .fetch_optional(&state.pool)
