@@ -201,15 +201,16 @@ The client keeps a SQLite index of size, modified time, and SHA-256. Unchanged f
 ## Running a prebuilt Docker image
 
 GitHub Actions validates and builds the Docker targets (`runtime`,
-`document-preview-runtime`, `media-indexer-runtime`, and
-`media-indexer-db-setup`) for pull requests into
+`document-preview-runtime`, `media-indexer-runtime`,
+`media-indexer-db-setup`, and `smb-runtime`) for pull requests into
 `master`. A push to `master`
 publishes the `latest`, `master`, and `sha-<commit>` tags. Pushing a version
 tag such as `v1.2.3` publishes `v1.2.3` and `sha-<commit>` tags. Images are
 built for `linux/amd64` and published to GHCR as
 `ghcr.io/<owner>/<repository>`,
-`ghcr.io/<owner>/<repository>-document-preview`, and
-`ghcr.io/<owner>/<repository>-indexer`; the owner and repository come from
+`ghcr.io/<owner>/<repository>-document-preview`,
+`ghcr.io/<owner>/<repository>-indexer`, and
+`ghcr.io/<owner>/<repository>-smb`; the owner and repository come from
 GitHub and are lowercased for valid GHCR names. The workflow uses the
 repository-provided `GITHUB_TOKEN` and does not need a separate registry
 secret. GHCR package visibility is configured separately. After the first
@@ -418,6 +419,16 @@ files are rebuildable cache data; the source files remain on the HDD. For a
 native systemd installation, configure separate `STORAGE_*` and
 `MEDIA_PREVIEW_*` roots, mount points, and expected device IDs in the restricted
 environment file. Keep device matching enabled for both mounts.
+
+### Optional SMB network drive (LAN-only, read-only)
+
+Users on the local network can mount their drive as a real SMB share (`\\<host>\drive`, e.g., mapped to `Z:` in Windows File Explorer) in addition to the built-in `/webdav/` endpoint. Because the folder hierarchy lives in PostgreSQL while files are stored by content key on the HDD, `app` materialises a read-only symlink view inside the shared `smb-view` volume when enabled by the owner.
+
+1. Enable the optional `smb` Compose profile by adding `COMPOSE_PROFILES=smb` (and optionally `MY_DRIVE_SMB_IMAGE=ghcr.io/vantanminh/my-drive-smb:latest` / `SMB_PORT=445`) to `.env`, then run `docker compose pull smb` and `docker compose up -d`.
+2. Allow TCP port `445` (or `SMB_PORT`) in the host firewall **only for your private LAN**, never the public Internet (for example, `sudo ufw allow from 192.168.0.0/16 to any port 445 proto tcp`). Samba also enforces `hosts allow` for RFC 1918 / loopback / link-local / ULA ranges and `hosts deny = ALL`.
+3. In the web UI (**Network drive**), the owner turns on **Enable SMB network drive** and each user sets a dedicated **SMB password** (at least 12 characters).
+
+> **Security note (NT hash):** Samba authenticates SMB clients using an NT hash (MD4 over UTF-16LE), which is password-equivalent for SMB authentication and cannot be derived from the account's Argon2id password hash. Always use a dedicated SMB password different from your web account password. The `app` container writes `users.list` atomically with mode `0600` on the shared `smb-view` volume (clears it when SMB is disabled), and the SMB container restricts access to private LAN ranges with `smb encrypt = desired`.
 
 ## Google Drive import
 

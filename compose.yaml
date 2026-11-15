@@ -55,6 +55,8 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
       GOOGLE_DRIVE_TOKEN_KEY: ${GOOGLE_DRIVE_TOKEN_KEY:-}
+      SMB_VIEW_DIR: /srv/my-drive/smb-view
+      SMB_DATA_TARGET: /srv/my-drive/data
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - type: bind
@@ -68,6 +70,7 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - smb-view:/srv/my-drive/smb-view
     ports:
       - "127.0.0.1:${APP_PORT:-3000}:3000"
     networks:
@@ -179,6 +182,41 @@ services:
     mem_limit: 1536m
     pids_limit: 32
     stop_grace_period: 30s
+
+  smb:
+    image: ${MY_DRIVE_SMB_IMAGE:-ghcr.io/vantanminh/my-drive-smb:latest}
+    pull_policy: missing
+    profiles:
+      - smb
+    restart: unless-stopped
+    init: true
+    depends_on:
+      app:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${STORAGE_DATA_HDD:?Set STORAGE_DATA_HDD to the mounted HDD data root}
+        target: /srv/my-drive/data
+        read_only: true
+        bind:
+          create_host_path: false
+      - smb-view:/srv/view
+    ports:
+      - "${SMB_PORT:-445}:445"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  smb-view:
 
 networks:
   preview-private:

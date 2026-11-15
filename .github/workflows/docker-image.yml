@@ -91,6 +91,16 @@ jobs:
           push: false
           cache-from: type=gha,scope=my-drive-indexer-db-setup
 
+      - name: Build SMB share image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: smb-runtime
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=my-drive-smb
+
   database-fixture:
     needs: validate
     runs-on: ubuntu-latest
@@ -185,6 +195,7 @@ jobs:
       indexer_image: ${{ steps.images.outputs.indexer }}
       document_preview_image: ${{ steps.images.outputs.document_preview }}
       db_image: ${{ steps.images.outputs.db }}
+      smb_image: ${{ steps.images.outputs.smb }}
     permissions:
       contents: read
       packages: write
@@ -233,6 +244,7 @@ jobs:
           printf 'document_preview=%s-document-preview\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'indexer=%s-indexer\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'db=%s-indexer-db-setup\n' "$repository" >> "$GITHUB_OUTPUT"
+          printf 'smb=%s-smb\n' "$repository" >> "$GITHUB_OUTPUT"
 
       - name: Extract application image metadata
         id: app-meta
@@ -272,6 +284,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.images.outputs.db }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+
+      - name: Extract SMB share image metadata
+        id: smb-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.smb }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -340,6 +363,19 @@ jobs:
           labels: ${{ steps.db-meta.outputs.labels }}
           cache-from: type=gha,scope=my-drive-indexer-db-setup
           cache-to: type=gha,scope=my-drive-indexer-db-setup,mode=max
+
+      - name: Build and publish SMB share image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: smb-runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.smb-meta.outputs.tags }}
+          labels: ${{ steps.smb-meta.outputs.labels }}
+          cache-from: type=gha,scope=my-drive-smb
+          cache-to: type=gha,scope=my-drive-smb,mode=max
 
   smoke:
     needs: publish
@@ -483,7 +519,8 @@ jobs:
             "${{ needs.publish.outputs.app_image }}" \
             "${{ needs.publish.outputs.indexer_image }}" \
             "${{ needs.publish.outputs.document_preview_image }}" \
-            "${{ needs.publish.outputs.db_image }}"; do
+            "${{ needs.publish.outputs.db_image }}" \
+            "${{ needs.publish.outputs.smb_image }}"; do
             docker buildx imagetools create --tag "${image}:${tag}" "${image}:sha-${short_sha}"
           done
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"

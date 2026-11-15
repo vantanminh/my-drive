@@ -292,6 +292,40 @@ proxy và cổng nội bộ 3000 không cần mở cho LAN. Giữ nguyên host/d
 Caddy để chứng chỉ HTTPS hiện tại tiếp tục khớp. Với `tls=internal`, các thiết
 bị vẫn cần tin cậy CA nội bộ như phần cài đặt TLS đã hướng dẫn.
 
+## Ổ đĩa mạng nội bộ SMB (chỉ LAN, chỉ đọc)
+
+Ngoài WebDAV (`/webdav/`), chủ sở hữu có thể bật thêm dịch vụ Samba (`smb`, dùng
+profile Compose riêng để không ảnh hưởng các bản cài hiện có) để gắn My Drive
+như ổ đĩa mạng thật trong Windows File Explorer (`\\<IP-LAN>\drive`, gán `Z:`),
+macOS Finder hoặc Linux CIFS.
+
+1. Bật profile `smb` trong `.env` bằng cách thêm `COMPOSE_PROFILES=smb` (và
+   `MY_DRIVE_SMB_IMAGE=ghcr.io/vantanminh/my-drive-smb:latest` nếu dùng image
+   prebuilt từ GHCR; mặc định cổng `${SMB_PORT:-445}:445`), sau đó chạy
+   `docker compose up -d` (hoặc `docker compose --profile smb up -d`).
+2. Chỉ mở cổng TCP `445` trong firewall cho dải mạng LAN tin cậy, tuyệt đối
+   không mở ra Internet công cộng:
+
+   ```bash
+   sudo ufw allow from 192.168.0.0/16 to any port 445 proto tcp
+   ```
+
+   (Thay dải subnet phù hợp nếu LAN dùng `10.0.0.0/8` hoặc `172.16.0.0/12`.)
+   `docker/smb.conf` cũng chặn sẵn `hosts deny = ALL` và chỉ cho phép các dải
+   private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`,
+   `169.254.0.0/16`, `fc00::/7`, `fe80::/10`, `::1`), chia sẻ chỉ đọc với
+   `server min protocol = SMB2_10` và `smb encrypt = desired`.
+3. Trong giao diện web (**Network drive**), chủ sở hữu bật **Enable SMB network
+   drive** và từng người dùng tự đặt **SMB password** riêng (tối thiểu 12 ký
+   tự) để nhận SMB username và gắn `\\<IP-LAN>\drive`.
+
+> **Lưu ý bảo mật (NT hash):** Samba bắt buộc xác thực bằng NT hash (MD4 trên
+> UTF-16LE), nên NT hash có giá trị tương đương mật khẩu đối với giao thức SMB
+> và không dùng chung được với hash Argon2id của tài khoản web. Hãy đặt mật khẩu
+> SMB **khác** mật khẩu đăng nhập tài khoản. App ghi `users.list` theo cơ chế
+> atomic với quyền `0600` trên volume dùng chung `smb-view` (và xóa rỗng danh
+> sách cùng cây symlink khi tắt SMB).
+
 ## 5. Backup mã hóa
 
 Chuẩn bị disk/NAS mount backup trên filesystem **khác** với tất cả data root.

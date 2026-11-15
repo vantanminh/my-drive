@@ -70,7 +70,9 @@ ENV MY_DRIVE_VERSION=${MY_DRIVE_VERSION} \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin mydrive
+    && useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin mydrive \
+    && mkdir -p /srv/my-drive/smb-view \
+    && chown 10001:10001 /srv/my-drive/smb-view
 COPY --from=builder /app/target/release/my-drive /usr/local/bin/my-drive
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 WORKDIR /app
@@ -108,3 +110,17 @@ ENTRYPOINT ["/usr/local/bin/my-drive-media-indexer"]
 FROM postgres:17-alpine AS media-indexer-db-setup
 COPY docker/setup-indexer-role.sh /scripts/setup-indexer-role.sh
 ENTRYPOINT ["/bin/sh", "/scripts/setup-indexer-role.sh"]
+
+FROM debian:bookworm-slim AS smb-runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends samba samba-vfs-modules \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 mydrive \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin mydrive \
+    && mkdir -p /srv/view /srv/my-drive/data \
+    && chown 10001:10001 /srv/view
+COPY docker/smb.conf /etc/samba/smb.conf
+COPY docker/smb-entrypoint.sh /usr/local/bin/smb-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/smb-entrypoint.sh
+EXPOSE 445
+ENTRYPOINT ["/usr/local/bin/smb-entrypoint.sh"]
