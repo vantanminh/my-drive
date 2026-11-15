@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 18);
+    assert_eq!(migrator.iter().len(), 22);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -98,4 +98,19 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     assert!(face_arcface.contains("octet_length(descriptor) IN (256, 2048)"));
     assert!(face_arcface.contains("anchor_embedding"));
     assert!(face_arcface.contains("auto_merge"));
+
+    let network_drive = include_str!("../migrations/0019_network_drive.sql");
+    assert!(network_drive.contains("CREATE TABLE network_drive_settings"));
+
+    let smb_share = include_str!("../migrations/0020_smb_share.sql");
+    assert!(smb_share.contains("CREATE TABLE smb_accounts"));
+
+    let session_metadata = include_str!("../migrations/0021_session_metadata.sql");
+    assert!(session_metadata.contains("client_type"));
+    assert!(session_metadata.contains("device_label"));
+
+    let teams_and_accounts = include_str!("../migrations/0022_teams_and_accounts.sql");
+    assert!(teams_and_accounts.contains("CREATE TABLE teams"));
+    assert!(teams_and_accounts.contains("CREATE TABLE team_members"));
+    assert!(teams_and_accounts.contains("is_workspace_service"));
 }
