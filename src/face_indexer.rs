@@ -594,8 +594,9 @@ pub(crate) fn decode_embedding(bytes: &[u8]) -> Option<[f32; EMBEDDING_DIM]> {
         return None;
     }
     let mut vector = [0.0_f32; EMBEDDING_DIM];
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for (index, &chunk) in chunks.iter().enumerate() {
+        let value = f32::from_le_bytes(chunk);
         if !value.is_finite() {
             return None;
         }
