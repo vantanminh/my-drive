@@ -16,7 +16,7 @@ use axum::{
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, Method, Request, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -26,10 +26,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthenticatedUser,
+    auth::{self, AuthenticatedUser},
     drive,
     health::AppState,
-    transfers,
+    smb_share, transfers,
 };
 
 const MOUNT: &str = "/webdav/";
@@ -40,12 +40,28 @@ const ALLOW: &str = "OPTIONS, GET, HEAD, PROPFIND";
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/network-drive", get(status).patch(update))
+        .route("/api/network-drive/smb-password", put(set_smb_password))
         .route("/webdav", any(webdav_root))
         .route("/webdav/", any(webdav_root))
         .route("/webdav/{*path}", any(webdav_path))
 }
 
 // ---------------------------------------------------------------- settings
+
+#[derive(sqlx::FromRow, Default)]
+struct NetworkDriveSettingsRow {
+    webdav_enabled: bool,
+    smb_enabled: bool,
+}
+
+async fn load_settings(state: &AppState) -> Result<NetworkDriveSettingsRow, sqlx::Error> {
+    let row: Option<NetworkDriveSettingsRow> = sqlx::query_as(
+        "SELECT webdav_enabled, smb_enabled FROM network_drive_settings WHERE singleton",
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+    Ok(row.unwrap_or_default())
+}
 
 async fn is_enabled(state: &AppState) -> Result<bool, sqlx::Error> {
     let value: Option<bool> =
@@ -60,32 +76,47 @@ fn json_error(status: StatusCode, code: &'static str) -> Response {
 }
 
 async fn status(State(state): State<AppState>, user: AuthenticatedUser) -> Response {
-    match is_enabled(&state).await {
-        Ok(enabled) => {
-            let mut response = Json(json!({
-                "enabled": enabled,
-                "path": MOUNT,
-                "lanOnly": true,
-                "readOnly": true,
-                "canManage": user.role == "owner",
-            }))
-            .into_response();
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-            response
-        }
+    let settings = match load_settings(&state).await {
+        Ok(settings) => settings,
         Err(error) => {
             tracing::error!(error = %error, "could not read network drive settings");
-            json_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
+            return json_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
         }
-    }
+    };
+    let smb_username: Option<String> =
+        match sqlx::query_scalar("SELECT username FROM smb_accounts WHERE user_id = $1")
+            .bind(user.id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(username) => username,
+            Err(error) => {
+                tracing::error!(error = %error, "could not read SMB account");
+                return json_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+            }
+        };
+    let mut response = Json(json!({
+        "enabled": settings.webdav_enabled,
+        "path": MOUNT,
+        "lanOnly": true,
+        "readOnly": true,
+        "canManage": user.role == "owner",
+        "smbEnabled": settings.smb_enabled,
+        "smbAvailable": smb_share::available(),
+        "smbUsername": smb_username,
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateRequest {
-    enabled: bool,
+    enabled: Option<bool>,
+    smb_enabled: Option<bool>,
 }
 
 async fn update(
@@ -100,26 +131,45 @@ async fn update(
     if drive::require_request_csrf(&headers, &user, state.auth_settings).is_err() {
         return json_error(StatusCode::FORBIDDEN, "csrf_failed");
     }
+    if input.enabled.is_none() && input.smb_enabled.is_none() {
+        return json_error(StatusCode::BAD_REQUEST, "invalid_request");
+    }
     let result = async {
         let mut tx = state.pool.begin().await?;
         sqlx::query(
             "UPDATE network_drive_settings \
-                SET webdav_enabled = $1, updated_by = $2, updated_at = now() \
+                SET webdav_enabled = COALESCE($1, webdav_enabled), \
+                    smb_enabled = COALESCE($2, smb_enabled), \
+                    updated_by = $3, updated_at = now() \
               WHERE singleton",
         )
         .bind(input.enabled)
+        .bind(input.smb_enabled)
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("INSERT INTO audit_events (event_type, actor_id) VALUES ($1, $2)")
-            .bind(if input.enabled {
-                "network_drive_enabled"
-            } else {
-                "network_drive_disabled"
-            })
-            .bind(user.id)
-            .execute(&mut *tx)
-            .await?;
+        if let Some(enabled) = input.enabled {
+            sqlx::query("INSERT INTO audit_events (event_type, actor_id) VALUES ($1, $2)")
+                .bind(if enabled {
+                    "network_drive_enabled"
+                } else {
+                    "network_drive_disabled"
+                })
+                .bind(user.id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(smb_enabled) = input.smb_enabled {
+            sqlx::query("INSERT INTO audit_events (event_type, actor_id) VALUES ($1, $2)")
+                .bind(if smb_enabled {
+                    "smb_network_drive_enabled"
+                } else {
+                    "smb_network_drive_disabled"
+                })
+                .bind(user.id)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await
     }
     .await;
@@ -127,6 +177,103 @@ async fn update(
         Ok(()) => status(State(state), user).await,
         Err(error) => {
             tracing::error!(error = %error, "could not update network drive settings");
+            json_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetSmbPasswordRequest {
+    password: String,
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(database) if database.code().as_deref() == Some("23505"))
+}
+
+async fn set_smb_password(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(input): Json<SetSmbPasswordRequest>,
+) -> Response {
+    if drive::require_request_csrf(&headers, &user, state.auth_settings).is_err() {
+        return json_error(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    if !auth::valid_password(&input.password) {
+        return json_error(StatusCode::BAD_REQUEST, "password_requirements");
+    }
+    let nt_hash = smb_share::nt_hash(&input.password);
+    let result = async {
+        let mut tx = state.pool.begin().await?;
+        let existing: Option<String> = sqlx::query_scalar(
+            "UPDATE smb_accounts \
+                SET nt_hash = $2, updated_at = now() \
+              WHERE user_id = $1 \
+          RETURNING username",
+        )
+        .bind(user.id)
+        .bind(nt_hash.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if existing.is_none() {
+            let mut inserted = false;
+            for attempt in 0..1000u32 {
+                let candidate = smb_share::username_candidate(&user.email, attempt);
+                sqlx::query("SAVEPOINT smb_account_insert")
+                    .execute(&mut *tx)
+                    .await?;
+                let attempt_result = sqlx::query(
+                    "INSERT INTO smb_accounts (user_id, username, nt_hash) \
+                     VALUES ($1, $2, $3) \
+                     ON CONFLICT (user_id) DO UPDATE \
+                         SET nt_hash = EXCLUDED.nt_hash, \
+                             updated_at = now()",
+                )
+                .bind(user.id)
+                .bind(&candidate)
+                .bind(nt_hash.as_slice())
+                .execute(&mut *tx)
+                .await;
+                match attempt_result {
+                    Ok(_) => {
+                        sqlx::query("RELEASE SAVEPOINT smb_account_insert")
+                            .execute(&mut *tx)
+                            .await?;
+                        inserted = true;
+                        break;
+                    }
+                    Err(error) if is_unique_violation(&error) => {
+                        sqlx::query("ROLLBACK TO SAVEPOINT smb_account_insert")
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if !inserted {
+                return Err(sqlx::Error::Protocol(
+                    "could not allocate unique SMB username".into(),
+                ));
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO audit_events (event_type, actor_id) VALUES ('smb_password_updated', $1)",
+        )
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
+    }
+    .await;
+
+    match result {
+        Ok(()) => status(State(state), user).await,
+        Err(error) => {
+            tracing::error!(error = %error, "could not update SMB password");
             json_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
         }
     }
@@ -177,10 +324,7 @@ fn request_is_lan(headers: &HeaderMap, peer: Option<IpAddr>) -> bool {
 
 // ------------------------------------------------------------------ WebDAV
 
-async fn webdav_root(
-    State(state): State<AppState>,
-    request: Request<Body>,
-) -> Response {
+async fn webdav_root(State(state): State<AppState>, request: Request<Body>) -> Response {
     serve(state, String::new(), request).await
 }
 
@@ -204,7 +348,9 @@ fn unauthorized() -> Response {
     let mut response = plain(StatusCode::UNAUTHORIZED);
     response.headers_mut().insert(
         header::WWW_AUTHENTICATE,
-        "Basic realm=\"My Drive\", charset=\"UTF-8\"".parse().unwrap(),
+        "Basic realm=\"My Drive\", charset=\"UTF-8\""
+            .parse()
+            .unwrap(),
     );
     response
 }
@@ -368,7 +514,11 @@ async fn password_login(
         return Ok(None);
     }
     let limiter_key = format!("webdav:{email}");
-    if state.login_rate_limiter.retry_after_seconds(&limiter_key).is_some() {
+    if state
+        .login_rate_limiter
+        .retry_after_seconds(&limiter_key)
+        .is_some()
+    {
         return Ok(None);
     }
     let row: Option<(Uuid, String)> = sqlx::query_as(
@@ -398,11 +548,10 @@ async fn password_login(
         }
     }
     let hash = row.as_ref().map(|r| r.1.clone());
-    let verified = tokio::task::spawn_blocking(move || {
-        crate::auth::verify_login_password(hash, &password)
-    })
-    .await
-    .unwrap_or(false);
+    let verified =
+        tokio::task::spawn_blocking(move || crate::auth::verify_login_password(hash, &password))
+            .await
+            .unwrap_or(false);
     let Some((id, _)) = row.filter(|_| verified) else {
         state.login_rate_limiter.record_failure(&limiter_key);
         return Ok(None);
@@ -598,7 +747,9 @@ async fn propfind(
 }
 
 fn multistatus(items: &[Item]) -> String {
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">");
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">",
+    );
     for item in items {
         xml.push_str("<D:response><D:href>");
         xml.push_str(&xml_escape(&item.href));
@@ -668,7 +819,17 @@ mod tests {
 
     #[test]
     fn private_ranges_are_lan() {
-        for ip in ["10.1.2.3", "172.16.0.9", "192.168.1.50", "127.0.0.1", "169.254.1.1", "::1", "fd00::1", "fe80::1", "::ffff:192.168.0.2"] {
+        for ip in [
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.50",
+            "127.0.0.1",
+            "169.254.1.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:192.168.0.2",
+        ] {
             assert!(is_lan_ip(ip.parse().unwrap()), "{ip}");
         }
         for ip in ["8.8.8.8", "172.32.0.1", "100.64.0.1", "2001:4860::1"] {
@@ -679,13 +840,31 @@ mod tests {
     #[test]
     fn every_reported_client_address_must_be_private() {
         let peer = Some("172.18.0.2".parse().unwrap());
-        assert!(request_is_lan(&headers(&[("x-forwarded-for", "192.168.1.9")]), peer));
-        assert!(!request_is_lan(&headers(&[("x-forwarded-for", "203.0.113.5")]), peer));
-        assert!(!request_is_lan(&headers(&[("x-forwarded-for", "192.168.1.9, 203.0.113.5")]), peer));
-        assert!(!request_is_lan(&headers(&[("cf-connecting-ip", "203.0.113.5")]), peer));
-        assert!(!request_is_lan(&headers(&[("x-forwarded-for", "garbage")]), peer));
+        assert!(request_is_lan(
+            &headers(&[("x-forwarded-for", "192.168.1.9")]),
+            peer
+        ));
+        assert!(!request_is_lan(
+            &headers(&[("x-forwarded-for", "203.0.113.5")]),
+            peer
+        ));
+        assert!(!request_is_lan(
+            &headers(&[("x-forwarded-for", "192.168.1.9, 203.0.113.5")]),
+            peer
+        ));
+        assert!(!request_is_lan(
+            &headers(&[("cf-connecting-ip", "203.0.113.5")]),
+            peer
+        ));
+        assert!(!request_is_lan(
+            &headers(&[("x-forwarded-for", "garbage")]),
+            peer
+        ));
         assert!(!request_is_lan(&HeaderMap::new(), None));
-        assert!(!request_is_lan(&headers(&[("x-forwarded-for", "192.168.1.9")]), Some("8.8.8.8".parse().unwrap())));
+        assert!(!request_is_lan(
+            &headers(&[("x-forwarded-for", "192.168.1.9")]),
+            Some("8.8.8.8".parse().unwrap())
+        ));
     }
 
     #[test]
@@ -705,5 +884,29 @@ mod tests {
         assert!(xml.contains("<D:displayname>a b &amp; c.txt</D:displayname>"));
         assert!(xml.contains("<D:getcontentlength>5</D:getcontentlength>"));
         assert!(!xml.contains("<D:collection/>"));
+    }
+
+    #[test]
+    fn update_request_accepts_partial_camel_case_flags() {
+        let webdav_only: UpdateRequest = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(webdav_only.enabled, Some(true));
+        assert_eq!(webdav_only.smb_enabled, None);
+
+        let smb_only: UpdateRequest = serde_json::from_str(r#"{"smbEnabled":true}"#).unwrap();
+        assert_eq!(smb_only.enabled, None);
+        assert_eq!(smb_only.smb_enabled, Some(true));
+
+        let both: UpdateRequest =
+            serde_json::from_str(r#"{"enabled":false,"smbEnabled":true}"#).unwrap();
+        assert_eq!(both.enabled, Some(false));
+        assert_eq!(both.smb_enabled, Some(true));
+
+        assert!(serde_json::from_str::<UpdateRequest>(r#"{"unknown":true}"#).is_err());
+        assert!(
+            serde_json::from_str::<SetSmbPasswordRequest>(
+                r#"{"password":"correct horse battery"}"#
+            )
+            .is_ok()
+        );
     }
 }

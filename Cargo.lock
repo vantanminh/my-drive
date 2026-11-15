@@ -1090,6 +1090,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "md4"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da5ac363534dce5fabf69949225e174fbf111a498bf0ff794c8ea1fba9f3dda"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1136,6 +1145,7 @@ dependencies = [
  "fs2",
  "http-body-util",
  "httpdate",
+ "md4",
  "ort",
  "rand_core 0.6.4",
  "reqwest",

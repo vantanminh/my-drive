@@ -16,6 +16,7 @@ mod media_admin;
 mod media_indexer;
 mod network_drive;
 mod shares;
+mod smb_share;
 mod storage;
 mod transfers;
 mod updates;
@@ -93,6 +94,10 @@ pub async fn run() -> anyhow::Result<()> {
         .context("initialize Google Drive encryption key")?;
     let document_preview_url = config.document_preview_url.clone();
     let update_settings = config.update_settings.clone();
+    if let Some(view_dir) = std::env::var_os("SMB_VIEW_DIR").filter(|value| !value.is_empty()) {
+        let _ = smb_share::VIEW_DIR.set(std::path::PathBuf::from(view_dir));
+        tokio::spawn(smb_share::run_worker(pool.clone()));
+    }
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server. Google OAuth material stays
     // only on the sync worker and request state when the feature is configured.
@@ -129,9 +134,9 @@ pub async fn run() -> anyhow::Result<()> {
         listener,
         api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("serve HTTP requests")?;
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("serve HTTP requests")?;
     Ok(())
 }
 

@@ -22,6 +22,7 @@ dotenvy = "0.15"
 fs2 = "0.4"
 http-body-util = "0.1"
 httpdate = "1"
+md4 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std", "api-31"] }
 serde = { version = "1", features = ["derive"] }
