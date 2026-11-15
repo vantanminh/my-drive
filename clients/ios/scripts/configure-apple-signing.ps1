@@ -15,14 +15,19 @@
     - Reads non-secret metadata from .mobileprovision (Bundle ID, Team ID, export mode).
     - Uploads IOS_BUILD_CERTIFICATE_BASE64, IOS_P12_PASSWORD,
       IOS_BUILD_PROVISION_PROFILE_BASE64, and IOS_KEYCHAIN_PASSWORD via `gh secret set`.
+    - Optionally configures ASC_KEY_ID, ASC_ISSUER_ID, and ASC_KEY_BASE64 when an
+      App Store Connect AuthKey_*.p8 file and Issuer ID are provided for TestFlight.
 #>
 [CmdletBinding()]
 param(
   [switch]$InitOnly,
   [switch]$ForceInit,
   [switch]$TriggerCI,
+  [switch]$UploadTestFlight,
   [string]$CerPath,
-  [string]$ProfilePath
+  [string]$ProfilePath,
+  [string]$P8Path,
+  [string]$AscIssuerId
 )
 
 Set-StrictMode -Version Latest
@@ -323,12 +328,50 @@ if ($meta) {
   Write-Host "  Expires    : $($meta.Expiration)"
 }
 
+$resolvedP8 = Resolve-SingleInputFile -ExplicitPath $P8Path -SigningDir $signingDir -Pattern 'AuthKey_*.p8' -Label 'App Store Connect API Key (.p8)'
+$issuerFile = Join-Path $signingDir 'asc-issuer-id.txt'
+$resolvedIssuer = if ($AscIssuerId) {
+  $AscIssuerId.Trim()
+} elseif (Test-Path $issuerFile) {
+  ([System.IO.File]::ReadAllText($issuerFile)).Trim()
+} else {
+  ''
+}
+
+$hasTestFlightSecrets = $false
+if ($resolvedP8) {
+  $p8Name = [System.IO.Path]::GetFileName($resolvedP8)
+  if ($p8Name -notmatch '^AuthKey_([A-Za-z0-9]+)\.p8$') {
+    throw "API key filename must match AuthKey_<KEY_ID>.p8 (got: $p8Name)"
+  }
+  $ascKeyId = $Matches[1]
+  if (-not $resolvedIssuer) {
+    throw "Found $p8Name but missing -AscIssuerId (or $issuerFile)."
+  }
+  Write-AsciiNoNewline -Path $issuerFile -Value $resolvedIssuer
+  $p8Base64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($resolvedP8))
+  Set-GitHubSecret -Name 'ASC_KEY_ID' -Value $ascKeyId
+  Set-GitHubSecret -Name 'ASC_ISSUER_ID' -Value $resolvedIssuer
+  Set-GitHubSecret -Name 'ASC_KEY_BASE64' -Value $p8Base64
+  $hasTestFlightSecrets = $true
+  Write-Host "Uploaded TestFlight API key secrets (Key ID: $ascKeyId)."
+} else {
+  $updatedSecrets = @(Get-GitHubSecretNames)
+  $hasTestFlightSecrets = ($updatedSecrets -contains 'ASC_KEY_ID') -and ($updatedSecrets -contains 'ASC_ISSUER_ID') -and ($updatedSecrets -contains 'ASC_KEY_BASE64')
+}
+
 Write-Host ''
 Write-Host 'Current GitHub Actions Secrets:' -ForegroundColor Green
 & gh secret list
 
 if ($TriggerCI) {
   Write-Host ''
-  Write-Host 'Triggering iOS Client (Expo) workflow...'
-  & gh workflow run ios-client.yml
+  $shouldUploadTf = $UploadTestFlight -or ($hasTestFlightSecrets -and $meta -and $meta.Method -eq 'app-store-connect')
+  if ($shouldUploadTf) {
+    Write-Host 'Triggering iOS Client (Expo) workflow with upload_testflight=true...'
+    & gh workflow run ios-client.yml -f upload_testflight=true
+  } else {
+    Write-Host 'Triggering iOS Client (Expo) workflow...'
+    & gh workflow run ios-client.yml
+  }
 }
