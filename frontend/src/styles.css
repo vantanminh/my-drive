@@ -303,11 +303,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .security-session-list { display: grid; gap: 8px; margin-top: 10px; }
 .security-session { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 11px; background: #fbfcfb; border: 1px solid #e9efeb; border-radius: 8px; }
 .security-session-main { min-width: 0; }
-.security-session-name { display: flex; min-width: 0; align-items: center; gap: 7px; color: #334640; }
+.security-session-name { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; color: #334640; }
 .security-session-name strong { overflow: hidden; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .security-session-device { display: grid; width: 25px; height: 25px; flex: 0 0 25px; place-items: center; color: #5a8069; background: #edf4ef; border-radius: 6px; }
 .security-current-badge { flex: 0 0 auto; padding: 3px 6px; color: #347250; background: #e8f3eb; border-radius: 20px; font-size: 8px; font-weight: 650; }
-.security-session-details { display: grid; gap: 4px; margin: 8px 0 0 32px; color: #84908e; font-size: 8px; line-height: 1.4; }
+.security-client-badge { flex: 0 0 auto; padding: 2px 6px; color: #475f66; background: #edf2f4; border-radius: 20px; font-size: 8px; font-weight: 600; }
+.security-session-details { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 8px 0 0 32px; color: #84908e; font-size: 8px; line-height: 1.4; }
 .security-session-details span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 .security-session-revoke { min-height: 31px; padding: 0 9px; font-size: 9px; white-space: nowrap; }
 .security-session-empty { display: flex; min-height: 80px; align-items: center; justify-content: center; gap: 8px; margin-top: 10px; padding: 14px; color: #84918d; background: #f8faf9; border: 1px dashed #dfe8e3; border-radius: 8px; font-size: 10px; text-align: center; }

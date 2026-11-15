@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AppState } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import * as Network from 'expo-network';
 
 import { clearSessionCookies } from '../../modules/mydrive-media-sync/src';
@@ -68,6 +68,12 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const MOBILE_DEVICE_LABEL =
+  Platform.OS === 'ios'
+    ? 'MyDrive iPhone / iPad'
+    : Platform.OS === 'android'
+      ? 'MyDrive Android'
+      : 'MyDrive Mobile';
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [bootstrapping, setBootstrapping] = useState(true);
@@ -149,6 +155,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           baseUrl: primaryBaseUrl,
           csrfToken: csrf,
           sessionToken: null,
+          deviceLabel: MOBILE_DEVICE_LABEL,
           onCsrfUpdate: handleCsrfUpdate,
         });
         const issued = await primaryClient.issueMobileSessionToken();
@@ -310,6 +317,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       baseUrl: resolvedBase,
       csrfToken,
       sessionToken,
+      deviceLabel: MOBILE_DEVICE_LABEL,
       onCsrfUpdate: handleCsrfUpdate,
       onUnauthorized: handleUnauthorized,
       onTransportError: handleTransportError,

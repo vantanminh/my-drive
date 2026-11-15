@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -7,7 +8,7 @@ use std::{
 use argon2::{Argon2, PasswordVerifier, password_hash::PasswordHash};
 use axum::{
     Json,
-    extract::{FromRequestParts, Path, State},
+    extract::{ConnectInfo, FromRequestParts, Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, RETRY_AFTER, SET_COOKIE},
@@ -193,6 +194,10 @@ struct BrowserSessionResponse {
     last_seen_at: Option<chrono::DateTime<Utc>>,
     expires_at: chrono::DateTime<Utc>,
     is_current: bool,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    client_type: String,
+    device_label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -213,11 +218,149 @@ struct LoginResponse {
 
 const MOBILE_SESSION_PREFIX: &str = "mds_";
 
+pub(crate) struct OptionalPeerIp(Option<IpAddr>);
+
+impl<S> FromRequestParts<S> for OptionalPeerIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
+        Ok(Self(ip))
+    }
+}
+
 fn is_mobile_client(headers: &HeaderMap) -> bool {
     headers
         .get("x-mydrive-client")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("mobile"))
+}
+
+fn is_trusted_proxy_ip(ip: IpAddr) -> bool {
+    if ip.is_loopback() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00 || v6.is_unicast_link_local(),
+    }
+}
+
+fn parse_forwarded_ip(headers: &HeaderMap) -> Option<String> {
+    for name in ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"] {
+        let Some(raw) = headers.get(name).and_then(|value| value.to_str().ok()) else {
+            continue;
+        };
+        let candidate = raw.split(',').next().map(str::trim).unwrap_or("");
+        if let Ok(ip) = candidate.parse::<IpAddr>() {
+            return Some(ip.to_string());
+        }
+    }
+    None
+}
+
+fn extract_client_ip(headers: &HeaderMap, peer_ip: Option<IpAddr>) -> Option<String> {
+    match peer_ip {
+        Some(ip) if !is_trusted_proxy_ip(ip) => Some(ip.to_string()),
+        _ => parse_forwarded_ip(headers).or_else(|| peer_ip.map(|ip| ip.to_string())),
+    }
+}
+
+fn sanitize_header_text(raw: &str, max_chars: usize) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(max_chars)
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| sanitize_header_text(raw, 255))
+}
+
+fn extract_client_type(headers: &HeaderMap, is_bearer: bool) -> &'static str {
+    if is_bearer || is_mobile_client(headers) {
+        "mobile"
+    } else {
+        "web"
+    }
+}
+
+fn detect_device_label(headers: &HeaderMap, client_type: &str, user_agent: Option<&str>) -> String {
+    if let Some(hint) = headers
+        .get("x-mydrive-device")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| sanitize_header_text(raw, 80))
+    {
+        return hint;
+    }
+
+    let ua = user_agent.unwrap_or("");
+    let os = if ua.contains("iPhone") {
+        Some("iPhone")
+    } else if ua.contains("iPad") {
+        Some("iPad")
+    } else if ua.contains("Android") {
+        Some("Android")
+    } else if ua.contains("Windows") {
+        Some("Windows")
+    } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+        Some("macOS")
+    } else if ua.contains("Linux") {
+        Some("Linux")
+    } else if ua.contains("CFNetwork") || ua.contains("Darwin") {
+        Some("iOS")
+    } else {
+        None
+    };
+
+    if client_type == "mobile" {
+        return match os {
+            Some("iPhone") => "iPhone (Mobile App)".to_owned(),
+            Some("iPad") => "iPad (Mobile App)".to_owned(),
+            Some("Android") => "Android (Mobile App)".to_owned(),
+            Some("iOS") => "iOS App".to_owned(),
+            _ => "MyDrive Mobile App".to_owned(),
+        };
+    }
+
+    let browser = if ua.contains("Edg/") || ua.contains("EdgiOS/") {
+        Some("Edge")
+    } else if ua.contains("OPR/") || ua.contains("Opera") {
+        Some("Opera")
+    } else if ua.contains("Firefox/") || ua.contains("FxiOS/") {
+        Some("Firefox")
+    } else if ua.contains("Chrome/") || ua.contains("CriOS/") {
+        Some("Chrome")
+    } else if ua.contains("Safari/") && !ua.contains("Chromium") {
+        Some("Safari")
+    } else if ua.contains("curl/") {
+        Some("curl")
+    } else {
+        None
+    };
+
+    match (browser, os) {
+        (Some(browser), Some(os)) => format!("{browser} on {os}"),
+        (Some(browser), None) => browser.to_owned(),
+        (None, Some(os)) => format!("Browser on {os}"),
+        (None, None) => "Web Browser".to_owned(),
+    }
 }
 
 #[derive(Serialize)]
@@ -227,6 +370,7 @@ struct ErrorResponse {
 
 pub async fn login(
     State(state): State<AppState>,
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Response {
@@ -341,14 +485,23 @@ pub async fn login(
     if account_password.as_deref() != Some(user.password_hash.as_str()) {
         return api_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
     }
+    let client_ip = extract_client_ip(&headers, peer_ip);
+    let user_agent = extract_user_agent(&headers);
+    let client_type = extract_client_type(&headers, false);
+    let device_label = detect_device_label(&headers, client_type, user_agent.as_deref());
     let insert_session = sqlx::query(
-        "INSERT INTO sessions (id, user_id, token_digest, csrf_token_digest, expires_at) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO sessions (id, user_id, token_digest, csrf_token_digest, expires_at, ip_address, user_agent, client_type, device_label) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(session_id)
     .bind(user.id)
     .bind(session_digest)
     .bind(csrf_digest)
     .bind(expires_at)
+    .bind(client_ip)
+    .bind(user_agent)
+    .bind(client_type)
+    .bind(device_label)
     .execute(&mut *transaction)
     .await;
     if let Err(error) = insert_session {
@@ -411,6 +564,7 @@ struct MobileTokenResponse {
 
 pub async fn issue_mobile_token(
     State(state): State<AppState>,
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
     user: AuthenticatedUser,
     headers: HeaderMap,
 ) -> Response {
@@ -428,13 +582,25 @@ pub async fn issue_mobile_token(
         }
     };
     let session_digest = Sha256::digest(&session_raw).to_vec();
+    let client_ip = extract_client_ip(&headers, peer_ip);
+    let user_agent = extract_user_agent(&headers);
+    let device_label = detect_device_label(&headers, "mobile", user_agent.as_deref());
     let updated = sqlx::query(
-        "UPDATE sessions SET token_digest = $1, last_seen_at = now() \
+        "UPDATE sessions \
+            SET token_digest = $1, \
+                last_seen_at = now(), \
+                client_type = 'mobile', \
+                ip_address = COALESCE($4, ip_address), \
+                user_agent = COALESCE($5, user_agent), \
+                device_label = $6 \
           WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL AND expires_at > now()",
     )
     .bind(session_digest)
     .bind(user.session_id)
     .bind(user.id)
+    .bind(client_ip)
+    .bind(user_agent)
+    .bind(device_label)
     .execute(&state.pool)
     .await;
 
@@ -481,7 +647,8 @@ pub async fn me(State(_state): State<AppState>, user: AuthenticatedUser) -> Resp
 
 pub async fn list_sessions(State(state): State<AppState>, user: AuthenticatedUser) -> Response {
     let sessions = sqlx::query_as::<_, BrowserSessionResponse>(
-        "SELECT id, created_at, last_seen_at, expires_at, (id = $2) AS is_current \
+        "SELECT id, created_at, last_seen_at, expires_at, (id = $2) AS is_current, \
+                ip_address, user_agent, client_type, device_label \
            FROM sessions \
           WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now() \
           ORDER BY (id = $2) DESC, COALESCE(last_seen_at, created_at) DESC, created_at DESC",
@@ -853,6 +1020,8 @@ async fn authenticate_session_token(
     token: &str,
     path: &str,
     is_bearer_session: bool,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<AuthenticatedUser, (StatusCode, &'static str)> {
     if token.len() != 43 {
         return Err((StatusCode::UNAUTHORIZED, "authentication_required"));
@@ -894,10 +1063,17 @@ async fn authenticate_session_token(
             };
             if should_update_last_seen
                 && let Err(error) = sqlx::query(
-                    "UPDATE sessions SET last_seen_at = now() \
+                    "UPDATE sessions \
+                        SET last_seen_at = now(), \
+                            ip_address = COALESCE($2, ip_address), \
+                            user_agent = COALESCE(user_agent, $3), \
+                            client_type = CASE WHEN $4 THEN 'mobile' ELSE client_type END \
                       WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')",
                 )
                 .bind(user.session_id)
+                .bind(client_ip)
+                .bind(user_agent)
+                .bind(is_bearer_session)
                 .execute(&state.pool)
                 .await
             {
@@ -931,11 +1107,24 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         if let Some(user) = parts.extensions.get::<AuthenticatedUser>() {
             return Ok(user.clone());
         }
+        let peer_ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
+        let client_ip = extract_client_ip(&parts.headers, peer_ip);
+        let user_agent = extract_user_agent(&parts.headers);
         if let Some(token) = bearer_token(&parts.headers) {
             if let Some(session_token) = token.strip_prefix(MOBILE_SESSION_PREFIX) {
-                return authenticate_session_token(state, session_token, parts.uri.path(), true)
-                    .await
-                    .map_err(|(status, code)| api_error(status, code));
+                return authenticate_session_token(
+                    state,
+                    session_token,
+                    parts.uri.path(),
+                    true,
+                    client_ip.as_deref(),
+                    user_agent.as_deref(),
+                )
+                .await
+                .map_err(|(status, code)| api_error(status, code));
             }
             if !token.starts_with("mdb_") {
                 return Err(api_error(
@@ -978,9 +1167,16 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                 "authentication_required",
             ));
         };
-        authenticate_session_token(state, token, parts.uri.path(), false)
-            .await
-            .map_err(|(status, code)| api_error(status, code))
+        authenticate_session_token(
+            state,
+            token,
+            parts.uri.path(),
+            false,
+            client_ip.as_deref(),
+            user_agent.as_deref(),
+        )
+        .await
+        .map_err(|(status, code)| api_error(status, code))
     }
 }
 
@@ -1259,5 +1455,72 @@ mod tests {
         assert!(values[1].contains("__Host-my_drive_csrf=csrf-token"));
         assert!(!values[1].contains("HttpOnly"));
         assert!(values[1].contains("SameSite=Strict"));
+    }
+
+    #[test]
+    fn extract_client_ip_trusts_proxy_headers_only_from_local_proxies() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cf-connecting-ip",
+            HeaderValue::from_static("198.51.100.42"),
+        );
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.9, 10.0.0.1"),
+        );
+
+        let trusted_proxy: IpAddr = "172.18.0.5".parse().unwrap();
+        assert_eq!(
+            extract_client_ip(&headers, Some(trusted_proxy)).as_deref(),
+            Some("198.51.100.42")
+        );
+
+        let direct_public: IpAddr = "203.0.113.77".parse().unwrap();
+        assert_eq!(
+            extract_client_ip(&headers, Some(direct_public)).as_deref(),
+            Some("203.0.113.77")
+        );
+
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(
+            extract_client_ip(&headers, Some(trusted_proxy)).as_deref(),
+            Some("203.0.113.9")
+        );
+    }
+
+    #[test]
+    fn detect_device_label_parses_mobile_and_browser_agents() {
+        let mut mobile_headers = HeaderMap::new();
+        mobile_headers.insert("x-mydrive-client", HeaderValue::from_static("mobile"));
+        mobile_headers.insert(
+            "x-mydrive-device",
+            HeaderValue::from_static("MyDrive iPhone 16 Pro"),
+        );
+        assert_eq!(
+            detect_device_label(&mobile_headers, "mobile", Some("Darwin/24.0")),
+            "MyDrive iPhone 16 Pro"
+        );
+
+        let web_headers = HeaderMap::new();
+        assert_eq!(
+            detect_device_label(
+                &web_headers,
+                "web",
+                Some(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+                )
+            ),
+            "Edge on Windows"
+        );
+        assert_eq!(
+            detect_device_label(
+                &web_headers,
+                "web",
+                Some(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15"
+                )
+            ),
+            "Safari on macOS"
+        );
     }
 }

@@ -46,6 +46,7 @@ export interface MyDriveClientConfig {
   baseUrl: string;
   csrfToken?: string | null;
   sessionToken?: string | null;
+  deviceLabel?: string | null;
   fetchImpl?: FetchLike;
   onCsrfUpdate?: (token: string | null) => void;
   onSessionTokenUpdate?: (token: string | null) => void;
@@ -89,6 +90,7 @@ export class MyDriveClient {
   private baseUrl: string;
   private csrfToken: string | null;
   private sessionToken: string | null;
+  private readonly deviceLabel: string | null;
   private readonly fetchImpl: FetchLike;
   private readonly onCsrfUpdate?: (token: string | null) => void;
   private readonly onSessionTokenUpdate?: (token: string | null) => void;
@@ -99,6 +101,7 @@ export class MyDriveClient {
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.csrfToken = config.csrfToken ?? null;
     this.sessionToken = config.sessionToken ?? null;
+    this.deviceLabel = config.deviceLabel?.trim() || null;
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.onCsrfUpdate = config.onCsrfUpdate;
     this.onSessionTokenUpdate = config.onSessionTokenUpdate;
@@ -251,11 +254,15 @@ export class MyDriveClient {
   }
 
   async login(email: string, password: string): Promise<LoginResponse> {
+    const extraHeaders: Record<string, string> = { 'X-MyDrive-Client': 'mobile' };
+    if (this.deviceLabel) {
+      extraHeaders['X-MyDrive-Device'] = this.deviceLabel;
+    }
     const result = await this.requestJson<LoginResponse>(
       'POST',
       '/api/auth/login',
       { email: email.trim(), password },
-      { 'X-MyDrive-Client': 'mobile' },
+      extraHeaders,
       true,
     );
     this.setCsrfToken(result.csrf_token);
@@ -270,11 +277,15 @@ export class MyDriveClient {
   }
 
   async issueMobileSessionToken(): Promise<string> {
+    const extraHeaders: Record<string, string> = { 'X-MyDrive-Client': 'mobile' };
+    if (this.deviceLabel) {
+      extraHeaders['X-MyDrive-Device'] = this.deviceLabel;
+    }
     const res = await this.requestJson<{ session_token: string }>(
       'POST',
       '/api/auth/mobile-token',
       undefined,
-      { 'X-MyDrive-Client': 'mobile' },
+      extraHeaders,
       true,
     );
     this.setSessionToken(res.session_token);
@@ -323,6 +334,10 @@ export class MyDriveClient {
 
   async listSessions(): Promise<BrowserSession[]> {
     return this.requestJson<BrowserSession[]>('GET', '/api/auth/sessions');
+  }
+
+  async revokeSession(sessionId: string): Promise<void> {
+    await this.requestJson<void>('DELETE', `/api/auth/sessions/${encodeURIComponent(sessionId)}`);
   }
 
   async revokeOtherSessions(): Promise<void> {

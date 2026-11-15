@@ -11,6 +11,10 @@ export type BrowserSession = {
   last_seen_at: string | null;
   expires_at: string;
   is_current: boolean;
+  ip_address?: string | null;
+  user_agent?: string | null;
+  client_type?: 'web' | 'mobile' | string;
+  device_label?: string | null;
 };
 
 export type BackupDevice = {

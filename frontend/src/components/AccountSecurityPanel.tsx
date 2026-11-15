@@ -173,32 +173,45 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
             <div className="security-session-empty">Sessions could not be loaded. Try refreshing the list.</div>
           ) : sessions?.length ? (
             <div className="security-session-list">
-              {sessions.map((session) => (
-                <article className="security-session" key={session.id}>
-                  <div className="security-session-main">
-                    <div className="security-session-name">
-                      <span className="security-session-device">{session.is_current ? <Monitor size={16} /> : <Smartphone size={16} />}</span>
-                      <strong>{session.is_current ? 'This device' : 'Browser session'}</strong>
-                      {session.is_current ? <span className="security-current-badge">Current</span> : null}
+              {sessions.map((session) => {
+                const isMobile = session.client_type === 'mobile';
+                const label = session.device_label?.trim()
+                  || (isMobile
+                    ? 'MyDrive Mobile App'
+                    : session.is_current
+                      ? 'This browser'
+                      : 'Web Browser');
+                return (
+                  <article className="security-session" key={session.id}>
+                    <div className="security-session-main">
+                      <div className="security-session-name">
+                        <span className="security-session-device">
+                          {isMobile ? <Smartphone size={16} /> : <Monitor size={16} />}
+                        </span>
+                        <strong title={session.user_agent ?? label}>{label}</strong>
+                        {session.is_current ? <span className="security-current-badge">Current</span> : null}
+                        <span className="security-client-badge">{isMobile ? 'Mobile App' : 'Web'}</span>
+                      </div>
+                      <div className="security-session-details">
+                        <span><Clock3 size={13} /> Last active {formatSessionDate(session.last_seen_at ?? session.created_at)}</span>
+                        {session.ip_address ? <span>IP {session.ip_address}</span> : null}
+                        <span>Signed in {formatSessionDate(session.created_at)}</span>
+                        <span>Expires {formatSessionDate(session.expires_at)}</span>
+                      </div>
                     </div>
-                    <div className="security-session-details">
-                      <span><Clock3 size={13} /> Last active {formatSessionDate(session.last_seen_at ?? session.created_at)}</span>
-                      <span>Signed in {formatSessionDate(session.created_at)}</span>
-                      <span>Expires {formatSessionDate(session.expires_at)}</span>
-                    </div>
-                  </div>
-                  {!session.is_current ? (
-                    <button
-                      className="button button-quiet-danger security-session-revoke"
-                      type="button"
-                      disabled={busySessionId !== null}
-                      onClick={() => void revokeSession(session)}
-                    >
-                      <LogOut size={14} /> {busySessionId === session.id ? 'Signing out…' : 'Sign out'}
-                    </button>
-                  ) : null}
-                </article>
-              ))}
+                    {!session.is_current ? (
+                      <button
+                        className="button button-quiet-danger security-session-revoke"
+                        type="button"
+                        disabled={busySessionId !== null}
+                        onClick={() => void revokeSession(session)}
+                      >
+                        <LogOut size={14} /> {busySessionId === session.id ? 'Signing out…' : 'Sign out'}
+                      </button>
+                    ) : null}
+                  </article>
+                );
+              })}
             </div>
           ) : (
             <div className="security-session-empty">No active sessions were found.</div>

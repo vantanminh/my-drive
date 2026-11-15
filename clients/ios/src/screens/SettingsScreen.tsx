@@ -118,6 +118,35 @@ export function SettingsScreen() {
     ]);
   };
 
+  const confirmRevokeSession = (session: BrowserSession) => {
+    if (!client || session.is_current) return;
+    const title =
+      session.device_label?.trim() ||
+      (session.client_type === 'mobile' ? 'Mobile App' : 'Web Browser');
+    Alert.alert(
+      'Revoke Session?',
+      `Sign out "${title}"${session.ip_address ? ` (${session.ip_address})` : ''}? It will need to sign in again.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign Out',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await client.revokeSession(session.id);
+                setSessions((prev) => prev.filter((item) => item.id !== session.id));
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              } catch (err) {
+                Alert.alert('Failed', err instanceof Error ? err.message : String(err));
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
   const confirmSignOutOtherSessions = () => {
     if (!client) return;
     Alert.alert(
@@ -480,13 +509,73 @@ export function SettingsScreen() {
           />
         </Card>
 
-        <SectionTitle title="Security & Backup Devices" />
+        <SectionTitle title="Security & Active Sessions" />
         <Card style={styles.serverCard}>
-          <KeyValueRow
-            label="Active Sessions"
-            value={`${sessions.length}`}
-            last={devices.length === 0 && sessions.length <= 1}
-          />
+          <View style={styles.sessionHeaderRow}>
+            <Text style={styles.deviceHeader}>Active Sessions ({sessions.length})</Text>
+            <Pressable
+              onPress={() => void loadStorage()}
+              hitSlop={8}
+              style={styles.lanRefreshBtn}
+            >
+              <Ionicons name="refresh-outline" size={14} color={colors.accent} />
+              <Text style={styles.lanRefreshText}>Refresh</Text>
+            </Pressable>
+          </View>
+          {sessions.length > 0 ? (
+            <View style={styles.sessionList}>
+              {sessions.map((sess) => {
+                const isMobile = sess.client_type === 'mobile';
+                const label =
+                  sess.device_label?.trim() ||
+                  (isMobile ? 'MyDrive Mobile App' : 'Web Browser');
+                return (
+                  <View key={sess.id} style={styles.sessionRow}>
+                    <View style={styles.sessionIconWrap}>
+                      <Ionicons
+                        name={isMobile ? 'phone-portrait-outline' : 'desktop-outline'}
+                        size={17}
+                        color={colors.accent}
+                      />
+                    </View>
+                    <View style={styles.flex}>
+                      <View style={styles.sessionTitleRow}>
+                        <Text style={styles.deviceName} numberOfLines={1}>
+                          {label}
+                        </Text>
+                        {sess.is_current ? (
+                          <StatusBadge tone="accent" label="Current" />
+                        ) : null}
+                        <StatusBadge
+                          tone="neutral"
+                          label={isMobile ? 'Mobile' : 'Web'}
+                        />
+                      </View>
+                      <Text style={styles.deviceMeta}>
+                        {sess.ip_address ? `IP ${sess.ip_address} · ` : ''}
+                        Last active {formatShortDate(sess.last_seen_at ?? sess.created_at)}
+                      </Text>
+                      <Text style={styles.deviceMeta}>
+                        Signed in {formatShortDate(sess.created_at)} · Expires{' '}
+                        {formatShortDate(sess.expires_at)}
+                      </Text>
+                    </View>
+                    {!sess.is_current ? (
+                      <Pressable
+                        onPress={() => confirmRevokeSession(sess)}
+                        hitSlop={8}
+                        style={styles.revokeBtn}
+                      >
+                        <Text style={styles.revokeBtnText}>Sign Out</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <Text style={styles.deviceMeta}>No active sessions found.</Text>
+          )}
           {sessions.length > 1 ? (
             <AppButton
               title="Sign Out Other Sessions"
@@ -786,5 +875,39 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     color: colors.danger,
+  },
+  sessionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  sessionList: {
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  sessionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    paddingTop: spacing.xs + 2,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+  },
+  sessionIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    backgroundColor: colors.surfaceSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  sessionTitleRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 2,
   },
 });
