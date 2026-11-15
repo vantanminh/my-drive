@@ -597,6 +597,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let storage = LocalStorage::initialize(&config(temp.path().to_path_buf(), false)).unwrap();
         let external = tempfile::tempdir().unwrap();
+        fs::remove_dir_all(temp.path().join(".secrets")).unwrap();
         std::os::unix::fs::symlink(external.path(), temp.path().join(".secrets")).unwrap();
         assert!(storage.google_drive_token_key().is_err());
         assert!(!external.path().join("google-drive-token.key").exists());
