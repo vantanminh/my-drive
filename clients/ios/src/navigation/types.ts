@@ -1,8 +1,9 @@
-import type { Album, Entry, MediaItem } from '../types/mydrive';
+import type { Album, Entry, FaceCluster, MediaItem } from '../types/mydrive';
 
 export type MainTabParamList = {
   Photos: undefined;
   Files: undefined;
+  Shared: undefined;
   Sync: undefined;
   Settings: undefined;
 };
@@ -20,6 +21,11 @@ export type RootStackParamList = {
   AlbumDetail: {
     album: Album;
   };
+  PersonDetail: {
+    cluster: FaceCluster;
+  };
+  NasStorage: undefined;
+  Trash: undefined;
   ChangePassword: {
     required?: boolean;
   } | undefined;

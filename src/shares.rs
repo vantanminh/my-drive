@@ -12,7 +12,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
@@ -147,6 +147,26 @@ struct CreateShare {
     max_downloads: Option<u64>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UpdateShare {
+    #[serde(deserialize_with = "deserialize_nullable")]
+    expires_at: Option<Option<DateTime<Utc>>>,
+    #[serde(deserialize_with = "deserialize_nullable")]
+    password: Option<Option<String>>,
+    allow_download: Option<bool>,
+    #[serde(deserialize_with = "deserialize_nullable")]
+    max_downloads: Option<Option<u64>>,
+}
+
+fn deserialize_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
 #[derive(Serialize)]
 struct CreatedShare {
     id: Uuid,
@@ -277,6 +297,11 @@ pub(crate) fn router_at(prefix: &str) -> Router<AppState> {
     let p = |path: &str| format!("{prefix}{}", path.strip_prefix("/api").unwrap());
     Router::new()
         .route(&p("/api/shares"), get(list_shares).post(create_share))
+        .route(&p("/api/shares/cleanup"), post(cleanup_shares))
+        .route(
+            &p("/api/shares/{id}"),
+            axum::routing::patch(update_share).delete(delete_share),
+        )
         .route(&p("/api/shares/{id}/revoke"), post(revoke_share))
         .route(&p("/api/public/shares/{token}"), get(public_share))
         .route(&p("/api/public/shares/{token}/unlock"), post(unlock_share))
@@ -502,6 +527,223 @@ async fn revoke_share(
     .map_err(map_database_error)?;
     transaction.commit().await.map_err(map_database_error)?;
     Ok(no_store(StatusCode::NO_CONTENT.into_response()))
+}
+
+#[derive(FromRow)]
+struct EditableShareRow {
+    subject_id: Option<Uuid>,
+    expires_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+    password_hash: Option<String>,
+    allow_download: bool,
+    max_downloads: Option<i64>,
+}
+
+async fn update_share(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<UpdateShare>,
+) -> Result<Response, ShareError> {
+    drive::require_request_csrf(&headers, &user, state.auth_settings)?;
+    if let Some(Some(expires_at)) = request.expires_at
+        && expires_at <= Utc::now()
+    {
+        return Err(ShareError::BadRequest);
+    }
+    if let Some(Some(password)) = request.password.as_ref()
+        && (password.len() < PASSWORD_MIN_BYTES || password.len() > PASSWORD_MAX_BYTES)
+    {
+        return Err(ShareError::BadRequest);
+    }
+    let next_max_downloads = match request.max_downloads {
+        Some(Some(limit)) => {
+            let value = i64::try_from(limit).map_err(|_| ShareError::BadRequest)?;
+            if value <= 0 {
+                return Err(ShareError::BadRequest);
+            }
+            Some(Some(value))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+
+    let next_password_hash = match request.password.as_ref() {
+        Some(Some(password)) => {
+            let password = password.clone();
+            let hashed = tokio::task::spawn_blocking(move || auth::password_hash(&password))
+                .await
+                .map_err(|_| ShareError::Crypto)?
+                .map_err(|_| ShareError::Crypto)?;
+            Some(Some(hashed))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+
+    let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
+    let existing = sqlx::query_as::<_, EditableShareRow>(
+        "SELECT COALESCE(resource_id, album_id) AS subject_id, \
+                expires_at, revoked_at, password_hash, allow_download, max_downloads \
+           FROM shares \
+          WHERE id = $1 AND owner_id = $2 \
+          FOR UPDATE",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(ShareError::NotFound)?;
+
+    if existing.revoked_at.is_some() {
+        return Err(ShareError::Conflict);
+    }
+
+    let expires_at = match request.expires_at {
+        Some(value) => value,
+        None => existing.expires_at,
+    };
+    let password_hash = match next_password_hash {
+        Some(value) => value,
+        None => existing.password_hash,
+    };
+    let allow_download = request.allow_download.unwrap_or(existing.allow_download);
+    let max_downloads = match next_max_downloads {
+        Some(value) => value,
+        None => existing.max_downloads,
+    };
+
+    let password_changed = request.password.is_some();
+    sqlx::query(
+        "UPDATE shares \
+            SET expires_at = $3, \
+                password_hash = $4, \
+                allow_download = $5, \
+                max_downloads = $6, \
+                failed_password_attempts = CASE WHEN $7 THEN 0 ELSE failed_password_attempts END, \
+                password_locked_until = CASE WHEN $7 THEN NULL ELSE password_locked_until END \
+          WHERE id = $1 AND owner_id = $2",
+    )
+    .bind(id)
+    .bind(user.id)
+    .bind(expires_at)
+    .bind(password_hash.as_deref())
+    .bind(allow_download)
+    .bind(max_downloads)
+    .bind(password_changed)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    if password_changed || (existing.allow_download && !allow_download) {
+        sqlx::query("DELETE FROM share_access_sessions WHERE share_id = $1")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+    }
+
+    sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+         VALUES ('share_updated', $1, $2, $3)",
+    )
+    .bind(user.id)
+    .bind(existing.subject_id)
+    .bind(json!({ "share_id": id }))
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    let updated: ShareSummary = sqlx::query_as(
+        "SELECT share.created_by_api_key_id, share.id, share.resource_type, \
+                COALESCE(share.resource_id, share.album_id) AS resource_id, \
+                COALESCE(entry.name, album.name) AS resource_name, \
+                share.expires_at, share.revoked_at, (share.password_hash IS NOT NULL) AS password_protected, \
+                share.allow_download, share.max_downloads, share.download_count, share.created_at, share.last_accessed_at \
+           FROM shares AS share \
+           LEFT JOIN drive_entries AS entry ON entry.id = share.resource_id AND entry.owner_id = share.owner_id \
+           LEFT JOIN albums AS album ON album.id = share.album_id AND album.owner_id = share.owner_id \
+          WHERE share.id = $1 AND share.owner_id = $2",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok(no_store(Json(updated).into_response()))
+}
+
+async fn delete_share(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ShareError> {
+    drive::require_request_csrf(&headers, &user, state.auth_settings)?;
+    let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
+    let subject_id: Option<Uuid> = sqlx::query_scalar(
+        "DELETE FROM shares \
+          WHERE id = $1 AND owner_id = $2 \
+          RETURNING COALESCE(resource_id, album_id)",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    let Some(subject_id) = subject_id else {
+        return Err(ShareError::NotFound);
+    };
+    sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+         VALUES ('share_deleted', $1, $2, $3)",
+    )
+    .bind(user.id)
+    .bind(subject_id)
+    .bind(json!({ "share_id": id }))
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok(no_store(StatusCode::NO_CONTENT.into_response()))
+}
+
+async fn cleanup_shares(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Result<Response, ShareError> {
+    drive::require_request_csrf(&headers, &user, state.auth_settings)?;
+    let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
+    let deleted = sqlx::query(
+        "DELETE FROM shares \
+          WHERE owner_id = $1 \
+            AND (revoked_at IS NOT NULL \
+                 OR (expires_at IS NOT NULL AND expires_at <= now()) \
+                 OR (max_downloads IS NOT NULL AND download_count >= max_downloads))",
+    )
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?
+    .rows_affected();
+    sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+         VALUES ('shares_cleaned_up', $1, NULL, $2)",
+    )
+    .bind(user.id)
+    .bind(json!({ "deleted": deleted }))
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    transaction.commit().await.map_err(map_database_error)?;
+    Ok(no_store(
+        Json(json!({ "deleted": deleted })).into_response(),
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -1266,5 +1508,21 @@ mod tests {
         assert!(page_values(Some(0), None).is_err());
         assert!(page_values(Some(MAX_PAGE_SIZE + 1), None).is_err());
         assert!(page_values(None, Some(-1)).is_err());
+    }
+
+    #[test]
+    fn update_share_distinguishes_omitted_and_null_fields() {
+        let partial: UpdateShare = serde_json::from_str(r#"{"allow_download":false}"#).unwrap();
+        assert!(partial.expires_at.is_none());
+        assert!(partial.password.is_none());
+        assert!(partial.max_downloads.is_none());
+        assert_eq!(partial.allow_download, Some(false));
+
+        let cleared: UpdateShare =
+            serde_json::from_str(r#"{"expires_at":null,"password":null,"max_downloads":null}"#)
+                .unwrap();
+        assert_eq!(cleared.expires_at, Some(None));
+        assert_eq!(cleared.password, Some(None));
+        assert_eq!(cleared.max_downloads, Some(None));
     }
 }

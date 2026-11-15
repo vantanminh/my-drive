@@ -205,3 +205,109 @@ test('extracts structured API error code, status, and upload offset on 409', asy
   await assert.rejects(() => client.me(), MyDriveApiError);
   assert.equal(unauthorizedCount, 1);
 });
+
+test('supports NAS storage management, smart share links, trash purge, batch drive ops, and face clusters', async () => {
+  const seenRequests: Array<{ method: string; path: string; body?: unknown }> = [];
+  const client = new MyDriveClient({
+    baseUrl: 'https://nas.test',
+    fetchImpl: async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      const body =
+        typeof init?.body === 'string' && init.body.length > 0
+          ? JSON.parse(init.body)
+          : undefined;
+      seenRequests.push({ method, path: `${url.pathname}${url.search}`, body });
+
+      if (url.pathname === '/api/admin/storage') {
+        return new Response(
+          JSON.stringify({
+            ssd: null,
+            hdd: { total_bytes: 4000, used_bytes: 1000, free_bytes: 3000, percent_used: 25 },
+            same_volume: true,
+            system_used_bytes: 200,
+            library_bytes: 800,
+            trash_count: 2,
+            trash_bytes: 150,
+            by_category: [],
+            largest_files: [],
+            users: [],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.pathname === '/api/shares/share-1' && method === 'PATCH') {
+        return new Response(
+          JSON.stringify({
+            id: 'share-1',
+            resource_type: 'folder',
+            resource_id: 'folder-1',
+            resource_name: 'Docs',
+            expires_at: null,
+            revoked_at: null,
+            password_protected: false,
+            allow_download: false,
+            max_downloads: 10,
+            download_count: 1,
+            created_at: '2026-05-01T00:00:00Z',
+            last_accessed_at: null,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.pathname === '/api/shares/cleanup') {
+        return new Response(JSON.stringify({ deleted: 3 }), { status: 200 });
+      }
+      if (url.pathname === '/api/drive/trash/purge') {
+        return new Response(JSON.stringify({ roots: 2, entries: 4 }), { status: 200 });
+      }
+      if (url.pathname === '/api/drive/batch') {
+        return new Response(
+          JSON.stringify({ action: 'move', count: 2, entry_ids: ['e1', 'e2'] }),
+          { status: 200 },
+        );
+      }
+      if (url.pathname === '/api/faces/cluster-1' && method === 'PATCH') {
+        return new Response(JSON.stringify({ id: 'cluster-1', label: 'Minh' }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    },
+  });
+
+  const srv = await client.getServerStorage();
+  assert.equal(srv.trash_count, 2);
+
+  await client.updateManagedAccount('u-2', { quotaBytes: 2048 });
+  const updatedShare = await client.updateShare('share-1', {
+    allow_download: false,
+    max_downloads: 10,
+    expires_at: null,
+  });
+  assert.equal(updatedShare.allow_download, false);
+  await client.deleteShare('share-1');
+  const cleaned = await client.cleanupShares();
+  assert.equal(cleaned.deleted, 3);
+
+  const purged = await client.purgeTrash({ all: true });
+  assert.equal(purged.entries, 4);
+
+  const batched = await client.batchEntries({
+    action: 'move',
+    ids: ['e1', 'e2'],
+    parent_id: 'folder-9',
+  });
+  assert.equal(batched.count, 2);
+
+  const renamed = await client.renameFaceCluster('cluster-1', 'Minh');
+  assert.equal(renamed.label, 'Minh');
+
+  assert.equal(seenRequests[1]?.method, 'PATCH');
+  assert.equal(seenRequests[1]?.path, '/api/admin/accounts/u-2');
+  assert.deepEqual(seenRequests[2]?.body, {
+    allow_download: false,
+    max_downloads: 10,
+    expires_at: null,
+  });
+  assert.equal(seenRequests[3]?.method, 'DELETE');
+  assert.equal(seenRequests[3]?.path, '/api/shares/share-1');
+});

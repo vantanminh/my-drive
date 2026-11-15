@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -11,6 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 
 import {
@@ -22,29 +24,45 @@ import {
 } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
 import type { RootStackParamList } from '../navigation/types';
-import { formatBytes } from '../services/format';
+import { formatBytes, formatShortDate } from '../services/format';
 import { colors, radius, spacing } from '../theme/tokens';
-import type { AccountStorage } from '../types/mydrive';
+import type {
+  AccountStorage,
+  BackupDevice,
+  BrowserSession,
+  ServerStorage,
+} from '../types/mydrive';
 
 export function SettingsScreen() {
   const { user, serverUrl, capabilities, client, switchServer, logout } = useAuth();
   const rootNav = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [storage, setStorage] = useState<AccountStorage | null>(null);
+  const [serverStorage, setServerStorage] = useState<ServerStorage | null>(null);
+  const [sessions, setSessions] = useState<BrowserSession[]>([]);
+  const [devices, setDevices] = useState<BackupDevice[]>([]);
   const [loadingStorage, setLoadingStorage] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  const canManageServer = user?.role === 'owner' || user?.role === 'admin';
 
   const loadStorage = useCallback(async () => {
     if (!client) return;
     try {
-      const res = await client.getStorage();
-      setStorage(res);
-    } catch {
-      // Non-fatal if storage endpoint is slow.
+      const [acct, srv, sess, devs] = await Promise.all([
+        client.getStorage().catch(() => null),
+        canManageServer ? client.getServerStorage().catch(() => null) : Promise.resolve(null),
+        client.listSessions().catch(() => [] as BrowserSession[]),
+        client.listDevices().catch(() => [] as BackupDevice[]),
+      ]);
+      if (acct) setStorage(acct);
+      setServerStorage(srv);
+      setSessions(sess);
+      setDevices(devs.filter((d) => !d.revoked_at));
     } finally {
       setLoadingStorage(false);
       setRefreshing(false);
     }
-  }, [client]);
+  }, [client, canManageServer]);
 
   useEffect(() => {
     void loadStorage();
@@ -80,11 +98,64 @@ export function SettingsScreen() {
     ]);
   };
 
+  const confirmSignOutOtherSessions = () => {
+    if (!client) return;
+    Alert.alert(
+      'Sign Out Other Sessions?',
+      'All other browser and mobile sessions will be signed out immediately.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign Out Others',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await client.revokeOtherSessions();
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                await loadStorage();
+              } catch (err) {
+                Alert.alert('Failed', err instanceof Error ? err.message : String(err));
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
+  const confirmRevokeDevice = (device: BackupDevice) => {
+    if (!client) return;
+    Alert.alert(
+      'Revoke Backup Device?',
+      `Disconnect "${device.name}" (${device.operating_system})? Existing backed-up files remain on your NAS.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Revoke',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await client.revokeDevice(device.id);
+                setDevices((prev) => prev.filter((d) => d.id !== device.id));
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              } catch (err) {
+                Alert.alert('Failed', err instanceof Error ? err.message : String(err));
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
   const isHttps = serverUrl?.startsWith('https://') ?? false;
   const usedRatio =
     storage && storage.quota_bytes && storage.quota_bytes > 0
       ? Math.min(1, storage.used_bytes / storage.quota_bytes)
       : 0;
+  const primaryVolume = serverStorage?.hdd ?? serverStorage?.ssd ?? null;
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -165,6 +236,58 @@ export function SettingsScreen() {
                   ))}
                 </View>
               ) : null}
+
+              {primaryVolume ? (
+                <View style={styles.volumeSummaryBox}>
+                  <View style={styles.storageHeader}>
+                    <Text style={styles.volumeLabel}>NAS Volume</Text>
+                    <Text style={styles.storageQuota}>
+                      {formatBytes(primaryVolume.used_bytes)} / {formatBytes(primaryVolume.total_bytes)} ({Math.round(primaryVolume.percent_used)}%)
+                    </Text>
+                  </View>
+                  <View style={styles.quotaTrack}>
+                    <View
+                      style={[
+                        styles.quotaFill,
+                        {
+                          width: `${Math.max(2, Math.min(100, Math.round(primaryVolume.percent_used)))}%`,
+                          backgroundColor:
+                            primaryVolume.percent_used >= 90
+                              ? colors.danger
+                              : primaryVolume.percent_used >= 75
+                                ? colors.warning
+                                : colors.accent,
+                        },
+                      ]}
+                    />
+                  </View>
+                </View>
+              ) : null}
+
+              <View style={styles.storageActionRow}>
+                {canManageServer ? (
+                  <AppButton
+                    title="NAS Storage Manager"
+                    icon="hardware-chip-outline"
+                    variant="secondary"
+                    compact
+                    style={styles.flex}
+                    onPress={() => rootNav.navigate('NasStorage')}
+                  />
+                ) : null}
+                <AppButton
+                  title={
+                    storage.trash_count && storage.trash_count > 0
+                      ? `Trash (${storage.trash_count})`
+                      : 'Trash'
+                  }
+                  icon="trash-outline"
+                  variant="subtle"
+                  compact
+                  style={styles.flex}
+                  onPress={() => rootNav.navigate('Trash')}
+                />
+              </View>
             </>
           ) : (
             <Text style={styles.unavailableText}>Storage details unavailable.</Text>
@@ -195,6 +318,50 @@ export function SettingsScreen() {
             onPress={confirmSwitchServer}
             style={styles.switchServerBtn}
           />
+        </Card>
+
+        <SectionTitle title="Security & Backup Devices" />
+        <Card style={styles.serverCard}>
+          <KeyValueRow
+            label="Active Sessions"
+            value={`${sessions.length}`}
+            last={devices.length === 0 && sessions.length <= 1}
+          />
+          {sessions.length > 1 ? (
+            <AppButton
+              title="Sign Out Other Sessions"
+              icon="shield-checkmark-outline"
+              variant="subtle"
+              compact
+              onPress={confirmSignOutOtherSessions}
+              style={styles.switchServerBtn}
+            />
+          ) : null}
+          {devices.length > 0 ? (
+            <View style={styles.deviceList}>
+              <Text style={styles.deviceHeader}>Connected Backup Clients ({devices.length})</Text>
+              {devices.map((dev) => (
+                <View key={dev.id} style={styles.deviceRow}>
+                  <View style={styles.flex}>
+                    <Text style={styles.deviceName} numberOfLines={1}>
+                      {dev.name}
+                    </Text>
+                    <Text style={styles.deviceMeta} numberOfLines={1}>
+                      {dev.operating_system} · {dev.client_name}
+                      {dev.last_active_at ? ` · ${formatShortDate(dev.last_active_at)}` : ''}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={() => confirmRevokeDevice(dev)}
+                    hitSlop={8}
+                    style={styles.revokeBtn}
+                  >
+                    <Text style={styles.revokeBtnText}>Revoke</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          ) : null}
         </Card>
 
         <AppButton
@@ -317,5 +484,62 @@ const styles = StyleSheet.create({
   },
   switchServerBtn: {
     marginTop: spacing.sm,
+  },
+  volumeSummaryBox: {
+    gap: spacing.xs,
+    paddingTop: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+  },
+  volumeLabel: {
+    fontSize: 13.5,
+    fontWeight: '700',
+    color: colors.ink,
+  },
+  storageActionRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  deviceList: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+    gap: spacing.sm,
+  },
+  deviceHeader: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: colors.muted,
+    textTransform: 'uppercase',
+  },
+  deviceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  deviceName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.ink,
+  },
+  deviceMeta: {
+    fontSize: 12,
+    color: colors.muted,
+    marginTop: 1,
+  },
+  revokeBtn: {
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 5,
+    borderRadius: radius.pill,
+    backgroundColor: colors.dangerTint,
+    borderWidth: 1,
+    borderColor: colors.dangerBorder,
+  },
+  revokeBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.danger,
   },
 });

@@ -996,6 +996,8 @@ struct AccountStorage {
     available_bytes: Option<i64>,
     percent_used: Option<f64>,
     unlimited: bool,
+    trash_count: i64,
+    trash_bytes: i64,
     by_category: Vec<CategoryUsage>,
     largest_files: Vec<LargestFile>,
 }
@@ -1035,10 +1037,13 @@ async fn account_storage(
     };
     let categories = categories_for(&state, Some(user.id)).await?;
     let largest_files = largest_files_for(&state, Some(user.id)).await?;
+    let (trash_count, trash_bytes) = trash_usage_for(&state, Some(user.id)).await?;
     Ok(no_store(Json(storage_summary(
         quota_bytes,
         usage.used_bytes,
         usage.reserved_bytes,
+        trash_count,
+        trash_bytes,
         categories,
         largest_files,
     ))))
@@ -1048,6 +1053,8 @@ fn storage_summary(
     quota_bytes: Option<i64>,
     used_bytes: i64,
     reserved_bytes: i64,
+    trash_count: i64,
+    trash_bytes: i64,
     by_category: Vec<CategoryUsage>,
     largest_files: Vec<LargestFile>,
 ) -> AccountStorage {
@@ -1067,6 +1074,8 @@ fn storage_summary(
         available_bytes,
         percent_used,
         unlimited,
+        trash_count,
+        trash_bytes,
         by_category,
         largest_files,
     }
@@ -1157,9 +1166,27 @@ struct ServerStorage {
     same_volume: bool,
     system_used_bytes: u64,
     library_bytes: i64,
+    trash_count: i64,
+    trash_bytes: i64,
     by_category: Vec<CategoryUsage>,
     largest_files: Vec<LargestFile>,
     users: Vec<UserStorage>,
+}
+
+async fn trash_usage_for(
+    state: &AppState,
+    owner_id: Option<Uuid>,
+) -> Result<(i64, i64), LibraryError> {
+    sqlx::query_as::<_, (i64, i64)>(
+        "SELECT COUNT(*)::BIGINT, COALESCE(SUM(size_bytes), 0)::BIGINT \
+           FROM entry_index \
+          WHERE kind = 'file' AND (deleted_at IS NOT NULL OR buried) \
+            AND ($1::uuid IS NULL OR owner_id = $1)",
+    )
+    .bind(owner_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(LibraryError::Database)
 }
 
 #[derive(Serialize)]
@@ -1246,12 +1273,15 @@ async fn server_storage(
             used_bytes: row.used_bytes,
         })
         .collect();
+    let (trash_count, trash_bytes) = trash_usage_for(&state, None).await?;
     Ok(no_store(Json(ServerStorage {
         ssd: ssd.flatten(),
         hdd,
         same_volume,
         system_used_bytes,
         library_bytes,
+        trash_count,
+        trash_bytes,
         by_category: categories_for(&state, None).await?,
         largest_files: largest_files_for(&state, None).await?,
         users,

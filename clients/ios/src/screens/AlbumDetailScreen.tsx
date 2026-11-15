@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { Ionicons } from '@expo/vector-icons';
 
 import { MediaGrid } from '../components/MediaGrid';
+import { ShareLinkModal } from '../components/ShareLinkModal';
 import { Banner, EmptyState } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
 import type { RootStackParamList } from '../navigation/types';
@@ -19,9 +21,21 @@ export function AlbumDetailScreen({ navigation, route }: Props) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
 
   useEffect(() => {
-    navigation.setOptions({ title: album.name });
+    navigation.setOptions({
+      title: album.name,
+      headerRight: () => (
+        <Pressable
+          onPress={() => setShareOpen(true)}
+          hitSlop={8}
+          style={{ paddingHorizontal: 4 }}
+        >
+          <Ionicons name="share-outline" size={22} color={colors.accent} />
+        </Pressable>
+      ),
+    });
   }, [navigation, album.name]);
 
   const loadItems = useCallback(
@@ -89,6 +103,16 @@ export function AlbumDetailScreen({ navigation, route }: Props) {
           }
         />
       )}
+
+      <ShareLinkModal
+        visible={shareOpen}
+        subject={{
+          resourceType: 'album',
+          resourceId: album.id,
+          name: album.name,
+        }}
+        onClose={() => setShareOpen(false)}
+      />
     </View>
   );
 }

@@ -3,13 +3,25 @@ import type {
   Album,
   AlbumItemPage,
   BackupCheckResponse,
+  BackupDevice,
   BackupLinkResponse,
+  BrowserSession,
+  CreateShareInput,
+  CreatedShare,
   Entry,
   EntryDetails,
   EntryPage,
+  FaceCluster,
+  FaceClusterPage,
   LoginResponse,
+  ManagedAccountPage,
+  MediaPage,
   PhotoPage,
   ServerCapabilities,
+  ServerStorage,
+  ShareList,
+  ShareSummary,
+  UpdateShareInput,
   UploadCreated,
   UploadFinalized,
   User,
@@ -230,6 +242,79 @@ export class MyDriveClient {
     return this.requestJson<AccountStorage>('GET', '/api/storage');
   }
 
+  async getServerStorage(): Promise<ServerStorage> {
+    return this.requestJson<ServerStorage>('GET', '/api/admin/storage');
+  }
+
+  async listManagedAccounts(offset = 0, limit = 50): Promise<ManagedAccountPage> {
+    const query = buildQuery({ offset: offset || undefined, limit });
+    return this.requestJson<ManagedAccountPage>('GET', `/api/admin/accounts${query}`);
+  }
+
+  async updateManagedAccount(
+    accountId: string,
+    update: { quotaBytes?: number; disabled?: boolean },
+  ): Promise<void> {
+    await this.requestJson<void>(
+      'PATCH',
+      `/api/admin/accounts/${encodeURIComponent(accountId)}`,
+      update,
+    );
+  }
+
+  async listSessions(): Promise<BrowserSession[]> {
+    return this.requestJson<BrowserSession[]>('GET', '/api/auth/sessions');
+  }
+
+  async revokeOtherSessions(): Promise<void> {
+    await this.requestJson<void>('POST', '/api/auth/sessions/revoke-others');
+  }
+
+  async listDevices(): Promise<BackupDevice[]> {
+    const res = await this.requestJson<{ devices: BackupDevice[] }>('GET', '/api/devices');
+    return res.devices;
+  }
+
+  async revokeDevice(deviceId: string): Promise<void> {
+    await this.requestJson<void>('DELETE', `/api/devices/${encodeURIComponent(deviceId)}`);
+  }
+
+  async listFaces(
+    offset = 0,
+    filter?: { q?: string; named?: boolean; limit?: number },
+  ): Promise<FaceClusterPage> {
+    const query = buildQuery({
+      offset: offset || undefined,
+      limit: filter?.limit ?? 60,
+      q: filter?.q,
+      named: filter?.named != null ? (filter.named ? 'true' : 'false') : undefined,
+    });
+    return this.requestJson<FaceClusterPage>('GET', `/api/faces${query}`);
+  }
+
+  async getFaceCluster(clusterId: string): Promise<FaceCluster> {
+    return this.requestJson<FaceCluster>('GET', `/api/faces/${encodeURIComponent(clusterId)}`);
+  }
+
+  async listFaceMedia(clusterId: string, offset = 0, limit = 80): Promise<MediaPage> {
+    const query = buildQuery({ offset: offset || undefined, limit });
+    return this.requestJson<MediaPage>(
+      'GET',
+      `/api/faces/${encodeURIComponent(clusterId)}/media${query}`,
+    );
+  }
+
+  async renameFaceCluster(
+    clusterId: string,
+    label: string | null,
+  ): Promise<{ id: string; label: string | null }> {
+    return this.requestJson<{ id: string; label: string | null }>(
+      'PATCH',
+      `/api/faces/${encodeURIComponent(clusterId)}`,
+      { label },
+    );
+  }
+
   async listPhotos(cursor?: string | null, limit = 60): Promise<PhotoPage> {
     const query = buildQuery({ cursor: cursor ?? undefined, limit });
     return this.requestJson<PhotoPage>('GET', `/api/photos${query}`);
@@ -306,6 +391,58 @@ export class MyDriveClient {
   async listTrash(offset = 0, limit = 100): Promise<EntryPage> {
     const query = buildQuery({ offset, limit });
     return this.requestJson<EntryPage>('GET', `/api/drive/trash${query}`);
+  }
+
+  async purgeTrash(payload: { ids?: string[]; all?: boolean }): Promise<{
+    roots: number;
+    entries: number;
+  }> {
+    return this.requestJson<{ roots: number; entries: number }>(
+      'POST',
+      '/api/drive/trash/purge',
+      payload,
+    );
+  }
+
+  async batchEntries(payload: {
+    action: 'move' | 'copy' | 'trash';
+    ids: string[];
+    parent_id?: string | null;
+  }): Promise<{ action: string; count: number; entry_ids: string[] }> {
+    return this.requestJson<{ action: string; count: number; entry_ids: string[] }>(
+      'POST',
+      '/api/drive/batch',
+      payload,
+    );
+  }
+
+  async listShares(offset = 0, limit = 50): Promise<ShareList> {
+    const query = buildQuery({ offset: offset || undefined, limit });
+    return this.requestJson<ShareList>('GET', `/api/shares${query}`);
+  }
+
+  async createShare(payload: CreateShareInput): Promise<CreatedShare> {
+    return this.requestJson<CreatedShare>('POST', '/api/shares', payload);
+  }
+
+  async updateShare(shareId: string, payload: UpdateShareInput): Promise<ShareSummary> {
+    return this.requestJson<ShareSummary>(
+      'PATCH',
+      `/api/shares/${encodeURIComponent(shareId)}`,
+      payload,
+    );
+  }
+
+  async revokeShare(shareId: string): Promise<void> {
+    await this.requestJson<void>('POST', `/api/shares/${encodeURIComponent(shareId)}/revoke`);
+  }
+
+  async deleteShare(shareId: string): Promise<void> {
+    await this.requestJson<void>('DELETE', `/api/shares/${encodeURIComponent(shareId)}`);
+  }
+
+  async cleanupShares(): Promise<{ deleted: number }> {
+    return this.requestJson<{ deleted: number }>('POST', '/api/shares/cleanup');
   }
 
   async ensureBackupFolder(path: string): Promise<{ id: string; created: boolean }> {

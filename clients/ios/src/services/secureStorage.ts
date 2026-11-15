@@ -9,7 +9,17 @@ const KEYS = {
   csrfToken: 'mydrive_csrf_token',
   allowHttpForUrl: 'mydrive_allow_http_url',
   syncSettings: 'mydrive_sync_settings',
+  shareUrls: 'mydrive_share_urls_v1',
 } as const;
+
+interface StoredShareUrlRecord {
+  serverUrl: string;
+  shareId: string;
+  url: string;
+  createdAt: string;
+}
+
+const MAX_REMEMBERED_SHARE_URLS = 40;
 
 export interface PersistedSession {
   serverUrl: string | null;
@@ -111,4 +121,82 @@ export async function loadSyncSettings(): Promise<SyncSettings> {
 
 export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
   await SecureStore.setItemAsync(KEYS.syncSettings, JSON.stringify(settings));
+}
+
+async function readAllShareUrlRecords(): Promise<StoredShareUrlRecord[]> {
+  try {
+    const raw = await SecureStore.getItemAsync(KEYS.shareUrls);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is StoredShareUrlRecord =>
+        Boolean(item) &&
+        typeof item.serverUrl === 'string' &&
+        typeof item.shareId === 'string' &&
+        typeof item.url === 'string' &&
+        typeof item.createdAt === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function loadRememberedShareUrls(
+  serverUrl: string,
+): Promise<Record<string, string>> {
+  const normalized = serverUrl.replace(/\/+$/, '');
+  const records = await readAllShareUrlRecords();
+  const map: Record<string, string> = {};
+  for (const record of records) {
+    if (record.serverUrl === normalized) {
+      map[record.shareId] = record.url;
+    }
+  }
+  return map;
+}
+
+export async function rememberShareUrl(
+  serverUrl: string,
+  shareId: string,
+  url: string,
+): Promise<void> {
+  const normalized = serverUrl.replace(/\/+$/, '');
+  const existing = await readAllShareUrlRecords();
+  const filtered = existing.filter(
+    (item) => !(item.serverUrl === normalized && item.shareId === shareId),
+  );
+  const next: StoredShareUrlRecord[] = [
+    {
+      serverUrl: normalized,
+      shareId,
+      url,
+      createdAt: new Date().toISOString(),
+    },
+    ...filtered,
+  ].slice(0, MAX_REMEMBERED_SHARE_URLS);
+  try {
+    await SecureStore.setItemAsync(KEYS.shareUrls, JSON.stringify(next));
+  } catch {
+    // Keychain storage errors must not block sharing flows.
+  }
+}
+
+export async function forgetRememberedShareUrls(
+  serverUrl: string,
+  shareIds: string[],
+): Promise<void> {
+  if (shareIds.length === 0) return;
+  const normalized = serverUrl.replace(/\/+$/, '');
+  const drop = new Set(shareIds);
+  const existing = await readAllShareUrlRecords();
+  const next = existing.filter(
+    (item) => !(item.serverUrl === normalized && drop.has(item.shareId)),
+  );
+  if (next.length === existing.length) return;
+  try {
+    await SecureStore.setItemAsync(KEYS.shareUrls, JSON.stringify(next));
+  } catch {
+    // Ignore non-critical cleanup failure.
+  }
 }

@@ -12,11 +12,15 @@ import { ChangePasswordModal } from '../screens/ChangePasswordModal';
 import { FileViewerScreen } from '../screens/FileViewerScreen';
 import { FilesScreen } from '../screens/FilesScreen';
 import { LoginScreen } from '../screens/LoginScreen';
+import { NasStorageScreen } from '../screens/NasStorageScreen';
+import { PersonDetailScreen } from '../screens/PersonDetailScreen';
 import { PhotoViewerScreen } from '../screens/PhotoViewerScreen';
 import { PhotosScreen } from '../screens/PhotosScreen';
 import { ServerSetupScreen } from '../screens/ServerSetupScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
+import { SharedLinksScreen } from '../screens/SharedLinksScreen';
 import { SyncScreen } from '../screens/SyncScreen';
+import { TrashScreen } from '../screens/TrashScreen';
 import type { MainTabParamList, RootStackParamList } from './types';
 import { colors, spacing } from '../theme/tokens';
 
@@ -54,6 +58,8 @@ function MainTabs() {
             name = focused ? 'images' : 'images-outline';
           } else if (route.name === 'Files') {
             name = focused ? 'folder' : 'folder-outline';
+          } else if (route.name === 'Shared') {
+            name = focused ? 'link' : 'link-outline';
           } else if (route.name === 'Sync') {
             name = focused ? 'cloud-upload' : 'cloud-upload-outline';
           } else if (route.name === 'Settings') {
@@ -65,6 +71,7 @@ function MainTabs() {
     >
       <Tabs.Screen name="Photos" component={PhotosScreen} />
       <Tabs.Screen name="Files" component={FilesScreen} />
+      <Tabs.Screen name="Shared" component={SharedLinksScreen} />
       <Tabs.Screen
         name="Sync"
         component={SyncScreen}
@@ -138,6 +145,21 @@ export function AppNavigator() {
               name="AlbumDetail"
               component={AlbumDetailScreen}
               options={{ title: 'Album', headerBackTitle: 'Photos' }}
+            />
+            <Stack.Screen
+              name="PersonDetail"
+              component={PersonDetailScreen}
+              options={{ title: 'Person', headerBackTitle: 'Photos' }}
+            />
+            <Stack.Screen
+              name="NasStorage"
+              component={NasStorageScreen}
+              options={{ title: 'NAS Storage Manager', headerBackTitle: 'Settings' }}
+            />
+            <Stack.Screen
+              name="Trash"
+              component={TrashScreen}
+              options={{ title: 'Trash', headerBackTitle: 'Back' }}
             />
             <Stack.Screen
               name="ChangePassword"

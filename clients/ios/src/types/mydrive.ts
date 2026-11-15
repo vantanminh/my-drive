@@ -136,6 +136,14 @@ export interface CategoryUsage {
   size_bytes: number;
 }
 
+export interface LargestFile {
+  id: string;
+  name: string;
+  size_bytes: number;
+  category: string;
+  mime_type: string | null;
+}
+
 export interface AccountStorage {
   quota_bytes: number | null;
   used_bytes: number;
@@ -143,7 +151,153 @@ export interface AccountStorage {
   available_bytes: number | null;
   percent_used: number | null;
   unlimited: boolean;
+  trash_count?: number;
+  trash_bytes?: number;
   by_category: CategoryUsage[];
+  largest_files?: LargestFile[];
+}
+
+export interface VolumeStatus {
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  percent_used: number;
+}
+
+export interface UserStorage {
+  id: string;
+  email: string;
+  role: string;
+  quota_bytes: number | null;
+  used_bytes: number;
+  percent_of_library: number;
+  percent_of_hdd: number | null;
+}
+
+export interface ServerStorage {
+  ssd: VolumeStatus | null;
+  hdd: VolumeStatus | null;
+  same_volume: boolean;
+  system_used_bytes: number;
+  library_bytes: number;
+  trash_count?: number;
+  trash_bytes?: number;
+  by_category: CategoryUsage[];
+  largest_files?: LargestFile[];
+  users: UserStorage[];
+}
+
+export interface ManagedAccount {
+  id: string;
+  email: string;
+  quotaBytes: number;
+  usedBytes: number;
+  reservedBytes: number;
+  disabledAt: string | null;
+  createdAt: string;
+}
+
+export interface ManagedAccountPage {
+  accounts: ManagedAccount[];
+  nextOffset: number | null;
+}
+
+export type ShareResourceType = 'file' | 'folder' | 'album';
+
+export interface CreateShareInput {
+  resource_type: ShareResourceType;
+  resource_id: string;
+  expires_at: string | null;
+  password: string | null;
+  allow_download: boolean;
+  max_downloads: number | null;
+}
+
+export interface UpdateShareInput {
+  expires_at?: string | null;
+  password?: string | null;
+  allow_download?: boolean;
+  max_downloads?: number | null;
+}
+
+export interface CreatedShare {
+  id: string;
+  resource_type: ShareResourceType;
+  resource_id: string;
+  share_url: string;
+  expires_at: string | null;
+  password_protected: boolean;
+  allow_download: boolean;
+  max_downloads: number | null;
+}
+
+export interface ShareSummary {
+  created_by_api_key_id?: string | null;
+  id: string;
+  resource_type: ShareResourceType;
+  resource_id: string;
+  resource_name: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  password_protected: boolean;
+  allow_download: boolean;
+  max_downloads: number | null;
+  download_count: number;
+  created_at: string;
+  last_accessed_at: string | null;
+}
+
+export interface ShareList {
+  shares: ShareSummary[];
+  next_offset: number | null;
+}
+
+export interface FaceCluster {
+  id: string;
+  label: string | null;
+  faceCount: number;
+  assetCount: number;
+  representativeFileId: string | null;
+  representativeBoxLeft: number | null;
+  representativeBoxTop: number | null;
+  representativeBoxWidth: number | null;
+  representativeBoxHeight: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FaceClusterPage {
+  clusters: FaceCluster[];
+  limit: number;
+  nextOffset: number | null;
+}
+
+export interface MediaPage {
+  items: MediaItem[];
+  limit: number;
+  next_cursor?: string | null;
+  next_offset?: number | null;
+}
+
+export interface BrowserSession {
+  id: string;
+  created_at: string;
+  last_seen_at: string | null;
+  expires_at: string;
+  is_current: boolean;
+}
+
+export interface BackupDevice {
+  id: string;
+  name: string;
+  client_name: string;
+  operating_system: string;
+  client_version: string;
+  permissions: string[];
+  created_at: string;
+  last_active_at: string | null;
+  last_ip: string | null;
+  revoked_at: string | null;
 }
 
 export interface BackupCheckResponse {

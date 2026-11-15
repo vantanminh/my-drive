@@ -18,6 +18,7 @@ import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
 
 import { downloadToLocalFile } from '../../modules/mydrive-media-sync/src';
+import { ShareLinkModal } from '../components/ShareLinkModal';
 import { AppButton, Banner, Card, KeyValueRow } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
 import type { RootStackParamList } from '../navigation/types';
@@ -62,6 +63,7 @@ export function FileViewerScreen({ navigation, route }: Props) {
   const [textTruncated, setTextTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState(false);
+  const [shareLinkOpen, setShareLinkOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadPreview = useCallback(async () => {
@@ -135,7 +137,7 @@ export function FileViewerScreen({ navigation, route }: Props) {
     return dl.localUri;
   };
 
-  const handleShare = async () => {
+  const sendOriginalFile = async () => {
     if (busyAction) return;
     setBusyAction(true);
     try {
@@ -149,6 +151,21 @@ export function FileViewerScreen({ navigation, route }: Props) {
     } finally {
       setBusyAction(false);
     }
+  };
+
+  const handleShare = () => {
+    if (busyAction) return;
+    Alert.alert(entry.name, 'How would you like to share this file?', [
+      {
+        text: 'Create Public Link',
+        onPress: () => setShareLinkOpen(true),
+      },
+      {
+        text: 'Download & Send File',
+        onPress: () => void sendOriginalFile(),
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const handleQuickLook = async () => {
@@ -201,152 +218,169 @@ export function FileViewerScreen({ navigation, route }: Props) {
 
   if (!client) return null;
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={colors.accent} />
-        <Text style={styles.loadingText}>Loading preview from NAS…</Text>
-      </View>
-    );
-  }
-
-  if (errorMsg) {
-    return (
-      <ScrollView contentContainerStyle={styles.paddedContent}>
-        <Banner
-          tone="danger"
-          icon="alert-circle-outline"
-          title="Could Not Load Inline Preview"
-          message={errorMsg}
-        />
-        <AppButton
-          title="Download & Share File"
-          icon="share-outline"
-          loading={busyAction}
-          onPress={() => void handleShare()}
-        />
-      </ScrollView>
-    );
-  }
-
-  if (kind === 'image') {
-    return (
-      <ScrollView
-        style={styles.darkSurface}
-        contentContainerStyle={styles.imageCenter}
-        maximumZoomScale={4}
-        minimumZoomScale={1}
-        centerContent
-      >
-        <Image
-          source={{ uri: client.previewUrl(entry.id) }}
-          style={{ width, height: height * 0.8 }}
-          contentFit="contain"
-        />
-      </ScrollView>
-    );
-  }
-
-  if (kind === 'video') {
-    return (
-      <ScrollView
-        style={styles.container}
-        contentContainerStyle={styles.paddedContent}
-      >
-        <VideoBody uri={client.previewUrl(entry.id)} width={width - spacing.lg * 2} height={height} />
-        <DetailsCard entry={entry} details={details} />
-      </ScrollView>
-    );
-  }
-
-  if ((kind === 'pdf' || kind === 'office') && localUri) {
-    const readDir = localUri.slice(0, localUri.lastIndexOf('/') + 1);
-    return (
-      <View style={styles.flex}>
-        <WebView
-          source={{ uri: localUri }}
-          allowingReadAccessToURL={readDir}
-          originWhitelist={['*']}
-          style={styles.flex}
-        />
-        <View style={styles.footerBar}>
-          <AppButton
-            title="QuickLook"
-            icon="eye-outline"
-            variant="secondary"
-            compact
-            loading={busyAction}
-            onPress={() => void handleQuickLook()}
-            style={styles.footerBtn}
-          />
-          <AppButton
-            title="Share / Save"
-            icon="share-outline"
-            variant="primary"
-            compact
-            loading={busyAction}
-            onPress={() => void handleShare()}
-            style={styles.footerBtn}
-          />
+  const renderPreview = () => {
+    if (loading) {
+      return (
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={colors.accent} />
+          <Text style={styles.loadingText}>Loading preview from NAS…</Text>
         </View>
-      </View>
-    );
-  }
+      );
+    }
 
-  if (kind === 'text' && textContent !== null) {
+    if (errorMsg) {
+      return (
+        <ScrollView contentContainerStyle={styles.paddedContent}>
+          <Banner
+            tone="danger"
+            icon="alert-circle-outline"
+            title="Could Not Load Inline Preview"
+            message={errorMsg}
+          />
+          <AppButton
+            title="Share / Download File"
+            icon="share-outline"
+            loading={busyAction}
+            onPress={() => handleShare()}
+          />
+        </ScrollView>
+      );
+    }
+
+    if (kind === 'image') {
+      return (
+        <ScrollView
+          style={styles.darkSurface}
+          contentContainerStyle={styles.imageCenter}
+          maximumZoomScale={4}
+          minimumZoomScale={1}
+          centerContent
+        >
+          <Image
+            source={{ uri: client.previewUrl(entry.id) }}
+            style={{ width, height: height * 0.8 }}
+            contentFit="contain"
+          />
+        </ScrollView>
+      );
+    }
+
+    if (kind === 'video') {
+      return (
+        <ScrollView
+          style={styles.container}
+          contentContainerStyle={styles.paddedContent}
+        >
+          <VideoBody uri={client.previewUrl(entry.id)} width={width - spacing.lg * 2} height={height} />
+          <DetailsCard entry={entry} details={details} />
+        </ScrollView>
+      );
+    }
+
+    if ((kind === 'pdf' || kind === 'office') && localUri) {
+      const readDir = localUri.slice(0, localUri.lastIndexOf('/') + 1);
+      return (
+        <View style={styles.flex}>
+          <WebView
+            source={{ uri: localUri }}
+            allowingReadAccessToURL={readDir}
+            originWhitelist={['*']}
+            style={styles.flex}
+          />
+          <View style={styles.footerBar}>
+            <AppButton
+              title="QuickLook"
+              icon="eye-outline"
+              variant="secondary"
+              compact
+              loading={busyAction}
+              onPress={() => void handleQuickLook()}
+              style={styles.footerBtn}
+            />
+            <AppButton
+              title="Share / Link"
+              icon="share-outline"
+              variant="primary"
+              compact
+              loading={busyAction}
+              onPress={() => handleShare()}
+              style={styles.footerBtn}
+            />
+          </View>
+        </View>
+      );
+    }
+
+    if (kind === 'text' && textContent !== null) {
+      return (
+        <ScrollView
+          style={styles.container}
+          contentContainerStyle={styles.paddedContent}
+        >
+          {textTruncated ? (
+            <Banner
+              tone="warning"
+              icon="document-text-outline"
+              message="Showing the first 512 KB. Tap Share to open the complete file."
+            />
+          ) : null}
+          <Card>
+            <Text style={styles.monoText} selectable>
+              {textContent || '(Empty file)'}
+            </Text>
+          </Card>
+          <DetailsCard entry={entry} details={details} />
+        </ScrollView>
+      );
+    }
+
     return (
       <ScrollView
         style={styles.container}
         contentContainerStyle={styles.paddedContent}
       >
-        {textTruncated ? (
-          <Banner
-            tone="warning"
-            icon="document-text-outline"
-            message="Showing the first 512 KB. Tap Share to open the complete file."
-          />
-        ) : null}
-        <Card>
-          <Text style={styles.monoText} selectable>
-            {textContent || '(Empty file)'}
+        <Card style={styles.binaryHero}>
+          <View style={styles.binaryIcon}>
+            <Ionicons name="document-outline" size={36} color={colors.accent} />
+          </View>
+          <Text style={styles.binaryName}>{entry.name}</Text>
+          <Text style={styles.binarySub}>
+            {formatBytes(entry.size_bytes)} • {entry.mime_detected ?? 'Binary File'}
           </Text>
+          <View style={styles.binaryActions}>
+            <AppButton
+              title="Open in QuickLook"
+              icon="eye-outline"
+              loading={busyAction}
+              onPress={() => void handleQuickLook()}
+            />
+            <AppButton
+              title="Share / Public Link"
+              icon="share-outline"
+              variant="secondary"
+              loading={busyAction}
+              onPress={() => handleShare()}
+            />
+          </View>
         </Card>
         <DetailsCard entry={entry} details={details} />
       </ScrollView>
     );
-  }
+  };
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.paddedContent}
-    >
-      <Card style={styles.binaryHero}>
-        <View style={styles.binaryIcon}>
-          <Ionicons name="document-outline" size={36} color={colors.accent} />
-        </View>
-        <Text style={styles.binaryName}>{entry.name}</Text>
-        <Text style={styles.binarySub}>
-          {formatBytes(entry.size_bytes)} • {entry.mime_detected ?? 'Binary File'}
-        </Text>
-        <View style={styles.binaryActions}>
-          <AppButton
-            title="Open in QuickLook"
-            icon="eye-outline"
-            loading={busyAction}
-            onPress={() => void handleQuickLook()}
-          />
-          <AppButton
-            title="Share / Export File"
-            icon="share-outline"
-            variant="secondary"
-            loading={busyAction}
-            onPress={() => void handleShare()}
-          />
-        </View>
-      </Card>
-      <DetailsCard entry={entry} details={details} />
-    </ScrollView>
+    <View style={styles.flex}>
+      {renderPreview()}
+      <ShareLinkModal
+        visible={shareLinkOpen}
+        subject={{
+          resourceType: 'file',
+          resourceId: entry.id,
+          name: entry.name,
+        }}
+        onClose={() => setShareLinkOpen(false)}
+      />
+    </View>
   );
 }
 

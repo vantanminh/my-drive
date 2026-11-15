@@ -21,8 +21,13 @@ import * as Sharing from 'expo-sharing';
 import { Ionicons } from '@expo/vector-icons';
 
 import { downloadToLocalFile } from '../../modules/mydrive-media-sync/src';
+import { FolderPickerModal } from '../components/FolderPickerModal';
+import {
+  ShareLinkModal,
+  type ShareTargetSubject,
+} from '../components/ShareLinkModal';
 import { TextPromptModal } from '../components/TextPromptModal';
-import { Banner, EmptyState } from '../components/UiPrimitives';
+import { AppButton, Banner, EmptyState } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
 import type { RootStackParamList } from '../navigation/types';
 import { uploadLocalDocument } from '../services/fileUpload';
@@ -86,6 +91,10 @@ export function FilesScreen() {
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<Entry | null>(null);
   const [menuTarget, setMenuTarget] = useState<Entry | null>(null);
+  const [shareSubject, setShareSubject] = useState<ShareTargetSubject | null>(null);
+  const [moveTargetIds, setMoveTargetIds] = useState<string[] | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const currentFolderId =
     breadcrumbs.length > 0 ? breadcrumbs[breadcrumbs.length - 1].id : null;
@@ -244,6 +253,63 @@ export function FilesScreen() {
     );
   };
 
+  const toggleSelection = (entryId: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(entryId) ? prev.filter((id) => id !== entryId) : [...prev, entryId],
+    );
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedIds([]);
+  };
+
+  const handleConfirmMove = async (targetFolderId: string | null, folderName: string) => {
+    if (!client || !moveTargetIds || moveTargetIds.length === 0) return;
+    if (moveTargetIds.length === 1) {
+      await client.moveEntry(moveTargetIds[0], targetFolderId);
+    } else {
+      await client.batchEntries({
+        action: 'move',
+        ids: moveTargetIds,
+        parent_id: targetFolderId,
+      });
+    }
+    setMoveTargetIds(null);
+    exitSelectionMode();
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Alert.alert('Moved', `Moved ${moveTargetIds.length} item${moveTargetIds.length === 1 ? '' : 's'} to "${folderName}".`);
+    await loadEntries(0, true);
+  };
+
+  const handleBatchTrash = () => {
+    if (!client || selectedIds.length === 0) return;
+    const count = selectedIds.length;
+    Alert.alert(
+      'Move Selected to Trash?',
+      `Move ${count} selected item${count === 1 ? '' : 's'} to MyDrive Trash?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Move to Trash',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await client.batchEntries({ action: 'trash', ids: selectedIds });
+                exitSelectionMode();
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                await loadEntries(0, true);
+              } catch (err) {
+                Alert.alert('Batch Trash Failed', err instanceof Error ? err.message : String(err));
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
   const cycleSort = () => {
     if (sortBy === 'updated_at') {
       setSortBy('name');
@@ -277,13 +343,42 @@ export function FilesScreen() {
               <Text style={styles.sortText}>{sortLabel}</Text>
             </Pressable>
             <Pressable
+              onPress={() => {
+                if (selectionMode) {
+                  exitSelectionMode();
+                } else {
+                  setSelectionMode(true);
+                }
+              }}
+              style={({ pressed }) => [
+                styles.iconActionBtn,
+                selectionMode && styles.iconActionBtnActive,
+                pressed && styles.pillPressed,
+              ]}
+            >
+              <Ionicons
+                name={selectionMode ? 'close' : 'checkbox-outline'}
+                size={19}
+                color={selectionMode ? colors.white : colors.accent}
+              />
+            </Pressable>
+            <Pressable
+              onPress={() => rootNav.navigate('Trash')}
+              style={({ pressed }) => [
+                styles.iconActionBtn,
+                pressed && styles.pillPressed,
+              ]}
+            >
+              <Ionicons name="trash-outline" size={19} color={colors.accent} />
+            </Pressable>
+            <Pressable
               onPress={() => setNewFolderOpen(true)}
               style={({ pressed }) => [
                 styles.iconActionBtn,
                 pressed && styles.pillPressed,
               ]}
             >
-              <Ionicons name="folder-open-outline" size={20} color={colors.accent} />
+              <Ionicons name="folder-open-outline" size={19} color={colors.accent} />
             </Pressable>
             <Pressable
               onPress={() => void handleUploadFiles()}
@@ -424,18 +519,39 @@ export function FilesScreen() {
           }
           renderItem={({ item }) => {
             const visual = iconForEntry(item);
+            const selected = selectedIds.includes(item.id);
             const subtitle =
               item.kind === 'folder'
                 ? `${item.folder_file_count ?? 0} files • ${formatShortDate(item.updated_at)}`
                 : `${formatBytes(item.size_bytes)} • ${formatShortDate(item.updated_at)}`;
             return (
               <Pressable
-                onPress={() => handleOpenEntry(item)}
+                onPress={() => {
+                  if (selectionMode) {
+                    toggleSelection(item.id);
+                  } else {
+                    handleOpenEntry(item);
+                  }
+                }}
+                onLongPress={() => {
+                  if (!selectionMode) {
+                    setSelectionMode(true);
+                    setSelectedIds([item.id]);
+                  }
+                }}
                 style={({ pressed }) => [
                   styles.entryRow,
+                  selected && styles.entryRowSelected,
                   pressed && styles.entryRowPressed,
                 ]}
               >
+                {selectionMode ? (
+                  <Ionicons
+                    name={selected ? 'checkbox' : 'square-outline'}
+                    size={22}
+                    color={selected ? colors.accent : colors.muted}
+                  />
+                ) : null}
                 <View style={[styles.entryIconBox, { backgroundColor: visual.bg }]}>
                   <Ionicons name={visual.name} size={22} color={visual.tint} />
                 </View>
@@ -447,13 +563,15 @@ export function FilesScreen() {
                     {subtitle}
                   </Text>
                 </View>
-                <Pressable
-                  onPress={() => setMenuTarget(item)}
-                  hitSlop={10}
-                  style={styles.moreBtn}
-                >
-                  <Ionicons name="ellipsis-horizontal" size={18} color={colors.muted} />
-                </Pressable>
+                {!selectionMode ? (
+                  <Pressable
+                    onPress={() => setMenuTarget(item)}
+                    hitSlop={10}
+                    style={styles.moreBtn}
+                  >
+                    <Ionicons name="ellipsis-horizontal" size={18} color={colors.muted} />
+                  </Pressable>
+                ) : null}
               </Pressable>
             );
           }}
@@ -508,15 +626,43 @@ export function FilesScreen() {
                   {menuTarget.kind === 'folder' ? 'Open Folder' : 'View File'}
                 </Text>
               </Pressable>
+              <Pressable
+                onPress={() => {
+                  const target = menuTarget;
+                  setMenuTarget(null);
+                  setShareSubject({
+                    resourceType: target.kind === 'folder' ? 'folder' : 'file',
+                    resourceId: target.id,
+                    name: target.name,
+                  });
+                }}
+                style={styles.menuItem}
+              >
+                <Ionicons name="link-outline" size={20} color={colors.accent} />
+                <Text style={[styles.menuItemText, { color: colors.accent }]}>
+                  Share Public Link
+                </Text>
+              </Pressable>
               {menuTarget.kind === 'file' ? (
                 <Pressable
                   onPress={() => void handleShareEntry(menuTarget)}
                   style={styles.menuItem}
                 >
                   <Ionicons name="share-outline" size={20} color={colors.ink} />
-                  <Text style={styles.menuItemText}>Download & Share</Text>
+                  <Text style={styles.menuItemText}>Download & Send Copy</Text>
                 </Pressable>
               ) : null}
+              <Pressable
+                onPress={() => {
+                  const target = menuTarget;
+                  setMenuTarget(null);
+                  setMoveTargetIds([target.id]);
+                }}
+                style={styles.menuItem}
+              >
+                <Ionicons name="folder-open-outline" size={20} color={colors.ink} />
+                <Text style={styles.menuItemText}>Move to Folder</Text>
+              </Pressable>
               <Pressable
                 onPress={() => {
                   const target = menuTarget;
@@ -541,6 +687,43 @@ export function FilesScreen() {
           ) : null}
         </View>
       </Modal>
+
+      {selectionMode ? (
+        <View style={styles.selectionBar}>
+          <Text style={styles.selectionCount}>{selectedIds.length} selected</Text>
+          <View style={styles.selectionActions}>
+            <AppButton
+              title="Move"
+              icon="folder-open-outline"
+              variant="secondary"
+              compact
+              disabled={selectedIds.length === 0}
+              onPress={() => setMoveTargetIds(selectedIds)}
+            />
+            <AppButton
+              title="Trash"
+              icon="trash-outline"
+              variant="danger"
+              compact
+              disabled={selectedIds.length === 0}
+              onPress={handleBatchTrash}
+            />
+          </View>
+        </View>
+      ) : null}
+
+      <ShareLinkModal
+        visible={Boolean(shareSubject)}
+        subject={shareSubject}
+        onClose={() => setShareSubject(null)}
+      />
+
+      <FolderPickerModal
+        visible={Boolean(moveTargetIds)}
+        excludedIds={moveTargetIds ?? []}
+        onCancel={() => setMoveTargetIds(null)}
+        onConfirm={handleConfirmMove}
+      />
     </SafeAreaView>
   );
 }
@@ -602,6 +785,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accentTint,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  iconActionBtnActive: {
+    backgroundColor: colors.accent,
   },
   uploadBtn: {
     flexDirection: 'row',
@@ -746,5 +932,27 @@ const styles = StyleSheet.create({
     fontSize: 15.5,
     fontWeight: '600',
     color: colors.ink,
+  },
+  entryRowSelected: {
+    backgroundColor: colors.accentTint,
+  },
+  selectionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    backgroundColor: colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+  },
+  selectionCount: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.ink,
+  },
+  selectionActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
   },
 });

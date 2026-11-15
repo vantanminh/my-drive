@@ -23,6 +23,7 @@ import { VideoView, useVideoPlayer } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 
 import { downloadToLocalFile } from '../../modules/mydrive-media-sync/src';
+import { ShareLinkModal } from '../components/ShareLinkModal';
 import { AppButton, KeyValueRow } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
 import type { RootStackParamList } from '../navigation/types';
@@ -140,6 +141,7 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
   const [details, setDetails] = useState<EntryDetails | null>(null);
   const [albumPickerOpen, setAlbumPickerOpen] = useState(false);
   const [albums, setAlbums] = useState<Album[]>([]);
+  const [shareLinkOpen, setShareLinkOpen] = useState(false);
   const listRef = useRef<FlatList<MediaItem>>(null);
 
   const currentItem = items[currentIndex];
@@ -191,7 +193,7 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
     }
   };
 
-  const handleShare = async () => {
+  const sendOriginalFile = async () => {
     if (!client || !currentItem || busyAction) return;
     setBusyAction('Preparing original for Share…');
     try {
@@ -208,6 +210,21 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const handleShare = () => {
+    if (!currentItem || busyAction) return;
+    Alert.alert(currentItem.name, 'How would you like to share this item?', [
+      {
+        text: 'Create Public Link',
+        onPress: () => setShareLinkOpen(true),
+      },
+      {
+        text: 'Send Original File',
+        onPress: () => void sendOriginalFile(),
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   const openAlbumPicker = async () => {
@@ -458,6 +475,20 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
           </View>
         </View>
       </Modal>
+
+      <ShareLinkModal
+        visible={shareLinkOpen && Boolean(currentItem)}
+        subject={
+          currentItem
+            ? {
+                resourceType: 'file',
+                resourceId: currentItem.id,
+                name: currentItem.name,
+              }
+            : null
+        }
+        onClose={() => setShareLinkOpen(false)}
+      />
     </View>
   );
 }

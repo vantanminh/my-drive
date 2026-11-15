@@ -17,15 +17,19 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 
 import { MediaGrid } from '../components/MediaGrid';
+import {
+  ShareLinkModal,
+  type ShareTargetSubject,
+} from '../components/ShareLinkModal';
 import { TextPromptModal } from '../components/TextPromptModal';
 import { Banner, EmptyState } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
 import { useSync } from '../context/SyncContext';
 import type { MainTabParamList, RootStackParamList } from '../navigation/types';
 import { colors, radius, spacing } from '../theme/tokens';
-import type { Album, MediaItem } from '../types/mydrive';
+import type { Album, FaceCluster, MediaItem } from '../types/mydrive';
 
-type PhotosSubTab = 'timeline' | 'albums';
+type PhotosSubTab = 'timeline' | 'albums' | 'people';
 
 export function PhotosScreen() {
   const { client } = useAuth();
@@ -43,6 +47,10 @@ export function PhotosScreen() {
   const [albums, setAlbums] = useState<Album[]>([]);
   const [loadingAlbums, setLoadingAlbums] = useState(false);
   const [createAlbumOpen, setCreateAlbumOpen] = useState(false);
+  const [shareSubject, setShareSubject] = useState<ShareTargetSubject | null>(null);
+
+  const [faces, setFaces] = useState<FaceCluster[]>([]);
+  const [loadingFaces, setLoadingFaces] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadTimeline = useCallback(
@@ -77,10 +85,24 @@ export function PhotosScreen() {
     }
   }, [client]);
 
+  const loadFaces = useCallback(async () => {
+    if (!client) return;
+    setLoadingFaces(true);
+    try {
+      const page = await client.listFaces(0, { limit: 80 });
+      setFaces(page.clusters);
+    } catch {
+      // Faces index may not have clusters yet on a fresh server.
+    } finally {
+      setLoadingFaces(false);
+    }
+  }, [client]);
+
   useEffect(() => {
     void loadTimeline(null, true);
     void loadAlbums();
-  }, [loadTimeline, loadAlbums]);
+    void loadFaces();
+  }, [loadTimeline, loadAlbums, loadFaces]);
 
   const handleRefreshTimeline = () => {
     setRefreshingPhotos(true);
@@ -95,6 +117,7 @@ export function PhotosScreen() {
   };
 
   const albumCardWidth = Math.floor((width - spacing.lg * 2 - spacing.md) / 2);
+  const faceCardWidth = Math.floor((width - spacing.lg * 2 - spacing.md * 2) / 3);
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -174,6 +197,22 @@ export function PhotosScreen() {
               Albums ({albums.length})
             </Text>
           </Pressable>
+          <Pressable
+            onPress={() => setSubTab('people')}
+            style={[
+              styles.segmentBtn,
+              subTab === 'people' && styles.segmentBtnActive,
+            ]}
+          >
+            <Text
+              style={[
+                styles.segmentText,
+                subTab === 'people' && styles.segmentTextActive,
+              ]}
+            >
+              People{faces.length > 0 ? ` (${faces.length})` : ''}
+            </Text>
+          </Pressable>
         </View>
       </View>
 
@@ -219,8 +258,9 @@ export function PhotosScreen() {
             }
           />
         )
-      ) : (
+      ) : subTab === 'albums' ? (
         <FlatList
+          key="albums-grid"
           data={albums}
           keyExtractor={(item) => item.id}
           numColumns={2}
@@ -283,17 +323,110 @@ export function PhotosScreen() {
                     </View>
                   )}
                 </View>
-                <Text style={styles.albumTitle} numberOfLines={1}>
-                  {item.name}
+                <View style={styles.albumFooterRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.albumTitle} numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    <Text style={styles.albumCount}>
+                      {item.item_count} {item.item_count === 1 ? 'item' : 'items'}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      setShareSubject({
+                        resourceType: 'album',
+                        resourceId: item.id,
+                        name: item.name,
+                      });
+                    }}
+                    hitSlop={8}
+                    style={styles.albumShareBtn}
+                  >
+                    <Ionicons name="share-outline" size={16} color={colors.accent} />
+                  </Pressable>
+                </View>
+              </Pressable>
+            );
+          }}
+        />
+      ) : subTab === 'people' ? (
+        <FlatList
+          key="people-grid"
+          data={faces}
+          keyExtractor={(item) => item.id}
+          numColumns={3}
+          columnWrapperStyle={styles.faceRow}
+          contentContainerStyle={
+            faces.length === 0 ? styles.emptyContainer : styles.albumGrid
+          }
+          refreshControl={
+            <RefreshControl
+              refreshing={loadingFaces}
+              onRefresh={() => {
+                void loadFaces();
+              }}
+              tintColor={colors.accent}
+            />
+          }
+          ListEmptyComponent={
+            loadingFaces ? (
+              <View style={styles.center}>
+                <ActivityIndicator size="large" color={colors.accent} />
+              </View>
+            ) : (
+              <EmptyState
+                icon="people-outline"
+                title="No People Grouped Yet"
+                message="As your NAS finishes indexing portraits, people clusters will appear here automatically."
+              />
+            )
+          }
+          renderItem={({ item }) => {
+            const portraitUrl = item.representativeFileId
+              ? client?.thumbnailUrl(item.representativeFileId)
+              : null;
+            return (
+              <Pressable
+                onPress={() => rootNav.navigate('PersonDetail', { cluster: item })}
+                style={({ pressed }) => [
+                  styles.faceCard,
+                  { width: faceCardWidth },
+                  pressed && styles.albumCardPressed,
+                ]}
+              >
+                <View style={styles.faceAvatarWrap}>
+                  {portraitUrl ? (
+                    <Image
+                      source={{ uri: portraitUrl }}
+                      style={styles.albumCover}
+                      contentFit="cover"
+                      cachePolicy="memory-disk"
+                    />
+                  ) : (
+                    <View style={styles.albumPlaceholder}>
+                      <Ionicons name="person-outline" size={28} color={colors.accent} />
+                    </View>
+                  )}
+                </View>
+                <Text
+                  style={[
+                    styles.faceLabel,
+                    !item.label && styles.faceLabelUnnamed,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {item.label?.trim() || 'Add a name'}
                 </Text>
-                <Text style={styles.albumCount}>
-                  {item.item_count} {item.item_count === 1 ? 'item' : 'items'}
+                <Text style={styles.faceCount}>
+                  {item.assetCount} {item.assetCount === 1 ? 'photo' : 'photos'}
                 </Text>
               </Pressable>
             );
           }}
         />
-      )}
+      ) : null}
 
       <TextPromptModal
         visible={createAlbumOpen}
@@ -302,6 +435,12 @@ export function PhotosScreen() {
         confirmLabel="Create"
         onCancel={() => setCreateAlbumOpen(false)}
         onSubmit={handleCreateAlbum}
+      />
+
+      <ShareLinkModal
+        visible={Boolean(shareSubject)}
+        subject={shareSubject}
+        onClose={() => setShareSubject(null)}
       />
     </SafeAreaView>
   );
@@ -451,8 +590,52 @@ const styles = StyleSheet.create({
     color: colors.ink,
     marginTop: 2,
   },
+  albumFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: 2,
+  },
+  albumShareBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: colors.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   albumCount: {
     fontSize: 12.5,
+    color: colors.muted,
+  },
+  faceRow: {
+    gap: spacing.md,
+  },
+  faceCard: {
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: spacing.md,
+  },
+  faceAvatarWrap: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: colors.surfaceSubtle,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  faceLabel: {
+    fontSize: 13.5,
+    fontWeight: '700',
+    color: colors.ink,
+    marginTop: 2,
+  },
+  faceLabelUnnamed: {
+    color: colors.accent,
+  },
+  faceCount: {
+    fontSize: 12,
     color: colors.muted,
   },
 });
