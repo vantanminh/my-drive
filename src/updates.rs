@@ -2,13 +2,13 @@ use std::{env, path::Path, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sqlx::{FromRow, PgPool};
 use thiserror::Error;
 use tokio::time::{MissedTickBehavior, interval};
@@ -29,10 +29,13 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/admin/updates/settings", patch(update_settings))
         .route("/api/admin/updates/check", post(check_now))
         .route("/api/admin/updates/apply", post(apply_update))
+        .route("/api/admin/host/overview", get(host_overview))
+        .route("/api/admin/host/services/restart", post(restart_host_service))
+        .route("/api/admin/host/services/logs", get(host_service_logs))
 }
 
 #[derive(Debug, Error)]
-enum UpdateError {
+pub(crate) enum UpdateError {
     #[error("owner permission required")]
     Forbidden,
     #[error("CSRF validation failed")]
@@ -195,6 +198,103 @@ struct UpdateSettingsRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApplyUpdateRequest {
     target_tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostMemoryStats {
+    pub total_bytes: u64,
+    #[serde(default)]
+    pub available_bytes: Option<u64>,
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
+    pub used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostDiskStat {
+    pub label: String,
+    pub path: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+    pub percent_used: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostCoreSummary {
+    pub install_dir: String,
+    pub tls_mode: Option<String>,
+    pub host: Option<String>,
+    pub lan_enabled: bool,
+    pub lan_port: u16,
+    #[serde(default)]
+    pub lan_bind: String,
+    pub my_drive_service: String,
+    pub updater_service: String,
+    pub image_track: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostServiceStatus {
+    pub name: String,
+    pub service: String,
+    pub state: String,
+    pub health: Option<String>,
+    pub status: String,
+    pub image: String,
+    pub running_for: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostOverview {
+    pub connected: bool,
+    pub hostname: String,
+    pub os_name: String,
+    pub kernel: String,
+    pub arch: String,
+    pub uptime_seconds: Option<u64>,
+    pub load_average: Vec<f64>,
+    pub cpu_cores: u32,
+    pub cpu_usage_percent: Option<f64>,
+    pub memory: HostMemoryStats,
+    pub swap: HostMemoryStats,
+    pub disks: Vec<HostDiskStat>,
+    pub core: HostCoreSummary,
+    pub services: Vec<HostServiceStatus>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestartServiceRequest {
+    service: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestartServiceResponse {
+    ok: bool,
+    service: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServiceLogsQuery {
+    service: Option<String>,
+    tail: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceLogsResponse {
+    service: String,
+    tail: u16,
+    lines: Vec<String>,
 }
 
 #[derive(FromRow)]
@@ -379,6 +479,79 @@ async fn apply_update(
         &updated_row,
         host_updater,
     )))
+}
+
+fn valid_service_name(service: &str, allow_updater: bool) -> bool {
+    matches!(
+        service,
+        "all" | "app" | "db" | "proxy" | "document-preview" | "media-indexer" | "cloudflared" | "smb"
+    ) || (allow_updater && service == "updater")
+}
+
+async fn host_overview(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    let overview: HostOverview =
+        send_updater_json(&state.update_settings, "GET", "/host/overview", None).await?;
+    Ok(no_store_json(overview))
+}
+
+async fn restart_host_service(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(request): Json<RestartServiceRequest>,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    drive::require_request_csrf(&headers, &user, state.auth_settings)
+        .map_err(|_| UpdateError::Csrf)?;
+    let service = request.service.trim();
+    if !valid_service_name(service, false) {
+        return Err(UpdateError::BadRequest("unsupported host service"));
+    }
+    let result: RestartServiceResponse = send_updater_json(
+        &state.update_settings,
+        "POST",
+        "/services/restart",
+        Some(serde_json::json!({ "service": service })),
+    )
+    .await?;
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, details) \
+         VALUES ('host_service_restarted', $1, jsonb_build_object('service', $2))",
+    )
+    .bind(user.id)
+    .bind(service)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(error = %error, "failed to record host_service_restarted audit event");
+    }
+
+    Ok(no_store_json(result))
+}
+
+async fn host_service_logs(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Query(query): Query<ServiceLogsQuery>,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    let service = query.service.as_deref().unwrap_or("all").trim();
+    if !valid_service_name(service, true) {
+        return Err(UpdateError::BadRequest("unsupported service for logs"));
+    }
+    let tail = query.tail.unwrap_or(120).clamp(10, 400);
+    let path = format!(
+        "/services/logs?service={}&tail={tail}",
+        url_encode_segment(service)
+    );
+    let logs: ServiceLogsResponse =
+        send_updater_json(&state.update_settings, "GET", &path, None).await?;
+    Ok(no_store_json(logs))
 }
 
 pub(crate) async fn run_worker(pool: PgPool, settings: UpdateSettings) {
@@ -788,6 +961,15 @@ async fn send_updater_request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<HostUpdaterStatus, UpdateError> {
+    send_updater_json(settings, method, path, body).await
+}
+
+pub(crate) async fn send_updater_json<T: DeserializeOwned>(
+    settings: &UpdateSettings,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<T, UpdateError> {
     if let Some(base_url) = &settings.updater_url {
         return send_updater_http(
             base_url,
@@ -804,13 +986,13 @@ async fn send_updater_request(
     Err(UpdateError::UpdaterUnavailable)
 }
 
-async fn send_updater_http(
+async fn send_updater_http<T: DeserializeOwned>(
     base_url: &str,
     token: Option<&str>,
     method: &str,
     path: &str,
     body: Option<serde_json::Value>,
-) -> Result<HostUpdaterStatus, UpdateError> {
+) -> Result<T, UpdateError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(UPDATER_REQUEST_TIMEOUT_SECONDS))
         .build()
@@ -839,12 +1021,12 @@ async fn send_updater_http(
 }
 
 #[cfg(unix)]
-async fn send_updater_unix(
+async fn send_updater_unix<T: DeserializeOwned>(
     socket_path: &Path,
     method: &str,
     path: &str,
     body: Option<serde_json::Value>,
-) -> Result<HostUpdaterStatus, UpdateError> {
+) -> Result<T, UpdateError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
@@ -888,7 +1070,7 @@ async fn send_updater_unix(
     let mut raw = Vec::new();
     tokio::time::timeout(
         Duration::from_secs(UPDATER_REQUEST_TIMEOUT_SECONDS),
-        stream.take(256 * 1024).read_to_end(&mut raw),
+        stream.take(1024 * 1024).read_to_end(&mut raw),
     )
     .await
     .map_err(|_| UpdateError::UpdaterUnavailable)?
@@ -910,12 +1092,12 @@ async fn send_updater_unix(
 }
 
 #[cfg(not(unix))]
-async fn send_updater_unix(
+async fn send_updater_unix<T: DeserializeOwned>(
     _socket_path: &Path,
     _method: &str,
     _path: &str,
     _body: Option<serde_json::Value>,
-) -> Result<HostUpdaterStatus, UpdateError> {
+) -> Result<T, UpdateError> {
     Err(UpdateError::UpdaterUnavailable)
 }
 
@@ -926,12 +1108,12 @@ struct UpdaterErrorPayload {
     message: Option<String>,
 }
 
-fn parse_updater_response(
+fn parse_updater_response<T: DeserializeOwned>(
     status: StatusCode,
     body: &[u8],
-) -> Result<HostUpdaterStatus, UpdateError> {
+) -> Result<T, UpdateError> {
     if status.is_success() {
-        return serde_json::from_slice::<HostUpdaterStatus>(body).map_err(|error| {
+        return serde_json::from_slice::<T>(body).map_err(|error| {
             UpdateError::UpdaterRejected(format!("invalid updater payload: {error}"))
         });
     }
@@ -1214,5 +1396,106 @@ mod tests {
         .expect("trigger update");
         assert_eq!(running.status, "running");
         assert_eq!(running.target_tag.as_deref(), Some("v0.1.5"));
+    }
+
+    #[tokio::test]
+    async fn talks_to_host_overview_restart_and_logs() {
+        let app = Router::new()
+            .route(
+                "/host/overview",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "connected": true,
+                        "hostname": "myhomenas",
+                        "osName": "Ubuntu 24.04",
+                        "kernel": "6.8.0",
+                        "arch": "x86_64",
+                        "uptimeSeconds": 3600,
+                        "loadAverage": [0.1, 0.2, 0.3],
+                        "cpuCores": 4,
+                        "cpuUsagePercent": 12.5,
+                        "memory": { "totalBytes": 8000000000u64, "availableBytes": 4000000000u64, "usedBytes": 4000000000u64 },
+                        "swap": { "totalBytes": 0, "freeBytes": 0, "usedBytes": 0 },
+                        "disks": [],
+                        "core": {
+                            "installDir": "/opt/my-drive",
+                            "tlsMode": "cloudflare",
+                            "host": "nas.example.com",
+                            "lanEnabled": true,
+                            "lanPort": 3000,
+                            "lanBind": "",
+                            "myDriveService": "active",
+                            "updaterService": "active",
+                            "imageTrack": "ghcr.io/vantanminh/my-drive:latest"
+                        },
+                        "services": [{
+                            "name": "my-drive-app-1",
+                            "service": "app",
+                            "state": "running",
+                            "health": "healthy",
+                            "status": "Up 1 hour",
+                            "image": "ghcr.io/vantanminh/my-drive:latest",
+                            "runningFor": "1 hour ago"
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/services/restart",
+                post(|| async {
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "service": "proxy",
+                            "message": "Restart initiated for proxy."
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/services/logs",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "service": "app",
+                        "tail": 50,
+                        "lines": ["ready"]
+                    }))
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let settings = UpdateSettings {
+            updater_url: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
+        let overview: HostOverview = send_updater_json(&settings, "GET", "/host/overview", None)
+            .await
+            .expect("host overview");
+        assert_eq!(overview.hostname, "myhomenas");
+        assert_eq!(overview.services.len(), 1);
+        assert!(overview.core.lan_enabled);
+
+        let restarted: RestartServiceResponse = send_updater_json(
+            &settings,
+            "POST",
+            "/services/restart",
+            Some(serde_json::json!({ "service": "proxy" })),
+        )
+        .await
+        .expect("service restart");
+        assert!(restarted.ok);
+        assert_eq!(restarted.service, "proxy");
+
+        let logs: ServiceLogsResponse =
+            send_updater_json(&settings, "GET", "/services/logs?service=app&tail=50", None)
+                .await
+                .expect("service logs");
+        assert_eq!(logs.lines, vec!["ready"]);
     }
 }

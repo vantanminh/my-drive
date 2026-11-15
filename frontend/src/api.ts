@@ -11,6 +11,8 @@ import type {
   EntryPage,
   FaceCluster,
   FaceClusterPage,
+  HostOverview,
+  HostServiceLogs,
   ManagedAccountPage,
   MediaPage,
   PublicShareView,
@@ -716,7 +718,21 @@ export const api = {
       json: { targetTag: targetTag ?? null },
       csrf: true,
       cache: 'no-store'
-    })
+    }),
+  hostOverview: (signal?: AbortSignal) =>
+    request<HostOverview>('/api/admin/host/overview', { signal, cache: 'no-store' }),
+  restartHostService: (service: string) =>
+    request<{ ok: boolean; service: string; message: string }>('/api/admin/host/services/restart', {
+      method: 'POST',
+      json: { service },
+      csrf: true,
+      cache: 'no-store'
+    }),
+  hostServiceLogs: (service = 'all', tail = 120, signal?: AbortSignal) =>
+    request<HostServiceLogs>(
+      '/api/admin/host/services/logs?service=' + encodeURIComponent(service) + '&tail=' + encodeURIComponent(String(tail)),
+      { signal, cache: 'no-store' }
+    )
 };
 
 export function downloadUrl(id: string): string {

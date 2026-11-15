@@ -1,17 +1,21 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import {
+  Activity,
   ArrowUpCircle,
   CheckCircle2,
+  Cpu,
   ExternalLink,
   HardDriveDownload,
   RefreshCw,
+  RotateCw,
   Server,
   ShieldCheck,
+  Terminal,
   X
 } from 'lucide-react';
 import { api } from '../api';
-import { formatDate, friendlyError } from '../format';
-import type { SystemUpdatesStatus } from '../types';
+import { formatDate, formatSize, friendlyError } from '../format';
+import type { HostOverview, SystemUpdatesStatus } from '../types';
 
 type Props = {
   onClose: () => void;
@@ -28,6 +32,16 @@ const INTERVAL_OPTIONS = [
 function shortSha(sha: string | null | undefined): string {
   if (!sha) return '—';
   return sha.slice(0, 7);
+}
+
+function formatUptime(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return '—';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
 }
 
 function updaterPhaseLabel(status: SystemUpdatesStatus['hostUpdater']): string {
@@ -51,6 +65,7 @@ function updaterPhaseLabel(status: SystemUpdatesStatus['hostUpdater']): string {
 
 export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
   const [data, setData] = useState<SystemUpdatesStatus | null>(null);
+  const [overview, setOverview] = useState<HostOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -61,6 +76,10 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(false);
   const [checkIntervalMinutes, setCheckIntervalMinutes] = useState(60);
 
+  const [logService, setLogService] = useState<string>('app');
+  const [logLines, setLogLines] = useState<string[] | null>(null);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+
   function applySnapshot(snapshot: SystemUpdatesStatus) {
     setData(snapshot);
     setAutoCheckEnabled(snapshot.settings.autoCheckEnabled);
@@ -69,13 +88,27 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
     onStatusChange?.(snapshot);
   }
 
+  async function loadOverview(signal?: AbortSignal) {
+    try {
+      const host = await api.hostOverview(signal);
+      setOverview(host);
+    } catch {
+      if (!signal?.aborted) setOverview(null);
+    }
+  }
+
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError('');
     api
       .updatesStatus(controller.signal)
-      .then((snapshot) => applySnapshot(snapshot))
+      .then((snapshot) => {
+        applySnapshot(snapshot);
+        if (snapshot.hostUpdater.connected) {
+          void loadOverview(controller.signal);
+        }
+      })
       .catch((cause: unknown) => {
         if (!(cause instanceof DOMException && cause.name === 'AbortError')) {
           setError(friendlyError(cause));
@@ -123,10 +156,47 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
       const snapshot = await api.updatesStatus();
       setWaitingReconnect(false);
       applySnapshot(snapshot);
+      if (snapshot.hostUpdater.connected) {
+        await loadOverview();
+      } else {
+        setOverview(null);
+      }
     } catch (cause: unknown) {
       setError(friendlyError(cause));
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  async function restartService(service: string) {
+    if (!window.confirm(`Restart host service "${service}"?`)) return;
+    setBusyAction('restart:' + service);
+    setError('');
+    setNotice('');
+    try {
+      const res = await api.restartHostService(service);
+      setNotice(res.message);
+      window.setTimeout(() => {
+        void loadOverview();
+      }, 2000);
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function fetchLogs(serviceName: string) {
+    setLoadingLogs(true);
+    setLogService(serviceName);
+    setError('');
+    try {
+      const res = await api.hostServiceLogs(serviceName, 120);
+      setLogLines(res.lines);
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setLoadingLogs(false);
     }
   }
 
@@ -442,6 +512,170 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
               )}
             </div>
           </div>
+
+          {overview ? (
+            <>
+              <div className="security-card">
+                <div className="security-card-heading">
+                  <span className="security-card-icon"><Cpu size={17} /></span>
+                  <div>
+                    <h3>Host telemetry &amp; MyNAS core</h3>
+                    <p>
+                      <code>{overview.hostname}</code> · {overview.osName} ({overview.arch}, kernel {overview.kernel})
+                    </p>
+                  </div>
+                </div>
+                <dl className="system-update-facts">
+                  <div>
+                    <dt>Uptime</dt>
+                    <dd>{formatUptime(overview.uptimeSeconds)}</dd>
+                  </div>
+                  <div>
+                    <dt>CPU</dt>
+                    <dd>
+                      {overview.cpuUsagePercent != null ? `${overview.cpuUsagePercent}%` : '—'} · {overview.cpuCores} cores
+                      {overview.loadAverage.length > 0 ? ` (load ${overview.loadAverage.join(', ')})` : ''}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Memory</dt>
+                    <dd>
+                      {formatSize(overview.memory.usedBytes)} / {formatSize(overview.memory.totalBytes)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>System services</dt>
+                    <dd>
+                      <code>my-drive</code>: {overview.core.myDriveService} · <code>my-drive-updater</code>:{' '}
+                      {overview.core.updaterService}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Access &amp; LAN</dt>
+                    <dd>
+                      TLS: <code>{overview.core.tlsMode || 'unknown'}</code> · LAN:{' '}
+                      {overview.core.lanEnabled
+                        ? `${overview.core.lanBind || '0.0.0.0'}:${overview.core.lanPort}`
+                        : 'Disabled'}
+                    </dd>
+                  </div>
+                </dl>
+                {overview.disks.length > 0 ? (
+                  <div className="system-update-host-state">
+                    {overview.disks.map((disk) => (
+                      <small key={disk.path}>
+                        <strong>{disk.label}</strong> (<code>{disk.path}</code>): {formatSize(disk.usedBytes)} /{' '}
+                        {formatSize(disk.totalBytes)} ({disk.percentUsed}% used · {formatSize(disk.freeBytes)} free)
+                      </small>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="security-card">
+                <div className="security-card-heading">
+                  <span className="security-card-icon"><Activity size={17} /></span>
+                  <div>
+                    <h3>Container &amp; host services</h3>
+                    <p>Inspect container health, restart individual services, or stream recent logs.</p>
+                  </div>
+                </div>
+                <div className="system-update-host-state">
+                  {overview.services.map((svc) => (
+                    <div
+                      key={svc.name || svc.service}
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '8px',
+                        padding: '8px 0',
+                        borderBottom: '1px solid var(--line, #e6ece9)'
+                      }}
+                    >
+                      <div>
+                        <strong>{svc.service}</strong>{' '}
+                        <span
+                          className={
+                            svc.state === 'running'
+                              ? 'system-update-badge system-update-badge-ok'
+                              : 'system-update-badge system-update-badge-warn'
+                          }
+                        >
+                          {svc.health ? `${svc.state} (${svc.health})` : svc.state}
+                        </span>
+                        <br />
+                        <small>{svc.status}</small>
+                      </div>
+                      <div className="system-update-actions" style={{ marginTop: 0 }}>
+                        <button
+                          className="button button-secondary"
+                          type="button"
+                          disabled={loadingLogs}
+                          onClick={() => void fetchLogs(svc.service)}
+                        >
+                          <Terminal size={13} /> Logs
+                        </button>
+                        <button
+                          className="button button-secondary"
+                          type="button"
+                          disabled={busyAction !== null}
+                          onClick={() => void restartService(svc.service)}
+                        >
+                          <RotateCw size={13} /> {busyAction === 'restart:' + svc.service ? 'Restarting…' : 'Restart'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {overview.services.length === 0 ? <small>No containers reported by Docker Compose.</small> : null}
+                </div>
+
+                <div className="system-update-actions" style={{ marginTop: '12px', alignItems: 'center' }}>
+                  <select
+                    className="text-input"
+                    aria-label="Log source service"
+                    value={logService}
+                    onChange={(event) => void fetchLogs(event.target.value)}
+                    style={{ maxWidth: '220px' }}
+                  >
+                    <option value="all">all containers</option>
+                    <option value="updater">my-drive-updater.service</option>
+                    {overview.services.map((svc) => (
+                      <option key={svc.service} value={svc.service}>
+                        {svc.service}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    disabled={loadingLogs}
+                    onClick={() => void fetchLogs(logService)}
+                  >
+                    <Terminal size={14} /> {loadingLogs ? 'Loading logs…' : 'Load recent logs'}
+                  </button>
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    disabled={busyAction !== null}
+                    onClick={() => void restartService('all')}
+                  >
+                    <RotateCw size={14} /> Restart stack
+                  </button>
+                </div>
+
+                {logLines ? (
+                  <details className="system-update-notes" open style={{ marginTop: '10px' }}>
+                    <summary>Recent logs: {logService} ({logLines.length} lines)</summary>
+                    <pre style={{ maxHeight: '280px', overflow: 'auto', fontSize: '11.5px' }}>
+                      {logLines.length > 0 ? logLines.join('\n') : '(no log output)'}
+                    </pre>
+                  </details>
+                ) : null}
+              </div>
+            </>
+          ) : null}
         </div>
       ) : null}
     </section>

@@ -63,6 +63,18 @@ test('system update API client sends CSRF, JSON, and credentials', async () => {
 
     assert.equal(requests[2].url, '/api/admin/updates/apply');
     assert.deepEqual(JSON.parse(requests[2].options.body), { targetTag: 'v0.2.0' });
+
+    await api.hostOverview();
+    await api.restartHostService('app');
+    await api.hostServiceLogs('updater', 50);
+
+    assert.equal(requests.length, 6);
+    assert.equal(requests[3].url, '/api/admin/host/overview');
+    assert.equal(requests[4].url, '/api/admin/host/services/restart');
+    assert.equal(requests[4].options.method, 'POST');
+    assert.equal(requests[4].options.headers.get('X-CSRF-Token'), 'csrf-123');
+    assert.deepEqual(JSON.parse(requests[4].options.body), { service: 'app' });
+    assert.equal(requests[5].url, '/api/admin/host/services/logs?service=updater&tail=50');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalDocument === undefined) delete globalThis.document;

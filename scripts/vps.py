@@ -22,6 +22,8 @@ INSTALL = Path('/opt/my-drive')
 UPDATER_RUN_DIR = Path('/run/my-drive-updater')
 UPDATER_SOCKET = UPDATER_RUN_DIR / 'updater.sock'
 UPDATER_STATUS_PATH = INSTALL / 'updater-status.json'
+HOST_BUNDLE_CONTAINER_DIR = '/usr/local/share/my-drive/host-bundle'
+ALLOWED_SERVICES = ('app', 'db', 'proxy', 'document-preview', 'media-indexer', 'cloudflared', 'smb')
 PATH_RE = re.compile(r'/[A-Za-z0-9_./-]+')
 CLOUDFLARED_IMAGE = 'cloudflare/cloudflared:2026.10.0'
 IMAGE_RE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._:/@-]+')
@@ -775,6 +777,214 @@ def _updater_status_payload(state):
     }
 
 
+def extract_host_bundle(app_image, install_dir=INSTALL):
+    """Copy updated host scripts/docker helpers packaged in the runtime app image."""
+    with tempfile.TemporaryDirectory(prefix='my-drive-bundle-') as tmp_dir:
+        created = subprocess.run(['docker', 'create', app_image], text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if created.returncode != 0:
+            return False
+        cid = created.stdout.strip()
+        try:
+            copied = subprocess.run(['docker', 'cp', f'{cid}:{HOST_BUNDLE_CONTAINER_DIR}/.', tmp_dir],
+                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if copied.returncode != 0:
+                return False
+            bundle_root = Path(tmp_dir)
+            if not (bundle_root / 'scripts' / 'vps.py').is_file():
+                return False
+            for directory in ('scripts', 'docker'):
+                src = bundle_root / directory
+                if src.is_dir():
+                    shutil.copytree(src, Path(install_dir) / directory, dirs_exist_ok=True)
+            for script in (Path(install_dir) / 'scripts').glob('*.sh'):
+                script.chmod(0o700)
+            return True
+        finally:
+            subprocess.run(['docker', 'rm', '-f', cid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def parse_proc_meminfo(text):
+    values = {}
+    for line in text.splitlines():
+        if ':' not in line:
+            continue
+        key, rest = line.split(':', 1)
+        parts = rest.strip().split()
+        if not parts:
+            continue
+        try:
+            kib = int(parts[0])
+            values[key] = kib * 1024
+        except ValueError:
+            continue
+    total = values.get('MemTotal', 0)
+    avail = values.get('MemAvailable', values.get('MemFree', 0))
+    swap_total = values.get('SwapTotal', 0)
+    swap_free = values.get('SwapFree', 0)
+    return {
+        'memory': {'totalBytes': total, 'availableBytes': avail, 'usedBytes': max(0, total - avail)},
+        'swap': {'totalBytes': swap_total, 'freeBytes': swap_free, 'usedBytes': max(0, swap_total - swap_free)},
+    }
+
+
+def parse_compose_ps_json(raw):
+    text = (raw or '').strip()
+    if not text:
+        return []
+    items = []
+    if text.startswith('['):
+        parsed = json.loads(text)
+        items = parsed if isinstance(parsed, list) else []
+    else:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    items.append(obj)
+            except json.JSONDecodeError:
+                continue
+    services = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        services.append({
+            'name': str(item.get('Name') or ''),
+            'service': str(item.get('Service') or ''),
+            'state': str(item.get('State') or 'unknown').lower(),
+            'health': str(item.get('Health') or '').lower() or None,
+            'status': str(item.get('Status') or ''),
+            'image': str(item.get('Image') or ''),
+            'runningFor': str(item.get('RunningFor') or '') or None,
+        })
+    return services
+
+
+def read_cpu_usage_percent():
+    def snapshot():
+        first = Path('/proc/stat').read_text().splitlines()[0].split()[1:]
+        nums = [int(x) for x in first]
+        idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
+        return sum(nums), idle
+    try:
+        t1, i1 = snapshot()
+        time.sleep(0.12)
+        t2, i2 = snapshot()
+        dt = t2 - t1
+        di = i2 - i1
+        if dt <= 0:
+            return None
+        return round(max(0.0, min(100.0, (dt - di) * 100.0 / dt)), 1)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_os_name():
+    import platform
+    try:
+        for line in Path('/etc/os-release').read_text().splitlines():
+            if line.startswith('PRETTY_NAME='):
+                return line.split('=', 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return platform.platform()
+
+
+def systemd_unit_active(unit_name):
+    res = subprocess.run(['systemctl', 'is-active', unit_name], text=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    out = (res.stdout or '').strip()
+    return out or ('active' if res.returncode == 0 else 'unknown')
+
+
+def host_overview_payload(state):
+    import platform
+    cfg = state.get('config', {}) if isinstance(state, dict) else {}
+    mem_data = {'memory': {'totalBytes': 0, 'availableBytes': 0, 'usedBytes': 0},
+                'swap': {'totalBytes': 0, 'freeBytes': 0, 'usedBytes': 0}}
+    try:
+        mem_data = parse_proc_meminfo(Path('/proc/meminfo').read_text())
+    except OSError:
+        pass
+    uptime_seconds = None
+    try:
+        uptime_seconds = int(float(Path('/proc/uptime').read_text().split()[0]))
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        load_avg = [round(x, 2) for x in os.getloadavg()]
+    except (OSError, AttributeError):
+        load_avg = []
+    disks = []
+    seen_devs = set()
+    candidates = [
+        ('Root OS', '/'),
+        ('MyDrive Core', str(INSTALL)),
+        ('HDD Storage', cfg.get('storage')),
+        ('SSD Previews', cfg.get('previews')),
+        ('Database', cfg.get('database')),
+    ]
+    for label, raw_path in candidates:
+        if not raw_path or not os.path.exists(raw_path):
+            continue
+        try:
+            st = os.stat(raw_path)
+            vfs = os.statvfs(raw_path)
+            key = (st.st_dev, vfs.f_blocks)
+            if key in seen_devs:
+                continue
+            seen_devs.add(key)
+            total = vfs.f_frsize * vfs.f_blocks
+            free = vfs.f_frsize * vfs.f_bavail
+            used = max(0, vfs.f_frsize * (vfs.f_blocks - vfs.f_bfree))
+            pct = round((used / total) * 100.0, 1) if total > 0 else 0.0
+            disks.append({
+                'label': label,
+                'path': str(raw_path),
+                'totalBytes': total,
+                'usedBytes': used,
+                'freeBytes': free,
+                'percentUsed': pct,
+            })
+        except OSError:
+            continue
+    services = []
+    try:
+        services = parse_compose_ps_json(compose('ps', '--all', '--format', 'json', capture=True))
+    except Exception:
+        services = []
+    images = cfg.get('images', {}) if isinstance(cfg.get('images'), dict) else {}
+    return {
+        'connected': True,
+        'hostname': socket.gethostname(),
+        'osName': read_os_name(),
+        'kernel': platform.release(),
+        'arch': platform.machine(),
+        'uptimeSeconds': uptime_seconds,
+        'loadAverage': load_avg,
+        'cpuCores': os.cpu_count() or 1,
+        'cpuUsagePercent': read_cpu_usage_percent(),
+        'memory': mem_data['memory'],
+        'swap': mem_data['swap'],
+        'disks': disks,
+        'core': {
+            'installDir': str(INSTALL),
+            'tlsMode': cfg.get('tls'),
+            'host': cfg.get('host'),
+            'lanEnabled': cfg.get('lan_enabled', cfg.get('tls') == 'cloudflare'),
+            'lanPort': int(cfg.get('lan_port', 3000) or 3000),
+            'lanBind': cfg.get('lan_bind') or '',
+            'myDriveService': systemd_unit_active('my-drive.service'),
+            'updaterService': systemd_unit_active('my-drive-updater.service'),
+            'imageTrack': images.get('app'),
+        },
+        'services': services,
+    }
+
+
 def updater_serve():
     import fcntl
     import http.server
@@ -896,16 +1106,85 @@ def updater_serve():
             return data
 
         def do_GET(self):
-            if self.path != '/status':
-                self.send_json(404, {'error': 'not_found'})
+            from urllib.parse import parse_qs, urlparse
+            parsed_url = urlparse(self.path)
+            if parsed_url.path == '/status':
+                try:
+                    state = load_install_state()
+                    self.send_json(200, _updater_status_payload(state))
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
                 return
-            try:
-                state = load_install_state()
-                self.send_json(200, _updater_status_payload(state))
-            except Exception as error:
-                self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+            if parsed_url.path == '/host/overview':
+                try:
+                    state = load_install_state()
+                    self.send_json(200, host_overview_payload(state))
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
+            if parsed_url.path == '/services/logs':
+                try:
+                    qs = parse_qs(parsed_url.query)
+                    svc = (qs.get('service') or ['all'])[0].strip()
+                    if svc not in {'all', 'updater', *ALLOWED_SERVICES}:
+                        raise ValueError('unsupported service for logs')
+                    try:
+                        tail = int((qs.get('tail') or ['120'])[0])
+                    except ValueError:
+                        raise ValueError('tail must be an integer') from None
+                    tail = max(10, min(400, tail))
+                    if svc == 'updater':
+                        res = subprocess.run(
+                            ['journalctl', '-u', 'my-drive-updater.service', '-n', str(tail), '--no-pager', '-o', 'short-iso'],
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+                        )
+                        raw = res.stdout or ''
+                    else:
+                        if svc != 'all':
+                            compose_model = json.loads((INSTALL / 'compose.yaml').read_text())
+                            if svc not in compose_model.get('services', {}):
+                                raise ValueError(f'service {svc} is not configured in compose.yaml')
+                        raw = compose('logs', '--tail', str(tail), '--no-color',
+                                      *([] if svc == 'all' else [svc]), capture=True)
+                    lines = raw.splitlines()[-tail:]
+                    self.send_json(200, {'service': svc, 'tail': tail, 'lines': lines})
+                except ValueError as error:
+                    self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
+            self.send_json(404, {'error': 'not_found'})
 
         def do_POST(self):
+            if self.path == '/services/restart':
+                try:
+                    body = self.read_json_body()
+                    svc = str(body.get('service') or '').strip()
+                    if svc not in {'all', *ALLOWED_SERVICES}:
+                        raise ValueError('unsupported service for restart')
+                    if svc != 'all':
+                        compose_model = json.loads((INSTALL / 'compose.yaml').read_text())
+                        if svc not in compose_model.get('services', {}):
+                            raise ValueError(f'service {svc} is not configured in compose.yaml')
+
+                    def _do_restart():
+                        time.sleep(0.25)
+                        if svc == 'all':
+                            compose('restart')
+                        else:
+                            compose('restart', svc)
+
+                    threading.Thread(target=_do_restart, daemon=True).start()
+                    self.send_json(202, {
+                        'ok': True,
+                        'service': svc,
+                        'message': f'Restart initiated for {svc}.',
+                    })
+                except ValueError as error:
+                    self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
             if self.path != '/update':
                 self.send_json(404, {'error': 'not_found'})
                 return
@@ -1068,11 +1347,20 @@ def main():
             compose_changed = after_compose != before_compose
             if compose_changed:
                 atomic(compose_path, after_compose)
-            if SOURCE != INSTALL and (SOURCE / 'scripts').is_dir():
+            bundle_updated = False
+            if args.source and source != INSTALL and (source / 'scripts').is_dir():
                 for directory in ('scripts', 'docker'):
-                    shutil.copytree(SOURCE / directory, INSTALL / directory, dirs_exist_ok=True)
+                    if (source / directory).is_dir():
+                        shutil.copytree(source / directory, INSTALL / directory, dirs_exist_ok=True)
+                for script in (INSTALL / 'scripts').glob('*.sh'):
+                    script.chmod(0o700)
+                bundle_updated = True
+            elif 'app' in images:
+                bundle_updated = extract_host_bundle(images['app'], INSTALL)
             if os.environ.get('MY_DRIVE_UPDATER_SUBPROCESS') != '1':
                 install_updater_service(prepare_only=False, restart=True)
+            elif bundle_updated:
+                install_updater_service(prepare_only=True, restart=False)
             if all(state['env'].get(image_env[service]) == image for service, image in images.items()):
                 if compose_changed:
                     print('phase: restarting Applying updated Compose configuration', flush=True)

@@ -332,6 +332,67 @@ export type SystemUpdatesStatus = {
   lastTriggeredTag: string | null;
 };
 
+export type HostMemoryStats = {
+  totalBytes: number;
+  availableBytes?: number | null;
+  freeBytes?: number | null;
+  usedBytes: number;
+};
+
+export type HostDiskStat = {
+  label: string;
+  path: string;
+  totalBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+  percentUsed: number;
+};
+
+export type HostCoreSummary = {
+  installDir: string;
+  tlsMode: string | null;
+  host: string | null;
+  lanEnabled: boolean;
+  lanPort: number;
+  lanBind: string;
+  myDriveService: string;
+  updaterService: string;
+  imageTrack: string | null;
+};
+
+export type HostServiceStatus = {
+  name: string;
+  service: string;
+  state: string;
+  health: string | null;
+  status: string;
+  image: string;
+  runningFor: string | null;
+};
+
+export type HostOverview = {
+  connected: boolean;
+  hostname: string;
+  osName: string;
+  kernel: string;
+  arch: string;
+  uptimeSeconds: number | null;
+  loadAverage: number[];
+  cpuCores: number;
+  cpuUsagePercent: number | null;
+  memory: HostMemoryStats;
+  swap: HostMemoryStats;
+  disks: HostDiskStat[];
+  core: HostCoreSummary;
+  services: HostServiceStatus[];
+};
+
+export type HostServiceLogs = {
+  service: string;
+  tail: number;
+  lines: string[];
+};
+
 export type NetworkDriveStatus = {
   enabled: boolean;
   path: string;

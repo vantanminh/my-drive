@@ -80,6 +80,28 @@ class VpsUpdaterTests(unittest.TestCase):
         vps.ensure_lan_compose(acme, {'tls': 'acme', 'lan_enabled': True, 'lan_port': 3000})
         self.assertEqual(acme['services']['app']['ports'], ['3000:3000'])
 
+    def test_host_telemetry_parsers_handle_proc_meminfo_and_ndjson_ps(self):
+        mem = vps.parse_proc_meminfo(
+            'MemTotal:        8192000 kB\n'
+            'MemFree:         1024000 kB\n'
+            'MemAvailable:    4096000 kB\n'
+            'SwapTotal:       2048000 kB\n'
+            'SwapFree:        2048000 kB\n'
+        )
+        self.assertEqual(mem['memory']['totalBytes'], 8192000 * 1024)
+        self.assertEqual(mem['memory']['availableBytes'], 4096000 * 1024)
+        self.assertEqual(mem['memory']['usedBytes'], 4096000 * 1024)
+        self.assertEqual(mem['swap']['usedBytes'], 0)
+
+        services = vps.parse_compose_ps_json(
+            '{"Name":"my-drive-app-1","Service":"app","State":"running","Health":"healthy","Status":"Up 2 hours","Image":"app:latest"}\n'
+            '{"Name":"my-drive-proxy-1","Service":"proxy","State":"running","Health":"","Status":"Up 2 hours","Image":"caddy:2"}\n'
+        )
+        self.assertEqual(len(services), 2)
+        self.assertEqual(services[0]['service'], 'app')
+        self.assertEqual(services[0]['health'], 'healthy')
+        self.assertIsNone(services[1]['health'])
+
 
 if __name__ == '__main__':
     unittest.main()
