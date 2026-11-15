@@ -404,6 +404,73 @@ pub async fn login(
     response
 }
 
+#[derive(Serialize)]
+struct MobileTokenResponse {
+    session_token: String,
+}
+
+pub async fn issue_mobile_token(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Response {
+    if !is_mobile_client(&headers) {
+        return api_error(StatusCode::BAD_REQUEST, "mobile_client_required");
+    }
+    if !require_csrf(&headers, &user, state.auth_settings) {
+        return api_error(StatusCode::FORBIDDEN, "csrf_failed");
+    }
+    let (session_raw, session_token) = match secure_token(SESSION_TOKEN_BYTES) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(error = %error, "secure session token generation failed");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable");
+        }
+    };
+    let session_digest = Sha256::digest(&session_raw).to_vec();
+    let updated = sqlx::query(
+        "UPDATE sessions SET token_digest = $1, last_seen_at = now() \
+          WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(session_digest)
+    .bind(user.session_id)
+    .bind(user.id)
+    .execute(&state.pool)
+    .await;
+
+    match updated {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => return api_error(StatusCode::UNAUTHORIZED, "authentication_required"),
+        Err(error) => {
+            tracing::error!(error = %error, "could not rotate mobile session token");
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable");
+        }
+    }
+
+    let mut response = (
+        StatusCode::OK,
+        Json(MobileTokenResponse {
+            session_token: format!("{MOBILE_SESSION_PREFIX}{session_token}"),
+        }),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if !user.is_bearer_session {
+        add_cookie(
+            &mut response,
+            state.auth_settings.session_cookie_name(),
+            &session_token,
+            true,
+            state.auth_settings.session_ttl_seconds,
+            state.auth_settings.cookie_secure,
+            false,
+        );
+    }
+    response
+}
+
 pub async fn me(State(_state): State<AppState>, user: AuthenticatedUser) -> Response {
     let mut response = (StatusCode::OK, Json(public_user_from_auth(&user))).into_response();
     response

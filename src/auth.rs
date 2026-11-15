@@ -10,8 +10,8 @@ use crate::BootstrapOwner;
 
 mod session;
 pub use session::{
-    AuthSettings, LoginRateLimiter, change_password, list_sessions, login, logout, me,
-    revoke_other_sessions, revoke_session,
+    AuthSettings, LoginRateLimiter, change_password, issue_mobile_token, list_sessions, login,
+    logout, me, revoke_other_sessions, revoke_session,
 };
 pub(crate) use session::{
     AuthenticatedUser, new_temporary_password, require_csrf, verify_login_password,

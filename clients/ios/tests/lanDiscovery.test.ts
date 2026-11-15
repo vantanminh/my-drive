@@ -215,3 +215,48 @@ test('MyDriveClient sends mobile client header, captures session_token, and inje
   await assert.rejects(() => client.listTrash(), /Network request failed/);
   assert.equal(transportErrorUrl, 'http://192.168.1.50:3000');
 });
+
+test('selectActiveEndpoint keeps primaryUrl when portable session token is unavailable', async () => {
+  const result = await selectActiveEndpoint({
+    primaryUrl: 'https://drive.example.com',
+    pairedLanUrl: 'http://192.168.0.151:3000',
+    autoSwitchLan: true,
+    isConnected: true,
+    isWifiOrEthernet: true,
+    hasPortableSession: false,
+    fetchImpl: async () => {
+      throw new Error('should not probe LAN without portable session');
+    },
+  });
+  assert.equal(result.activeUrl, 'https://drive.example.com');
+  assert.equal(result.mode, 'remote');
+});
+
+test('MyDriveClient.issueMobileSessionToken upgrades session and passes failedBaseUrl on 401', async () => {
+  let unauthorizedUrl: string | null = null;
+  const seenCredentials: Array<RequestCredentials | undefined> = [];
+
+  const client = new MyDriveClient({
+    baseUrl: 'http://192.168.0.151:3000',
+    csrfToken: 'csrf_legacy',
+    onUnauthorized: (failedUrl) => {
+      unauthorizedUrl = failedUrl;
+    },
+    fetchImpl: async (input, init) => {
+      seenCredentials.push(init?.credentials);
+      const url = String(input);
+      if (url.endsWith('/api/auth/mobile-token')) {
+        return new Response(JSON.stringify({ session_token: 'mds_upgraded_1' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: 'authentication_required' }), { status: 401 });
+    },
+  });
+
+  const issued = await client.issueMobileSessionToken();
+  assert.equal(issued, 'mds_upgraded_1');
+  assert.equal(seenCredentials[0], 'include');
+
+  await assert.rejects(() => client.me());
+  assert.equal(seenCredentials[1], 'omit');
+  assert.equal(unauthorizedUrl, 'http://192.168.0.151:3000');
+});

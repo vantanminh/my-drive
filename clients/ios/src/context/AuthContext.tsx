@@ -99,13 +99,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   autoSwitchLanRef.current = autoSwitchLan;
   const serverIdRef = useRef<string | null>(null);
   serverIdRef.current = serverId;
+  const userRef = useRef<User | null>(null);
+  userRef.current = user;
+  const lastEmailRef = useRef<string | null>(null);
+  lastEmailRef.current = lastEmail;
+  const csrfTokenRef = useRef<string | null>(null);
+  csrfTokenRef.current = csrfToken;
+  const sessionTokenRef = useRef<string | null>(null);
+  sessionTokenRef.current = sessionToken;
   const evaluatingLanRef = useRef(false);
+  const verifyingUnauthorizedRef = useRef(false);
 
-  const handleUnauthorized = useCallback(() => {
+  const performLocalSignOut = useCallback((notice?: string) => {
     setUser(null);
     setCsrfToken(null);
     setSessionToken(null);
-    setSessionNotice('Your MyDrive session expired. Please sign in again.');
+    if (notice) {
+      setSessionNotice(notice);
+    }
     void clearAuthCredentials();
     if (serverUrlRef.current) {
       void clearSessionCookies(serverUrlRef.current);
@@ -119,6 +130,81 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setCsrfToken(token);
     void saveCsrfToken(token);
   }, []);
+
+  const ensurePortableSessionToken = useCallback(
+    async (
+      primaryBaseUrl: string,
+      explicitCsrf?: string | null,
+      explicitEmail?: string | null,
+    ): Promise<string | null> => {
+      if (sessionTokenRef.current) {
+        return sessionTokenRef.current;
+      }
+      const csrf = explicitCsrf ?? csrfTokenRef.current;
+      if (!csrf && !userRef.current) {
+        return null;
+      }
+      try {
+        const primaryClient = new MyDriveClient({
+          baseUrl: primaryBaseUrl,
+          csrfToken: csrf,
+          sessionToken: null,
+          onCsrfUpdate: handleCsrfUpdate,
+        });
+        const issued = await primaryClient.issueMobileSessionToken();
+        sessionTokenRef.current = issued;
+        setSessionToken(issued);
+        const emailToSave = explicitEmail ?? userRef.current?.email ?? lastEmailRef.current;
+        if (emailToSave) {
+          await saveAuthCredentials(emailToSave, csrf ?? null, issued);
+        }
+        return issued;
+      } catch {
+        return null;
+      }
+    },
+    [handleCsrfUpdate],
+  );
+
+  const handleUnauthorized = useCallback(
+    (failedBaseUrl: string) => {
+      // Ignore stale 401s from a previously active endpoint after a switch already completed.
+      if (activeBaseUrlRef.current && failedBaseUrl !== activeBaseUrlRef.current) {
+        return;
+      }
+      if (verifyingUnauthorizedRef.current) {
+        return;
+      }
+      const primary = serverUrlRef.current;
+      if (primary && failedBaseUrl !== primary) {
+        verifyingUnauthorizedRef.current = true;
+        setActiveBaseUrl(primary);
+        setLanMode('remote');
+        setLanLatencyMs(null);
+        void (async () => {
+          try {
+            const verifyClient = new MyDriveClient({
+              baseUrl: primary,
+              csrfToken: csrfTokenRef.current,
+              sessionToken: sessionTokenRef.current,
+              onCsrfUpdate: handleCsrfUpdate,
+            });
+            await verifyClient.me();
+            // Primary endpoint still authenticates this session; keep signed in on remote.
+          } catch (err) {
+            if (err instanceof MyDriveApiError && err.status === 401) {
+              performLocalSignOut('Your MyDrive session expired. Please sign in again.');
+            }
+          } finally {
+            verifyingUnauthorizedRef.current = false;
+          }
+        })();
+        return;
+      }
+      performLocalSignOut('Your MyDrive session expired. Please sign in again.');
+    },
+    [handleCsrfUpdate, performLocalSignOut],
+  );
 
   const refreshLanStatus = useCallback(async (discoverIfUnpaired = false) => {
     const primary = serverUrlRef.current;
@@ -141,6 +227,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         netState.type === Network.NetworkStateType.WIFI ||
         netState.type === Network.NetworkStateType.ETHERNET;
 
+      let resolvedSessionToken = sessionTokenRef.current;
+      if (!resolvedSessionToken && userRef.current && isConnected && isWifiOrEthernet) {
+        resolvedSessionToken = await ensurePortableSessionToken(primary);
+      }
+      const hasPortableSession = !userRef.current || Boolean(resolvedSessionToken);
+
       const selected = await selectActiveEndpoint({
         primaryUrl: primary,
         pairedLanUrl: lanUrlRef.current,
@@ -148,6 +240,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         expectedServerId: serverIdRef.current,
         isConnected,
         isWifiOrEthernet,
+        hasPortableSession,
       });
 
       if (selected.serverId && selected.serverId !== serverIdRef.current) {
@@ -169,7 +262,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         autoSwitchLanRef.current &&
         isWifiOrEthernet &&
         !lanUrlRef.current &&
-        serverIdRef.current
+        serverIdRef.current &&
+        hasPortableSession
       ) {
         const discovered = await discoverLanNasServers({
           expectedServerId: serverIdRef.current,
@@ -194,7 +288,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       evaluatingLanRef.current = false;
     }
-  }, []);
+  }, [ensurePortableSessionToken]);
 
   const handleTransportError = useCallback(
     (failedBaseUrl: string) => {
@@ -279,6 +373,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           expectedServerId: persisted.serverId,
           isConnected,
           isWifiOrEthernet,
+          hasPortableSession: Boolean(persisted.sessionToken) || !persisted.userEmail,
         });
         if (cancelled) return;
 
@@ -301,18 +396,64 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           onCsrfUpdate: handleCsrfUpdate,
         });
 
+        let activeClient = tempClient;
+        let currentUser: User | null = null;
+        let caps: ServerCapabilities | null = null;
+        let authError: unknown = null;
+
         try {
-          const [caps, currentUser] = await Promise.all([
+          const [loadedCaps, loadedUser] = await Promise.all([
             tempClient.getCapabilities().catch(() => null),
             tempClient.me(),
           ]);
-          if (cancelled) return;
+          caps = loadedCaps;
+          currentUser = loadedUser;
+        } catch (error) {
+          authError = error;
+          // If LAN endpoint failed (or rejected legacy cookie), retry primary/tunnel before clearing credentials.
+          if (endpoint.activeUrl !== persisted.serverUrl) {
+            const primaryClient = new MyDriveClient({
+              baseUrl: persisted.serverUrl,
+              csrfToken: persisted.csrfToken,
+              sessionToken: persisted.sessionToken,
+              onCsrfUpdate: handleCsrfUpdate,
+            });
+            try {
+              const [loadedCaps, loadedUser] = await Promise.all([
+                primaryClient.getCapabilities().catch(() => null),
+                primaryClient.me(),
+              ]);
+              caps = loadedCaps;
+              currentUser = loadedUser;
+              activeClient = primaryClient;
+              authError = null;
+              if (!cancelled) {
+                setActiveBaseUrl(persisted.serverUrl);
+                setLanMode('remote');
+                setLanLatencyMs(null);
+              }
+            } catch (fallbackError) {
+              authError = fallbackError;
+            }
+          }
+        }
+
+        if (cancelled) return;
+
+        if (currentUser) {
           setCapabilities(caps);
           if (caps?.serverId) {
             setServerId(caps.serverId);
             void saveLanConfig({ serverId: caps.serverId });
           }
           setUser(currentUser);
+          if (!persisted.sessionToken) {
+            await ensurePortableSessionToken(
+              activeClient.getBaseUrl(),
+              persisted.csrfToken,
+              currentUser.email,
+            );
+          }
           const syncSettings = await loadSyncSettings();
           await syncBackgroundTaskRegistration(syncSettings.autoBackgroundSync);
 
@@ -325,27 +466,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           ) {
             void refreshLanStatus(true);
           }
-        } catch (error) {
-          if (cancelled) return;
-          if (error instanceof MyDriveApiError && error.status === 401) {
-            await clearAuthCredentials();
-            setCsrfToken(null);
-            setSessionToken(null);
-          } else {
-            // Keep server configured even if NAS is momentarily unreachable.
-            void tempClient
-              .getCapabilities()
-              .then((caps) => {
-                if (!cancelled && caps) {
-                  setCapabilities(caps);
-                  if (caps.serverId) {
-                    setServerId(caps.serverId);
-                    void saveLanConfig({ serverId: caps.serverId });
-                  }
+        } else if (authError instanceof MyDriveApiError && authError.status === 401) {
+          await clearAuthCredentials();
+          setCsrfToken(null);
+          setSessionToken(null);
+        } else {
+          // Keep server configured even if NAS is momentarily unreachable.
+          void activeClient
+            .getCapabilities()
+            .then((fallbackCaps) => {
+              if (!cancelled && fallbackCaps) {
+                setCapabilities(fallbackCaps);
+                if (fallbackCaps.serverId) {
+                  setServerId(fallbackCaps.serverId);
+                  void saveLanConfig({ serverId: fallbackCaps.serverId });
                 }
-              })
-              .catch(() => {});
-          }
+              }
+            })
+            .catch(() => {});
         }
       } finally {
         if (!cancelled) {
@@ -358,7 +496,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [handleCsrfUpdate, refreshLanStatus]);
+  }, [ensurePortableSessionToken, handleCsrfUpdate, refreshLanStatus]);
 
   useEffect(() => {
     if (!serverUrl) return;
@@ -561,14 +699,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       setLanUrl(match.url);
       if (autoSwitchLanRef.current) {
-        setActiveBaseUrl(match.url);
-        setLanMode('lan');
-        setLanLatencyMs(match.latencyMs);
-        setLastLanCheckedAt(new Date().toISOString());
+        const primary = serverUrlRef.current;
+        let canSwitch = !userRef.current || Boolean(sessionTokenRef.current);
+        if (!canSwitch && primary) {
+          const issued = await ensurePortableSessionToken(primary);
+          canSwitch = Boolean(issued);
+        }
+        if (canSwitch) {
+          setActiveBaseUrl(match.url);
+          setLanMode('lan');
+          setLanLatencyMs(match.latencyMs);
+          setLastLanCheckedAt(new Date().toISOString());
+        }
       }
       return { normalizedUrl: match.url, matchedServerId: match.matchedServerId };
     },
-    [refreshLanStatus],
+    [ensurePortableSessionToken, refreshLanStatus],
   );
 
   const setAutoSwitchLan = useCallback(

@@ -318,6 +318,7 @@ export async function selectActiveEndpoint(options: {
   expectedServerId?: string | null;
   isConnected?: boolean;
   isWifiOrEthernet?: boolean;
+  hasPortableSession?: boolean;
   fetchImpl?: typeof fetch;
   probeTimeoutMs?: number;
 }): Promise<EndpointSelectionResult> {
@@ -361,6 +362,15 @@ export async function selectActiveEndpoint(options: {
 
   if (options.pairedLanUrl) {
     const lanCandidate = normalizeEndpointUrl(options.pairedLanUrl);
+    if (options.hasPortableSession === false && lanCandidate !== primary) {
+      return {
+        activeUrl: primary,
+        mode: 'remote',
+        latencyMs: null,
+        lanReachable: false,
+        serverId: options.expectedServerId ?? null,
+      };
+    }
     const probe = await probeLanEndpoint(lanCandidate, {
       expectedServerId: options.expectedServerId,
       timeoutMs,

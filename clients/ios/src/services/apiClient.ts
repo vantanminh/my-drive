@@ -49,7 +49,7 @@ export interface MyDriveClientConfig {
   fetchImpl?: FetchLike;
   onCsrfUpdate?: (token: string | null) => void;
   onSessionTokenUpdate?: (token: string | null) => void;
-  onUnauthorized?: () => void;
+  onUnauthorized?: (failedBaseUrl: string) => void;
   onTransportError?: (failedBaseUrl: string, error: unknown) => void;
 }
 
@@ -92,7 +92,7 @@ export class MyDriveClient {
   private readonly fetchImpl: FetchLike;
   private readonly onCsrfUpdate?: (token: string | null) => void;
   private readonly onSessionTokenUpdate?: (token: string | null) => void;
-  private readonly onUnauthorized?: () => void;
+  private readonly onUnauthorized?: (failedBaseUrl: string) => void;
   private readonly onTransportError?: (failedBaseUrl: string, error: unknown) => void;
 
   constructor(config: MyDriveClientConfig) {
@@ -181,7 +181,8 @@ export class MyDriveClient {
         method,
         headers,
         body: options?.body ?? undefined,
-        credentials: 'include',
+        // Keep bearer mobile sessions isolated from host-bound cookies across LAN/tunnel switches.
+        credentials: this.sessionToken ? 'omit' : 'include',
       });
     } catch (error) {
       this.onTransportError?.(this.baseUrl, error);
@@ -189,7 +190,7 @@ export class MyDriveClient {
     }
 
     if (response.status === 401 && !options?.skipUnauthorizedHook) {
-      this.onUnauthorized?.();
+      this.onUnauthorized?.(this.baseUrl);
     }
 
     if (!response.ok) {
@@ -266,6 +267,18 @@ export class MyDriveClient {
 
   async me(): Promise<User> {
     return this.requestJson<User>('GET', '/api/auth/me');
+  }
+
+  async issueMobileSessionToken(): Promise<string> {
+    const res = await this.requestJson<{ session_token: string }>(
+      'POST',
+      '/api/auth/mobile-token',
+      undefined,
+      { 'X-MyDrive-Client': 'mobile' },
+      true,
+    );
+    this.setSessionToken(res.session_token);
+    return res.session_token;
   }
 
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
