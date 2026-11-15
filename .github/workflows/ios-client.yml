@@ -177,8 +177,8 @@ jobs:
           PROFILE_PATH="$RUNNER_TEMP/mydrive-profile.mobileprovision"
           DECODED_PLIST="$RUNNER_TEMP/mydrive-profile.plist"
 
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
-          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o "$PROFILE_PATH"
+          python3 -c 'import base64, os, sys; open(sys.argv[2], "wb").write(base64.b64decode("".join(os.environ[sys.argv[1]].split()), validate=True))' BUILD_CERTIFICATE_BASE64 "$CERTIFICATE_PATH"
+          python3 -c 'import base64, os, sys; open(sys.argv[2], "wb").write(base64.b64decode("".join(os.environ[sys.argv[1]].split()), validate=True))' BUILD_PROVISION_PROFILE_BASE64 "$PROFILE_PATH"
 
           security cms -D -i "$PROFILE_PATH" > "$DECODED_PLIST"
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$DECODED_PLIST")
@@ -213,8 +213,14 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           DETECTED_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Apple Distribution|iPhone Distribution|Apple Development|iPhone Developer/ { print $2; exit }')
-          SIGNING_IDENTITY="${DETECTED_IDENTITY:-$DEFAULT_IDENTITY}"
+          if [ -z "$DETECTED_IDENTITY" ]; then
+            echo "::error::No valid code-signing identity found in temporary keychain."
+            security find-identity -p codesigning "$KEYCHAIN_PATH" || true
+            exit 1
+          fi
+          SIGNING_IDENTITY="$DETECTED_IDENTITY"
 
           MARKETING_VERSION=$(node -e "console.log(require('./package.json').version || '1.0.0')")
           if [[ "${GITHUB_REF_NAME:-}" == ios-v* ]]; then
@@ -272,6 +278,7 @@ jobs:
               config.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = ENV.fetch("BUNDLE_ID")
               config.build_settings["PROVISIONING_PROFILE_SPECIFIER"] = ENV.fetch("PROFILE_NAME")
               config.build_settings["CODE_SIGN_IDENTITY"] = ENV.fetch("SIGNING_IDENTITY")
+              config.build_settings.delete("CODE_SIGN_IDENTITY[sdk=iphoneos*]")
             end
             project.save
           '
@@ -323,7 +330,8 @@ jobs:
           fi
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
-          echo -n "$ASC_KEY_BASE64" | base64 --decode -o "$KEY_PATH"
+          python3 -c 'import base64, os, sys; open(sys.argv[2], "wb").write(base64.b64decode("".join(os.environ[sys.argv[1]].split()), validate=True))' ASC_KEY_BASE64 "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
           xcrun altool --upload-app \
             --type ios \
             -f clients/ios/dist/MyDrive-iOS.ipa \
