@@ -33,10 +33,12 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/react": "~19.3.0",
+    "patch-package": "^8.0.1",
     "tsx": "^4.23.15",
     "typescript": "~6.0.3"
   },
   "scripts": {
+    "postinstall": "patch-package",
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
