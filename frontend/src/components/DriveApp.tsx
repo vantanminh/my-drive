@@ -1848,7 +1848,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                   }}
                 />
               ) : accountAdminOpen ? (
-                <AccountManagementPanel onClose={() => showDrive({ panel: null })} />
+                <AccountManagementPanel user={user} onClose={() => showDrive({ panel: null })} />
               ) : faceAdminOpen ? (
                 <FaceManagementPanel onClose={() => showDrive({ panel: null })} />
               ) : mediaIndexOpen ? <MediaIndexPanel onClose={() => showDrive({ panel: null })} /> : null

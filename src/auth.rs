@@ -101,9 +101,64 @@ pub(crate) fn valid_password(password: &str) -> bool {
     password.len() <= MAX_PASSWORD_BYTES && password.chars().count() >= MIN_PASSWORD_CHARS
 }
 
+/// Resolves an account's effective quota in signed bytes for API summaries.
+pub(crate) fn effective_quota_bytes(
+    role: &str,
+    db_quota_bytes: Option<i64>,
+    default_owner_quota_bytes: u64,
+) -> Option<i64> {
+    if role == "member" {
+        db_quota_bytes
+    } else {
+        db_quota_bytes.or_else(|| i64::try_from(default_owner_quota_bytes).ok())
+    }
+}
+
+/// Resolves an account's effective quota limit in unsigned bytes for enforcement.
+pub(crate) fn effective_quota_limit(
+    role: &str,
+    db_quota_bytes: Option<i64>,
+    default_owner_quota_bytes: u64,
+) -> Option<u64> {
+    if role == "member" {
+        db_quota_bytes.and_then(|quota| u64::try_from(quota).ok())
+    } else {
+        match db_quota_bytes {
+            Some(quota) => u64::try_from(quota).ok(),
+            None => Some(default_owner_quota_bytes),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_quota_respects_owner_override_or_falls_back_to_default() {
+        let default_owner = 100 * 1024 * 1024 * 1024;
+        assert_eq!(
+            effective_quota_bytes("owner", None, default_owner),
+            Some(default_owner as i64)
+        );
+        assert_eq!(
+            effective_quota_bytes("owner", Some(500_000), default_owner),
+            Some(500_000)
+        );
+        assert_eq!(
+            effective_quota_limit("owner", Some(0), default_owner),
+            Some(0)
+        );
+        assert_eq!(
+            effective_quota_limit("owner", None, default_owner),
+            Some(default_owner)
+        );
+        assert_eq!(effective_quota_limit("member", None, default_owner), None);
+        assert_eq!(
+            effective_quota_limit("member", Some(2048), default_owner),
+            Some(2048)
+        );
+    }
 
     #[test]
     fn bootstrap_passwords_use_argon2id_v19() {

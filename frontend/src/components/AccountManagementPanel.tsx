@@ -2,9 +2,9 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Check, Copy, KeyRound, Plus, RefreshCw, Shield, UserRoundPlus, Users, X } from 'lucide-react';
 import { api } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
-import type { ManagedAccount } from '../types';
+import type { AccountStorage, ManagedAccount, User } from '../types';
 
-type Props = { onClose: () => void };
+type Props = { user: User; onClose: () => void };
 type IssuedCredential = { email: string; password: string };
 
 const GIB = 1024 ** 3;
@@ -23,8 +23,9 @@ function usagePercent(account: ManagedAccount): number {
   return Math.min(100, ((account.usedBytes + account.reservedBytes) / account.quotaBytes) * 100);
 }
 
-export default function AccountManagementPanel({ onClose }: Props) {
+export default function AccountManagementPanel({ user, onClose }: Props) {
   const [accounts, setAccounts] = useState<ManagedAccount[]>([]);
+  const [ownerStorage, setOwnerStorage] = useState<AccountStorage | null>(null);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -42,10 +43,14 @@ export default function AccountManagementPanel({ onClose }: Props) {
     const controller = new AbortController();
     setLoading(true);
     setError('');
-    api.managedAccounts(0, controller.signal)
-      .then((page) => {
+    Promise.all([
+      api.managedAccounts(0, controller.signal),
+      api.accountStorage(controller.signal).catch(() => null),
+    ])
+      .then(([page, storage]) => {
         setAccounts(page.accounts);
         setNextOffset(page.nextOffset);
+        setOwnerStorage(storage);
       })
       .catch((cause: unknown) => {
         if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(friendlyError(cause));
@@ -97,6 +102,30 @@ export default function AccountManagementPanel({ onClose }: Props) {
       setAccounts((current) => current.map((item) => item.id === account.id ? { ...item, quotaBytes: bytes } : item));
       setQuotaDrafts((current) => ({ ...current, [account.id]: quotaInGb(bytes) }));
       setNotice('Storage quota updated for ' + account.email + '.');
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function updateOwnerQuota() {
+    const defaultQuotaBytes = ownerStorage?.quota_bytes ?? 0;
+    const value = Number(quotaDrafts[user.id] ?? quotaInGb(defaultQuotaBytes));
+    if (!Number.isFinite(value) || value < 0 || value > MAX_QUOTA_GB) {
+      setError('Enter a quota between 0 GB and 7,450,580 GB.');
+      return;
+    }
+    setBusyKey(user.id + ':quota');
+    setError('');
+    setNotice('');
+    try {
+      const bytes = quotaBytes(value);
+      await api.updateManagedAccount(user.id, { quotaBytes: bytes });
+      const fresh = await api.accountStorage();
+      setOwnerStorage(fresh);
+      setQuotaDrafts((current) => ({ ...current, [user.id]: quotaInGb(fresh.quota_bytes ?? bytes) }));
+      setNotice('Root account quota updated for ' + user.email + '.');
     } catch (cause: unknown) {
       setError(friendlyError(cause));
     } finally {
@@ -227,6 +256,68 @@ export default function AccountManagementPanel({ onClose }: Props) {
 
       {error && <div className="account-admin-message account-admin-error" role="alert">{error}</div>}
       {notice && !error && <div className="account-admin-message account-admin-notice" role="status">{notice}</div>}
+
+      {ownerStorage && (
+        <article className="account-card account-owner-card">
+          <div className="account-card-identity">
+            <div className="account-card-avatar"><Shield size={17} /></div>
+            <div className="account-card-name">
+              <strong title={user.email}>{user.email}</strong>
+              <span>Root / owner account</span>
+            </div>
+            <span className="account-status"><i />Owner</span>
+          </div>
+          <div className="account-card-storage">
+            <div className="account-storage-label">
+              <span>Storage</span>
+              <strong>
+                {formatSize(ownerStorage.used_bytes + ownerStorage.reserved_bytes)}{' '}
+                <small>of {ownerStorage.quota_bytes == null ? 'Unlimited' : formatSize(ownerStorage.quota_bytes)}</small>
+              </strong>
+            </div>
+            <div
+              className="account-storage-track"
+              role="progressbar"
+              aria-label={'Storage used by ' + user.email}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(ownerStorage.percent_used ?? 0)}
+            >
+              <i style={{ width: Math.min(100, ownerStorage.percent_used ?? 0) + '%' }} />
+            </div>
+            <small>{formatSize(ownerStorage.used_bytes)} stored · {formatSize(ownerStorage.reserved_bytes)} uploading</small>
+          </div>
+          <div className="account-card-actions">
+            {(() => {
+              const currentOwnerQuota = ownerStorage.quota_bytes ?? 0;
+              const ownerDraft = quotaDrafts[user.id] ?? quotaInGb(currentOwnerQuota);
+              const parsedOwnerQuota = Number(ownerDraft);
+              const ownerQuotaChanged = ownerStorage.quota_bytes == null
+                ? Number.isFinite(parsedOwnerQuota)
+                : Number.isFinite(parsedOwnerQuota) && quotaBytes(parsedOwnerQuota) !== currentOwnerQuota;
+              return (
+                <form className="account-quota-edit" onSubmit={(event) => { event.preventDefault(); void updateOwnerQuota(); }}>
+                  <label htmlFor={'quota-' + user.id}>Quota <span>GB</span></label>
+                  <input
+                    id={'quota-' + user.id}
+                    className="text-input"
+                    type="number"
+                    min="0"
+                    max={MAX_QUOTA_GB}
+                    step="0.01"
+                    value={ownerDraft}
+                    onChange={(event) => setQuotaDrafts((current) => ({ ...current, [user.id]: event.target.value }))}
+                    aria-label={'Storage quota for ' + user.email + ' in gigabytes'}
+                  />
+                  <button className="button button-secondary" type="submit" disabled={!ownerQuotaChanged || busyKey !== null || issuedCredential !== null}>
+                    {busyKey === user.id + ':quota' ? 'Saving…' : 'Save'}
+                  </button>
+                </form>
+              );
+            })()}
+          </div>
+        </article>
+      )}
 
       <div className="account-admin-list-heading">
         <div><Users size={16} /><strong>Accounts</strong><span>{accounts.length}{nextOffset != null ? '+' : ''}</span></div>

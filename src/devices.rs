@@ -1277,15 +1277,12 @@ async fn ensure_quota(
             "authentication_required",
         ));
     }
-    let quota_limit =
-        if account.role == "member" {
-            u64::try_from(account.quota_bytes.ok_or_else(|| {
-                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
-            })?)
-            .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"))?
-        } else {
-            state.transfer_settings.owner_quota_bytes
-        };
+    let quota_limit = crate::auth::effective_quota_limit(
+        &account.role,
+        account.quota_bytes,
+        state.transfer_settings.owner_quota_bytes,
+    )
+    .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"))?;
     let usage = sqlx::query_as::<_, QuotaUsage>(
         "SELECT \
             (SELECT COALESCE(SUM(version.size_bytes), 0)::BIGINT \

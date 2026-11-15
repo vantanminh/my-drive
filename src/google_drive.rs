@@ -2653,11 +2653,8 @@ async fn quota_room_tx(
     if !account.2 {
         return Err(SyncError::Store("account_disabled"));
     }
-    let limit = if account.0 == "member" {
-        u64::try_from(account.1.ok_or(SyncError::Store("account_disabled"))?).unwrap_or(0)
-    } else {
-        owner_quota
-    };
+    let limit =
+        crate::auth::effective_quota_limit(&account.0, account.1, owner_quota).unwrap_or(0);
     let usage = sqlx::query_as::<_, (i64, i64)>(
         "SELECT \
             (SELECT COALESCE(SUM(version.size_bytes), 0)::BIGINT \

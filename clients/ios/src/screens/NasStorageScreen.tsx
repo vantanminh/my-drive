@@ -49,7 +49,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   other: '#94a3b0',
 };
 
-const QUOTA_PRESETS_GB = [10, 50, 100, 500, 1024];
+const QUOTA_PRESETS_GB = [50, 100, 500, 1024, 2048, 4096];
 
 function categoryColor(category: string): string {
   return CATEGORY_COLORS[category] ?? CATEGORY_COLORS.other;
@@ -344,14 +344,31 @@ export function NasStorageScreen() {
                       : `of ${formatBytes(account.quota_bytes)} • ${formatBytes(account.available_bytes)} free`}
                   </Text>
                 </View>
-                {account.percent_used != null ? (
-                  <StatusBadge
-                    tone={account.percent_used >= 90 ? 'danger' : 'accent'}
-                    label={`${Math.round(account.percent_used)}%`}
-                  />
-                ) : (
-                  <StatusBadge tone="accent" label="Unlimited" />
-                )}
+                <View style={styles.quotaTopActions}>
+                  {account.percent_used != null ? (
+                    <StatusBadge
+                      tone={account.percent_used >= 90 ? 'danger' : 'accent'}
+                      label={`${Math.round(account.percent_used)}%`}
+                    />
+                  ) : (
+                    <StatusBadge tone="accent" label="Unlimited" />
+                  )}
+                  {isOwner && user ? (
+                    <Pressable
+                      onPress={() =>
+                        openQuotaModal({
+                          id: user.id,
+                          email: user.email,
+                          usedBytes: account.used_bytes + account.reserved_bytes,
+                          currentQuotaBytes: account.quota_bytes,
+                        })
+                      }
+                      style={styles.quotaEditBtn}
+                    >
+                      <Text style={styles.quotaEditText}>Quota</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
               </View>
               {!account.unlimited && account.quota_bytes ? (
                 <View style={styles.meterTrack}>
@@ -410,7 +427,7 @@ export function NasStorageScreen() {
               {server.users.map((row, idx) => {
                 const isLast = idx === server.users.length - 1;
                 const managed = managedAccounts.find((m) => m.id === row.id);
-                const editableMember = isOwner && row.role === 'member';
+                const editableAccount = isOwner && (row.role === 'member' || row.id === user?.id);
                 return (
                   <View
                     key={row.id}
@@ -435,7 +452,7 @@ export function NasStorageScreen() {
                           : ''}
                       </Text>
                     </View>
-                    {editableMember ? (
+                    {editableAccount ? (
                       <Pressable
                         onPress={() =>
                           openQuotaModal({
@@ -591,6 +608,7 @@ const styles = StyleSheet.create({
   },
   flex: {
     flex: 1,
+    minWidth: 0,
   },
   center: {
     flex: 1,
@@ -676,6 +694,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: spacing.md,
+  },
+  quotaTopActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+    flexShrink: 0,
   },
   quotaUsed: {
     fontSize: 22,

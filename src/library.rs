@@ -1030,11 +1030,11 @@ async fn account_storage(
     user: AuthenticatedUser,
 ) -> Result<Response, LibraryError> {
     let usage = usage_for(&state, user.id).await?;
-    let quota_bytes = if user.role == "member" {
-        usage.quota_bytes
-    } else {
-        i64::try_from(state.transfer_settings.owner_quota_bytes).ok()
-    };
+    let quota_bytes = crate::auth::effective_quota_bytes(
+        &user.role,
+        usage.quota_bytes,
+        state.transfer_settings.owner_quota_bytes,
+    );
     let categories = categories_for(&state, Some(user.id)).await?;
     let largest_files = largest_files_for(&state, Some(user.id)).await?;
     let (trash_count, trash_bytes) = trash_usage_for(&state, Some(user.id)).await?;
@@ -1268,8 +1268,12 @@ async fn server_storage(
             percent_of_hdd: hdd_total.map(|total| percent_of(row.used_bytes.max(0) as u64, total)),
             id: row.id,
             email: row.email,
+            quota_bytes: crate::auth::effective_quota_bytes(
+                &row.role,
+                row.quota_bytes,
+                state.transfer_settings.owner_quota_bytes,
+            ),
             role: row.role,
-            quota_bytes: row.quota_bytes,
             used_bytes: row.used_bytes,
         })
         .collect();

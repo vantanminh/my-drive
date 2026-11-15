@@ -286,6 +286,10 @@ async fn update_account(
     if request.quota_bytes.is_none() && request.disabled.is_none() {
         return Err(AdminAccountError::BadRequest);
     }
+    let updating_self = account_id == user.id;
+    if updating_self && (request.disabled.is_some() || request.quota_bytes.is_none()) {
+        return Err(AdminAccountError::BadRequest);
+    }
     let quota_bytes = request
         .quota_bytes
         .map(|quota| {
@@ -305,15 +309,26 @@ async fn update_account(
         .execute(&mut *transaction)
         .await
         .map_err(AdminAccountError::Database)?;
-    let existing_disabled: Option<bool> = sqlx::query_scalar(
-        "SELECT disabled_at IS NOT NULL FROM users \
-          WHERE id = $1 AND managed_by = $2 AND role = 'member' FOR UPDATE",
-    )
-    .bind(account_id)
-    .bind(user.id)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(AdminAccountError::Database)?;
+    let existing_disabled: Option<bool> = if updating_self {
+        sqlx::query_scalar(
+            "SELECT disabled_at IS NOT NULL FROM users \
+              WHERE id = $1 AND role = 'owner' FOR UPDATE",
+        )
+        .bind(account_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?
+    } else {
+        sqlx::query_scalar(
+            "SELECT disabled_at IS NOT NULL FROM users \
+              WHERE id = $1 AND managed_by = $2 AND role = 'member' FOR UPDATE",
+        )
+        .bind(account_id)
+        .bind(user.id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?
+    };
     let existing_disabled = existing_disabled.ok_or(AdminAccountError::NotFound)?;
 
     if let Some(quota_bytes) = quota_bytes {
@@ -343,46 +358,71 @@ async fn update_account(
         }
     }
 
-    sqlx::query(
-        "UPDATE users \
-            SET quota_bytes = COALESCE($3, quota_bytes), \
-                disabled_at = CASE \
-                    WHEN $4::BOOLEAN IS NULL THEN disabled_at \
-                    WHEN $4 THEN COALESCE(disabled_at, now()) \
-                    ELSE NULL \
-                END, \
-                updated_at = now() \
-          WHERE id = $1 AND managed_by = $2 AND role = 'member'",
-    )
-    .bind(account_id)
-    .bind(user.id)
-    .bind(quota_bytes)
-    .bind(request.disabled)
-    .execute(&mut *transaction)
-    .await
-    .map_err(AdminAccountError::Database)?;
-
-    if request.disabled == Some(true) || (existing_disabled && request.disabled.is_none()) {
+    if updating_self {
         sqlx::query(
-            "UPDATE sessions SET revoked_at = now() \
-              WHERE user_id = $1 AND revoked_at IS NULL",
+            "UPDATE users \
+                SET quota_bytes = COALESCE($2, quota_bytes), \
+                    updated_at = now() \
+              WHERE id = $1 AND role = 'owner'",
         )
         .bind(account_id)
+        .bind(quota_bytes)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+
+        sqlx::query(
+            "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+             VALUES ('owner_quota_updated', $1, $2, jsonb_build_object('quota_bytes', $3))",
+        )
+        .bind(user.id)
+        .bind(account_id)
+        .bind(quota_bytes)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+    } else {
+        sqlx::query(
+            "UPDATE users \
+                SET quota_bytes = COALESCE($3, quota_bytes), \
+                    disabled_at = CASE \
+                        WHEN $4::BOOLEAN IS NULL THEN disabled_at \
+                        WHEN $4 THEN COALESCE(disabled_at, now()) \
+                        ELSE NULL \
+                    END, \
+                    updated_at = now() \
+              WHERE id = $1 AND managed_by = $2 AND role = 'member'",
+        )
+        .bind(account_id)
+        .bind(user.id)
+        .bind(quota_bytes)
+        .bind(request.disabled)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AdminAccountError::Database)?;
+
+        if request.disabled == Some(true) || (existing_disabled && request.disabled.is_none()) {
+            sqlx::query(
+                "UPDATE sessions SET revoked_at = now() \
+                  WHERE user_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(account_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AdminAccountError::Database)?;
+        }
+        sqlx::query(
+            "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+             VALUES ('child_account_updated', $1, $2, jsonb_build_object('quota_bytes', $3, 'disabled', $4))",
+        )
+        .bind(user.id)
+        .bind(account_id)
+        .bind(quota_bytes)
+        .bind(request.disabled)
         .execute(&mut *transaction)
         .await
         .map_err(AdminAccountError::Database)?;
     }
-    sqlx::query(
-        "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
-         VALUES ('child_account_updated', $1, $2, jsonb_build_object('quota_bytes', $3, 'disabled', $4))",
-    )
-    .bind(user.id)
-    .bind(account_id)
-    .bind(quota_bytes)
-    .bind(request.disabled)
-    .execute(&mut *transaction)
-    .await
-    .map_err(AdminAccountError::Database)?;
     transaction
         .commit()
         .await

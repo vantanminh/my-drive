@@ -119,16 +119,27 @@ function Meter({ label, used, total, free }: { label: string; used: number; tota
   );
 }
 
+const GIB = 1024 ** 3;
+const MAX_QUOTA_GB = 8_000_000_000_000_000 / GIB;
+
 export default function StoragePage({ user }: { user: User }) {
   const operator = user.role === 'owner' || user.role === 'admin';
   const [account, setAccount] = useState<AccountStorage | null>(null);
   const [server, setServer] = useState<ServerStorage | null>(null);
   const [error, setError] = useState('');
+  const [ownerQuotaGb, setOwnerQuotaGb] = useState('');
+  const [savingOwnerQuota, setSavingOwnerQuota] = useState(false);
+  const [ownerQuotaNotice, setOwnerQuotaNotice] = useState('');
 
   useEffect(() => {
     const controller = new AbortController();
     setError('');
-    const accountRequest = api.accountStorage(controller.signal).then(setAccount);
+    const accountRequest = api.accountStorage(controller.signal).then((data) => {
+      setAccount(data);
+      if (data.quota_bytes != null) {
+        setOwnerQuotaGb((data.quota_bytes / GIB).toFixed(2).replace(/\.00$/, ''));
+      }
+    });
     const serverRequest = operator
       ? api.serverStorage(controller.signal).then(setServer)
       : Promise.resolve();
@@ -137,6 +148,36 @@ export default function StoragePage({ user }: { user: User }) {
     });
     return () => controller.abort();
   }, [operator]);
+
+  async function saveOwnerQuota(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const gb = Number(ownerQuotaGb);
+    if (!Number.isFinite(gb) || gb < 0 || gb > MAX_QUOTA_GB) {
+      setError('Enter a quota between 0 GB and 7,450,580 GB.');
+      return;
+    }
+    setSavingOwnerQuota(true);
+    setError('');
+    setOwnerQuotaNotice('');
+    try {
+      const bytes = Math.round(gb * GIB);
+      await api.updateManagedAccount(user.id, { quotaBytes: bytes });
+      const [freshAccount, freshServer] = await Promise.all([
+        api.accountStorage(),
+        operator ? api.serverStorage() : Promise.resolve(null),
+      ]);
+      setAccount(freshAccount);
+      if (freshServer) setServer(freshServer);
+      if (freshAccount.quota_bytes != null) {
+        setOwnerQuotaGb((freshAccount.quota_bytes / GIB).toFixed(2).replace(/\.00$/, ''));
+      }
+      setOwnerQuotaNotice('Root account quota updated.');
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setSavingOwnerQuota(false);
+    }
+  }
 
   const largest = account?.largest_files ?? [];
   const committed = account ? account.used_bytes + account.reserved_bytes : 0;
@@ -151,6 +192,7 @@ export default function StoragePage({ user }: { user: User }) {
         </div>
       </header>
       {error && <div className="notice notice-error" role="alert"><span>{error}</span></div>}
+      {ownerQuotaNotice && !error && <div className="notice notice-success" role="status"><span>{ownerQuotaNotice}</span></div>}
       {!account && !error && <div className="storage-skeleton" role="status">Loading storage…</div>}
       {account && (
         <>
@@ -163,6 +205,25 @@ export default function StoragePage({ user }: { user: User }) {
               <article><span>Uploading</span><strong>{formatSize(account.reserved_bytes)}</strong></article>
             </div>
           </div>
+          {user.role === 'owner' && (
+            <form className="account-quota-edit" onSubmit={(event) => void saveOwnerQuota(event)}>
+              <label htmlFor="storage-owner-quota">Root quota <span>GB</span></label>
+              <input
+                id="storage-owner-quota"
+                className="text-input"
+                type="number"
+                min="0"
+                max={MAX_QUOTA_GB}
+                step="0.01"
+                value={ownerQuotaGb}
+                onChange={(event) => setOwnerQuotaGb(event.target.value)}
+                aria-label="Root account storage quota in gigabytes"
+              />
+              <button className="button button-secondary" type="submit" disabled={savingOwnerQuota}>
+                {savingOwnerQuota ? 'Saving…' : 'Save root quota'}
+              </button>
+            </form>
+          )}
           <p className="storage-summary">
             {formatSize(committed)} is committed
             {account.quota_bytes != null ? ` of ${formatSize(account.quota_bytes)}` : ''}.
