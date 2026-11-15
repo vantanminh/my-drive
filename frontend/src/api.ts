@@ -681,10 +681,17 @@ export const api = {
     }),
   networkDriveStatus: (signal?: AbortSignal) =>
     request<NetworkDriveStatus>('/api/network-drive', { signal, cache: 'no-store' }),
-  setNetworkDrive: (enabled: boolean) =>
+  setNetworkDrive: (patch: { enabled?: boolean; smbEnabled?: boolean }) =>
     request<NetworkDriveStatus>('/api/network-drive', {
       method: 'PATCH',
-      json: { enabled },
+      json: patch,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  setSmbPassword: (password: string) =>
+    request<NetworkDriveStatus>('/api/network-drive/smb-password', {
+      method: 'PUT',
+      json: { password },
       csrf: true,
       cache: 'no-store'
     }),

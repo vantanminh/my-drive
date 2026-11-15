@@ -338,4 +338,7 @@ export type NetworkDriveStatus = {
   lanOnly: boolean;
   readOnly: boolean;
   canManage: boolean;
+  smbEnabled: boolean;
+  smbAvailable: boolean;
+  smbUsername: string | null;
 };
