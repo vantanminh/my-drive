@@ -328,15 +328,45 @@ jobs:
             echo "TestFlight secrets (ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_BASE64) not configured; skipping TestFlight upload."
             exit 0
           fi
+          IPA_PATH="dist/MyDrive-iOS.ipa"
+          if [ ! -f "$IPA_PATH" ]; then
+            echo "::error::Signed IPA not found at $IPA_PATH"
+            exit 1
+          fi
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
           python3 -c 'import base64, os, sys; open(sys.argv[2], "wb").write(base64.b64decode("".join(os.environ[sys.argv[1]].split()), validate=True))' ASC_KEY_BASE64 "$KEY_PATH"
           chmod 600 "$KEY_PATH"
+          ALTOOL_OUT="$RUNNER_TEMP/altool-upload.json"
+          ALTOOL_ERR="$RUNNER_TEMP/altool-upload.err"
+          set +e
           xcrun altool --upload-app \
             --type ios \
-            -f clients/ios/dist/MyDrive-iOS.ipa \
+            -f "$IPA_PATH" \
             --apiKey "$ASC_KEY_ID" \
-            --apiIssuer "$ASC_ISSUER_ID"
+            --apiIssuer "$ASC_ISSUER_ID" \
+            --output-format json > "$ALTOOL_OUT" 2> "$ALTOOL_ERR"
+          ALTOOL_RC=$?
+          set -e
+          cat "$ALTOOL_ERR"
+          cat "$ALTOOL_OUT"
+          if [ "$ALTOOL_RC" -ne 0 ]; then
+            echo "::error::xcrun altool failed with exit code $ALTOOL_RC"
+            exit "$ALTOOL_RC"
+          fi
+          python3 -c '
+          import json, pathlib, sys
+          out = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").strip()
+          err = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8", errors="replace")
+          if "ERROR:" in err:
+              raise SystemExit(f"altool reported error in stderr: {err}")
+          if not out:
+              raise SystemExit("altool produced no JSON response on stdout")
+          data = json.loads(out)
+          errors = data.get("product-errors") or data.get("errors")
+          if errors:
+              raise SystemExit(f"altool reported product errors: {errors}")
+          ' "$ALTOOL_OUT" "$ALTOOL_ERR"
 
       - name: Publish tagged iOS GitHub release
         if: startsWith(github.ref, 'refs/tags/ios-v')
