@@ -96,11 +96,7 @@ export default function NetworkDrivePanel({ email, onClose, onOpenDeveloper }: P
               </div>
             </div>
             <ol>
-              <li>
-                Create an API key with the <code>drive:read</code> scope in{' '}
-                <button className="link-button" type="button" onClick={onOpenDeveloper}>Settings · Developer</button>.
-              </li>
-              <li>Username: <code>{email}</code> · Password: the API key (<code>mdk_…</code>).</li>
+              <li>Username: <code>{email}</code> &middot; Password: your My Drive account password (an API key with the <code>drive:read</code> scope from <button className="link-button" type="button" onClick={onOpenDeveloper}>Settings &middot; Developer</button> also works).</li>
               <li><strong>Windows:</strong> Explorer → This PC → Map network drive → <code>{url}</code> (HTTPS is required unless Basic over HTTP is allowed in the WebClient registry settings).</li>
               <li><strong>macOS:</strong> Finder → Go → Connect to Server → <code>{url}</code>.</li>
               <li><strong>Linux:</strong> <code>davs://{host}/webdav/</code> in the file manager, or <code>mount -t davfs {url} /mnt/drive</code>.</li>

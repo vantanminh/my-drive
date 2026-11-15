@@ -13,7 +13,9 @@ pub use session::{
     AuthSettings, LoginRateLimiter, change_password, list_sessions, login, logout, me,
     revoke_other_sessions, revoke_session,
 };
-pub(crate) use session::{AuthenticatedUser, new_temporary_password, require_csrf};
+pub(crate) use session::{
+    AuthenticatedUser, new_temporary_password, require_csrf, verify_login_password,
+};
 
 pub(crate) const MAX_PASSWORD_BYTES: usize = 1024;
 pub(crate) const MIN_PASSWORD_CHARS: usize = 12;

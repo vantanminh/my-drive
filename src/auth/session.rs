@@ -939,7 +939,7 @@ pub(crate) fn new_temporary_password() -> anyhow::Result<String> {
     secure_token(CSRF_TOKEN_BYTES).map(|(_, encoded)| encoded)
 }
 
-fn verify_login_password(encoded_hash: Option<String>, password: &str) -> bool {
+pub(crate) fn verify_login_password(encoded_hash: Option<String>, password: &str) -> bool {
     let user_exists = encoded_hash.is_some();
     let encoded_hash = encoded_hash.unwrap_or_else(|| dummy_password_hash().to_owned());
     let parsed_hash = PasswordHash::new(&encoded_hash);

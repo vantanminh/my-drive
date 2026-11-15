@@ -327,8 +327,8 @@ async fn authenticate(
     else {
         return Ok(None);
     };
-    if token.len() != 47 || !token.starts_with("mdk_") {
-        return Ok(None);
+    if !(token.len() == 47 && token.starts_with("mdk_")) {
+        return password_login(state, &email, token).await;
     }
     let row: Option<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT k.id, k.owner_id FROM api_keys k JOIN users u ON u.id = k.owner_id \
@@ -349,6 +349,72 @@ async fn authenticate(
         .execute(&state.pool)
         .await?;
     Ok(Some(DavUser { id: owner_id }))
+}
+
+/// Recently verified credentials, so that a client issuing many requests does
+/// not pay for an Argon2 verification each time. The digest covers the stored
+/// password hash, so changing the password invalidates the entry at once.
+static VERIFIED: std::sync::Mutex<Vec<([u8; 32], std::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+const VERIFIED_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+const VERIFIED_MAX: usize = 256;
+
+async fn password_login(
+    state: &AppState,
+    email: &str,
+    password: String,
+) -> Result<Option<DavUser>, sqlx::Error> {
+    if password.is_empty() || password.len() > crate::auth::MAX_PASSWORD_BYTES {
+        return Ok(None);
+    }
+    let limiter_key = format!("webdav:{email}");
+    if state.login_rate_limiter.retry_after_seconds(&limiter_key).is_some() {
+        return Ok(None);
+    }
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, password_hash FROM users \
+          WHERE lower(email) = $1 AND disabled_at IS NULL AND NOT must_change_password",
+    )
+    .bind(email)
+    .fetch_optional(&state.pool)
+    .await?;
+    let digest: [u8; 32] = {
+        let mut hasher = Sha256::new();
+        hasher.update(email.as_bytes());
+        hasher.update([0]);
+        hasher.update(password.as_bytes());
+        hasher.update([0]);
+        hasher.update(row.as_ref().map(|r| r.1.as_bytes()).unwrap_or_default());
+        hasher.finalize().into()
+    };
+    let now = std::time::Instant::now();
+    if row.is_some() {
+        let cache = VERIFIED.lock().unwrap_or_else(|p| p.into_inner());
+        if cache
+            .iter()
+            .any(|(d, at)| *d == digest && now.duration_since(*at) < VERIFIED_TTL)
+        {
+            return Ok(row.map(|r| DavUser { id: r.0 }));
+        }
+    }
+    let hash = row.as_ref().map(|r| r.1.clone());
+    let verified = tokio::task::spawn_blocking(move || {
+        crate::auth::verify_login_password(hash, &password)
+    })
+    .await
+    .unwrap_or(false);
+    let Some((id, _)) = row.filter(|_| verified) else {
+        state.login_rate_limiter.record_failure(&limiter_key);
+        return Ok(None);
+    };
+    state.login_rate_limiter.clear(&limiter_key);
+    let mut cache = VERIFIED.lock().unwrap_or_else(|p| p.into_inner());
+    cache.retain(|(_, at)| now.duration_since(*at) < VERIFIED_TTL);
+    if cache.len() >= VERIFIED_MAX {
+        cache.remove(0);
+    }
+    cache.push((digest, now));
+    Ok(Some(DavUser { id }))
 }
 
 #[derive(Clone, Copy)]
