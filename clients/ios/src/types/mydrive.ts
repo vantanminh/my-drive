@@ -372,6 +372,11 @@ export interface SyncProgressSnapshot {
   currentFilename: string | null;
   currentInICloud: boolean;
   currentProgress: number;
+  currentBytesUploaded?: number;
+  currentTotalBytes?: number;
+  bytesPerSecond?: number;
+  etaSeconds?: number | null;
+  statusDetail?: string | null;
   totalDiscovered: number;
   processedCount: number;
   uploadedCount: number;

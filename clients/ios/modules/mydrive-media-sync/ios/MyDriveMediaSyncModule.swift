@@ -51,6 +51,112 @@ private final class ModuleEventRelay: @unchecked Sendable {
   }
 }
 
+private final class ChunkTransferDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+  private let lock = NSLock()
+  private let onProgress: @Sendable (UInt64, UInt64) -> Void
+  private var activeTaskId: Int?
+  private var baseOffset: UInt64 = 0
+  private var totalBytes: UInt64 = 0
+  private var lastEmitTime: CFAbsoluteTime = 0
+  private var receivedData = Data()
+  private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+
+  init(onProgress: @escaping @Sendable (UInt64, UInt64) -> Void) {
+    self.onProgress = onProgress
+  }
+
+  func upload(
+    session: URLSession,
+    request: URLRequest,
+    body: Data,
+    baseOffset: UInt64,
+    totalBytes: UInt64
+  ) async throws -> (Data, HTTPURLResponse) {
+    let task = session.uploadTask(with: request, from: body)
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { cont in
+        lock.lock()
+        self.activeTaskId = task.taskIdentifier
+        self.baseOffset = baseOffset
+        self.totalBytes = totalBytes
+        self.lastEmitTime = 0
+        self.receivedData = Data()
+        self.continuation = cont
+        lock.unlock()
+        task.resume()
+      }
+    } onCancel: {
+      task.cancel()
+    }
+  }
+
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    didSendBodyData bytesSent: Int64,
+    totalBytesSent: Int64,
+    totalBytesExpectedToSend: Int64
+  ) {
+    let callback: (@Sendable (UInt64, UInt64) -> Void)?
+    let sent: UInt64
+    let expected: UInt64
+
+    lock.lock()
+    if activeTaskId == task.taskIdentifier {
+      let now = CFAbsoluteTimeGetCurrent()
+      let isChunkDone = totalBytesExpectedToSend > 0 && totalBytesSent >= totalBytesExpectedToSend
+      if isChunkDone || (now - lastEmitTime >= 0.1) {
+        lastEmitTime = now
+        let rawSent = baseOffset + UInt64(max(0, totalBytesSent))
+        sent = min(totalBytes, rawSent)
+        expected = totalBytes
+        callback = onProgress
+      } else {
+        sent = 0
+        expected = 0
+        callback = nil
+      }
+    } else {
+      sent = 0
+      expected = 0
+      callback = nil
+    }
+    lock.unlock()
+
+    callback?(sent, expected)
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    lock.lock()
+    if activeTaskId == dataTask.taskIdentifier {
+      receivedData.append(data)
+    }
+    lock.unlock()
+  }
+
+  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    lock.lock()
+    guard activeTaskId == task.taskIdentifier, let cont = continuation else {
+      lock.unlock()
+      return
+    }
+    let data = receivedData
+    let response = task.response as? HTTPURLResponse
+    activeTaskId = nil
+    receivedData = Data()
+    continuation = nil
+    lock.unlock()
+
+    if let error {
+      cont.resume(throwing: error)
+    } else if let response {
+      cont.resume(returning: (data, response))
+    } else {
+      cont.resume(throwing: MediaSyncOperationException(("UPLOAD_FAILED", "No HTTP response returned for upload chunk.")))
+    }
+  }
+}
+
 private final class LockedFlag: @unchecked Sendable {
   private let lock = NSLock()
   private var value = false
@@ -551,6 +657,68 @@ public final class MyDriveMediaSyncModule: Module {
     return (hex, totalBytes)
   }
 
+  private static func parseUploadOffset(_ response: HTTPURLResponse) -> UInt64? {
+    for (key, value) in response.allHeaderFields {
+      if String(describing: key).lowercased() == "upload-offset",
+         let parsed = UInt64(String(describing: value).trimmingCharacters(in: .whitespaces))
+      {
+        return parsed
+      }
+    }
+    return nil
+  }
+
+  private static func isRetryableTransportError(_ error: Error) -> Bool {
+    let nsError = error as NSError
+    if nsError.domain == NSURLErrorDomain {
+      switch nsError.code {
+      case NSURLErrorTimedOut,
+           NSURLErrorCannotFindHost,
+           NSURLErrorCannotConnectToHost,
+           NSURLErrorNetworkConnectionLost,
+           NSURLErrorDNSLookupFailed,
+           NSURLErrorNotConnectedToInternet,
+           NSURLErrorResourceUnavailable,
+           NSURLErrorInternationalRoamingOff,
+           NSURLErrorDataNotAllowed:
+        return true
+      default:
+        return false
+      }
+    }
+    return false
+  }
+
+  private static func isRetryableStatus(_ statusCode: Int) -> Bool {
+    return statusCode == 408 || statusCode == 429 || (500...599).contains(statusCode)
+  }
+
+  private static func fetchRemoteUploadOffset(
+    session: URLSession,
+    patchURL: URL,
+    csrfToken: String?
+  ) async -> UInt64? {
+    var headRequest = URLRequest(url: patchURL)
+    headRequest.httpMethod = "HEAD"
+    headRequest.httpShouldHandleCookies = true
+    headRequest.timeoutInterval = 20
+    headRequest.setValue("1.0.0", forHTTPHeaderField: "Tus-Resumable")
+    if let csrf = csrfToken, !csrf.isEmpty {
+      headRequest.setValue(csrf, forHTTPHeaderField: "X-Csrf-Token")
+    }
+    do {
+      let (_, response) = try await session.data(for: headRequest)
+      if let httpResponse = response as? HTTPURLResponse,
+         (200...299).contains(httpResponse.statusCode)
+      {
+        return parseUploadOffset(httpResponse)
+      }
+    } catch {
+      // Caller falls back to existing offset or next retry.
+    }
+    return nil
+  }
+
   private static func performChunkedUpload(
     baseUrl: String,
     uploadId: String,
@@ -558,7 +726,7 @@ public final class MyDriveMediaSyncModule: Module {
     startOffset: Double,
     chunkSize: Double,
     csrfToken: String?,
-    onProgress: @Sendable (UInt64, UInt64) -> Void
+    onProgress: @Sendable @escaping (UInt64, UInt64) -> Void
   ) async throws -> UInt64 {
     let trimmedBase = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     guard let patchURL = URL(string: "\(trimmedBase)/api/uploads/\(uploadId)") else {
@@ -577,14 +745,31 @@ public final class MyDriveMediaSyncModule: Module {
       return 0
     }
 
-    let clampedChunk = UInt64(min(64 * 1024 * 1024, max(64 * 1024, Int(chunkSize))))
+    let minChunk: UInt64 = 512 * 1024
+    let maxChunk: UInt64 = 8 * 1024 * 1024
+    var adaptiveChunk = UInt64(min(Int(maxChunk), max(Int(minChunk), Int(chunkSize))))
     let resolvedCsrf = resolveCsrfToken(explicit: csrfToken, for: patchURL)
+
+    let config = URLSessionConfiguration.ephemeral
+    config.waitsForConnectivity = true
+    config.timeoutIntervalForRequest = 45
+    config.timeoutIntervalForResource = 300
+    config.httpCookieStorage = HTTPCookieStorage.shared
+    config.httpShouldSetCookies = true
+    config.requestCachePolicy = .reloadIgnoringLocalCacheData
+
+    let delegate = ChunkTransferDelegate(onProgress: onProgress)
+    let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+    defer { session.finishTasksAndInvalidate() }
+
     var conflictRetries = 0
+    var transientFailures = 0
+    let maxTransientFailures = 4
 
     while offset < totalBytes {
       try handle.seek(toOffset: offset)
       let remaining = totalBytes - offset
-      let toRead = Int(min(clampedChunk, remaining))
+      let toRead = Int(min(adaptiveChunk, remaining))
       let chunk = try handle.read(upToCount: toRead) ?? Data()
       if chunk.isEmpty {
         throw MediaSyncOperationException(("UPLOAD_EOF", "Unexpected EOF while reading upload chunk."))
@@ -592,9 +777,8 @@ public final class MyDriveMediaSyncModule: Module {
 
       var request = URLRequest(url: patchURL)
       request.httpMethod = "PATCH"
-      request.httpBody = chunk
       request.httpShouldHandleCookies = true
-      request.timeoutInterval = 300
+      request.timeoutInterval = 120
       request.setValue("application/offset+octet-stream", forHTTPHeaderField: "Content-Type")
       request.setValue("\(offset)", forHTTPHeaderField: "Upload-Offset")
       request.setValue("1.0.0", forHTTPHeaderField: "Tus-Resumable")
@@ -602,38 +786,98 @@ public final class MyDriveMediaSyncModule: Module {
         request.setValue(csrf, forHTTPHeaderField: "X-Csrf-Token")
       }
 
-      let (data, response) = try await URLSession.shared.data(for: request)
-      guard let httpResponse = response as? HTTPURLResponse else {
-        throw MediaSyncOperationException(("UPLOAD_FAILED", "No HTTP response returned for upload chunk."))
-      }
+      let chunkStart = CFAbsoluteTimeGetCurrent()
+      do {
+        let (data, httpResponse) = try await delegate.upload(
+          session: session,
+          request: request,
+          body: chunk,
+          baseOffset: offset,
+          totalBytes: totalBytes
+        )
 
-      if httpResponse.statusCode == 409 && conflictRetries < 2 {
-        conflictRetries += 1
-        if let headerOffset = httpResponse.value(forHTTPHeaderField: "Upload-Offset"),
-           let parsed = UInt64(headerOffset)
-        {
-          offset = parsed
+        if httpResponse.statusCode == 409 && conflictRetries < 3 {
+          conflictRetries += 1
+          adaptiveChunk = max(minChunk, adaptiveChunk / 2)
+          if let headerOffset = parseUploadOffset(httpResponse) {
+            offset = min(totalBytes, headerOffset)
+            onProgress(offset, totalBytes)
+            continue
+          }
+          if let headOffset = await fetchRemoteUploadOffset(
+            session: session,
+            patchURL: patchURL,
+            csrfToken: resolvedCsrf
+          ) {
+            offset = min(totalBytes, headOffset)
+            onProgress(offset, totalBytes)
+            continue
+          }
+        }
+
+        if isRetryableStatus(httpResponse.statusCode) && transientFailures < maxTransientFailures {
+          transientFailures += 1
+          adaptiveChunk = max(minChunk, adaptiveChunk / 2)
+          if let headOffset = await fetchRemoteUploadOffset(
+            session: session,
+            patchURL: patchURL,
+            csrfToken: resolvedCsrf
+          ) {
+            offset = min(totalBytes, headOffset)
+            onProgress(offset, totalBytes)
+          }
+          let backoffNs = UInt64(min(10.0, 0.7 * pow(2.0, Double(transientFailures - 1))) * 1_000_000_000)
+          try await Task.sleep(nanoseconds: backoffNs)
           continue
         }
-      }
 
-      guard (200...299).contains(httpResponse.statusCode) else {
-        let detail = String(data: data, encoding: .utf8) ?? ""
-        throw MediaSyncOperationException((
-          "UPLOAD_HTTP_\(httpResponse.statusCode)",
-          "Upload chunk rejected (HTTP \(httpResponse.statusCode)): \(detail)"
-        ))
-      }
+        guard (200...299).contains(httpResponse.statusCode) else {
+          let detail = String(data: data, encoding: .utf8) ?? ""
+          throw MediaSyncOperationException((
+            "UPLOAD_HTTP_\(httpResponse.statusCode)",
+            "Upload chunk rejected (HTTP \(httpResponse.statusCode)): \(detail)"
+          ))
+        }
 
-      conflictRetries = 0
-      if let nextOffsetHeader = httpResponse.value(forHTTPHeaderField: "Upload-Offset"),
-         let nextOffset = UInt64(nextOffsetHeader)
-      {
-        offset = nextOffset
-      } else {
-        offset += UInt64(chunk.count)
+        conflictRetries = 0
+        transientFailures = 0
+
+        let elapsed = max(0.05, CFAbsoluteTimeGetCurrent() - chunkStart)
+        let throughput = Double(chunk.count) / elapsed
+        if elapsed <= 1.8 && throughput >= 8 * 1024 * 1024 {
+          adaptiveChunk = min(maxChunk, adaptiveChunk * 2)
+        } else if elapsed >= 10.0 || throughput < 1.5 * 1024 * 1024 {
+          adaptiveChunk = max(minChunk, adaptiveChunk / 2)
+        }
+
+        if let nextOffset = parseUploadOffset(httpResponse) {
+          offset = min(totalBytes, max(offset + UInt64(chunk.count), nextOffset))
+        } else {
+          offset = min(totalBytes, offset + UInt64(chunk.count))
+        }
+        onProgress(offset, totalBytes)
+      } catch let opError as MediaSyncOperationException {
+        throw opError
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        if isRetryableTransportError(error) && transientFailures < maxTransientFailures {
+          transientFailures += 1
+          adaptiveChunk = max(minChunk, adaptiveChunk / 2)
+          if let headOffset = await fetchRemoteUploadOffset(
+            session: session,
+            patchURL: patchURL,
+            csrfToken: resolvedCsrf
+          ) {
+            offset = min(totalBytes, headOffset)
+            onProgress(offset, totalBytes)
+          }
+          let backoffNs = UInt64(min(10.0, 0.7 * pow(2.0, Double(transientFailures - 1))) * 1_000_000_000)
+          try await Task.sleep(nanoseconds: backoffNs)
+          continue
+        }
+        throw error
       }
-      onProgress(offset, totalBytes)
     }
 
     return offset

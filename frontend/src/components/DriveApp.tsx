@@ -6,6 +6,11 @@ import {
 } from 'lucide-react';
 import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
+import {
+  ThroughputTracker,
+  finalizeUploadWithRetry,
+  uploadFileChunksResilient,
+} from '../uploadEngine';
 import { buildDrivePath, clearSearchParam, emptyFilters, hasActiveFilters, navigateTo, parseDriveRoute, useBrowserHref, type DriveFilters, type DriveOrder, type DrivePanel, type DriveSort } from '../route';
 import { nextSelection, selectionGesture } from '../selection';
 import type { Entry, EntryDetails, EntryPage, ShareSummary, User } from '../types';
@@ -50,7 +55,7 @@ type SavedUpload = {
   uploadedBytes?: number;
 };
 
-type UploadStatus = 'queued' | 'uploading' | 'paused' | 'done' | 'error';
+type UploadStatus = 'queued' | 'uploading' | 'retrying' | 'paused' | 'done' | 'error';
 type UploadJob = {
   key: string;
   uploadId: string | null;
@@ -74,14 +79,11 @@ type UploadTask = {
   finalizing: boolean;
   uploadedBytes: number;
   speed: number;
-  sampleAt: number;
-  sampleBytes: number;
-  lastProgressAt: number;
+  tracker: ThroughputTracker;
 };
 
 const RESUME_KEY = 'my-drive.upload-sessions.v1';
-const CHUNK_SIZE = 8 * 1024 * 1024;
-const MAX_CONCURRENT_UPLOADS = 3;
+const MAX_CONCURRENT_UPLOADS = 2;
 
 function formatUploadEta(seconds: number | null): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
@@ -617,15 +619,15 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const timer = window.setInterval(() => {
-      const now = performance.now();
+      const now = Date.now();
       setJobs((items) => {
         let changed = false;
         const next = items.map((job) => {
           const task = activeUploadsRef.current.get(job.key);
           if (!task) return job;
-          const speed = now - task.lastProgressAt > 1200 ? 0 : task.speed;
+          const speed = job.status === 'uploading' ? task.tracker.sampleSpeed(now) : 0;
           task.speed = speed;
-          if (job.speed === speed) return job;
+          if (Math.abs(job.speed - speed) < 1) return job;
           changed = true;
           return { ...job, speed };
         });
@@ -634,6 +636,18 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     }, 500);
     return () => window.clearInterval(timer);
   }, []);
+  useEffect(() => {
+    const hasInFlight = jobs.some(
+      (job) => job.status === 'uploading' || job.status === 'retrying',
+    );
+    if (!hasInFlight) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [jobs]);
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘ K' : 'Ctrl K';
   const activeSectionLabel = section === 'drive'
     ? (!pathReady ? 'Opening folder…' : currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : 'My Drive')
@@ -1120,37 +1134,27 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     ];
   }
 
-  function setUploadProgress(task: UploadTask, bytes: number) {
+  function setUploadProgress(task: UploadTask, bytes: number, detail?: string) {
     const fileSize = task.file?.size ?? 0;
     const uploadedBytes = fileSize ? Math.min(fileSize, Math.max(0, bytes)) : 0;
-    const now = performance.now();
-    const elapsed = (now - task.sampleAt) / 1000;
-    const delta = uploadedBytes - task.sampleBytes;
-    if (delta > 0 && elapsed >= 0.025) {
-      const sampleSpeed = delta / elapsed;
-      task.speed = task.speed > 0 ? task.speed * 0.65 + sampleSpeed * 0.35 : sampleSpeed;
-      task.sampleAt = now;
-      task.sampleBytes = uploadedBytes;
-    }
+    const now = Date.now();
+    task.speed = task.tracker.record(uploadedBytes, now);
     task.uploadedBytes = uploadedBytes;
-    task.lastProgressAt = now;
     updateJob(task.key, {
       uploadedBytes,
       progress: fileSize ? (uploadedBytes / fileSize) * 100 : 100,
       speed: task.speed,
-      detail: 'Uploading…'
+      status: 'uploading',
+      ...(detail ? { detail } : {}),
     });
   }
 
   function resetUploadProgress(task: UploadTask, bytes: number) {
     const fileSize = task.file?.size ?? 0;
     const uploadedBytes = fileSize ? Math.min(fileSize, Math.max(0, bytes)) : 0;
-    const now = performance.now();
     task.uploadedBytes = uploadedBytes;
     task.speed = 0;
-    task.sampleAt = now;
-    task.sampleBytes = uploadedBytes;
-    task.lastProgressAt = now;
+    task.tracker.reset(uploadedBytes, Date.now());
     updateJob(task.key, {
       uploadedBytes,
       progress: fileSize ? (uploadedBytes / fileSize) * 100 : 100,
@@ -1251,44 +1255,47 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       resetUploadProgress(task, offset);
       if (task.action && await handleUploadAction(task, session, offset)) return;
 
-      while (offset < file.size) {
-        if (task.action && await handleUploadAction(task, session, offset)) return;
-        const end = Math.min(offset + CHUNK_SIZE, file.size);
-        const controller = new AbortController();
-        task.controller = controller;
-        try {
-          await api.uploadChunk(
-            session.id,
-            offset,
-            file.slice(offset, end),
-            (loadedBytes) => setUploadProgress(task, offset + loadedBytes),
-            controller.signal
-          );
-          task.controller = null;
-          offset = end;
-          persistUploadOffset(session, offset);
-          setUploadProgress(task, offset);
-        } catch (cause) {
-          task.controller = null;
-          if (task.action && await handleUploadAction(task, session, offset)) return;
-          if (cause instanceof ApiError && cause.status === 409 && cause.code === 'offset_mismatch') {
-            server = await api.uploadHead(session.id);
-            if (server.offset === offset) throw cause;
-            offset = Math.min(server.offset, file.size);
-            persistUploadOffset(session, offset);
-            resetUploadProgress(task, offset);
-            continue;
+      const controller = new AbortController();
+      task.controller = controller;
+      offset = await uploadFileChunksResilient({
+        file,
+        sessionId: session.id,
+        initialOffset: offset,
+        transport: api,
+        signal: controller.signal,
+        onProgress: (uploadedBytes) => {
+          setUploadProgress(task, uploadedBytes);
+        },
+        onOffsetCommitted: (committedOffset) => {
+          offset = committedOffset;
+          if (session) persistUploadOffset(session, committedOffset);
+        },
+        onPhase: (ev) => {
+          if (ev.phase === 'retrying') {
+            task.speed = 0;
+            updateJob(task.key, { status: 'retrying', speed: 0, detail: ev.detail });
+          } else {
+            updateJob(task.key, { status: 'uploading', detail: ev.detail });
           }
-          throw cause;
-        }
-        if (task.action && await handleUploadAction(task, session, offset)) return;
-      }
+        },
+      });
+      task.controller = null;
 
       if (task.action && await handleUploadAction(task, session, offset)) return;
       task.finalizing = true;
       task.speed = 0;
-      updateJob(task.key, { detail: 'Finishing upload…', speed: 0 });
-      await api.finalizeUpload(session.id);
+      updateJob(task.key, { status: 'uploading', detail: 'Finalizing & verifying file…', speed: 0 });
+      await finalizeUploadWithRetry(
+        () => api.finalizeUpload(session!.id),
+        controller.signal,
+        (attempt, max, waitMs) => {
+          updateJob(task.key, {
+            status: 'retrying',
+            speed: 0,
+            detail: `Finishing upload (${attempt}/${max}) in ${(waitMs / 1000).toFixed(1)}s…`,
+          });
+        },
+      );
       task.session = null;
       task.finalizing = false;
       task.speed = 0;
@@ -1344,7 +1351,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       }
       activeUploadsRef.current.set(task.key, task);
       task.finalizing = false;
-      task.lastProgressAt = performance.now();
+      task.tracker.reset(task.uploadedBytes, Date.now());
       updateJob(task.key, { status: 'uploading', speed: 0, detail: 'Preparing transfer…' });
       void runUpload(task).finally(() => {
         activeUploadsRef.current.delete(task.key);
@@ -1375,7 +1382,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
   function enqueueUpload(file: File, parentId: string | null, saved?: SavedUpload, existingKey?: string) {
     const key = existingKey || saved?.id || 'pending-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
-    const now = performance.now();
+    const initialBytes = Math.min(file.size, Math.max(0, saved?.uploadedBytes || 0));
     const task = uploadTasksRef.current.get(key) || {
       key,
       file,
@@ -1384,11 +1391,9 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       action: null,
       controller: null,
       finalizing: false,
-      uploadedBytes: Math.min(file.size, Math.max(0, saved?.uploadedBytes || 0)),
+      uploadedBytes: initialBytes,
       speed: 0,
-      sampleAt: now,
-      sampleBytes: Math.min(file.size, Math.max(0, saved?.uploadedBytes || 0)),
-      lastProgressAt: now
+      tracker: new ThroughputTracker(initialBytes, Date.now()),
     } satisfies UploadTask;
     task.file = file;
     task.parentId = saved ? saved.parentId : parentId;
@@ -1458,9 +1463,28 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     task.action = null;
     task.uploadedBytes = 0;
     task.speed = 0;
-    task.sampleAt = performance.now();
-    task.sampleBytes = 0;
+    task.tracker.reset(0, Date.now());
     queueUploadTask(task);
+  }
+
+  function resumeAllPaused() {
+    for (const job of jobs) {
+      if (job.status === 'paused' || job.status === 'error') {
+        const task = uploadTasksRef.current.get(job.key);
+        if (task?.file) {
+          task.finalizing = false;
+          queueUploadTask(task);
+        }
+      }
+    }
+  }
+
+  function pauseAllActive() {
+    for (const job of jobs) {
+      if (job.status === 'uploading' || job.status === 'retrying') {
+        pauseUpload(job);
+      }
+    }
   }
 
   async function cancelUpload(job: UploadJob) {
@@ -1594,11 +1618,18 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const searchActive = section === 'drive' && (query.trim().length > 0 || filtersReady(route.filters, currentFolderId));
   const visibleRows = entries;
   const previewItems = visibleRows.filter((entry) => entry.kind === 'file' && isFilePreviewable(entry));
-  const activeUploadJobs = jobs.filter((job) => job.status === 'uploading');
+  const activeUploadJobs = jobs.filter((job) => job.status === 'uploading' || job.status === 'retrying');
+  const retryingUploadJobs = jobs.filter((job) => job.status === 'retrying');
   const queuedUploadJobs = jobs.filter((job) => job.status === 'queued');
   const pausedUploadJobs = jobs.filter((job) => job.status === 'paused' || job.status === 'error');
   const completedUploadCount = jobs.filter((job) => job.status === 'done').length;
   const totalUploadSpeed = activeUploadJobs.reduce((total, job) => total + job.speed, 0);
+  const unfinishedUploadJobs = jobs.filter((job) => job.status !== 'done');
+  const totalBatchBytes = unfinishedUploadJobs.reduce((total, job) => total + job.size, 0);
+  const uploadedBatchBytes = unfinishedUploadJobs.reduce((total, job) => total + Math.min(job.uploadedBytes, job.size), 0);
+  const overallBatchProgress = totalBatchBytes > 0 ? Math.min(100, (uploadedBatchBytes / totalBatchBytes) * 100) : 100;
+  const remainingBatchBytes = Math.max(0, totalBatchBytes - uploadedBatchBytes);
+  const totalUploadEta = totalUploadSpeed > 0 && remainingBatchBytes > 0 ? remainingBatchBytes / totalUploadSpeed : null;
   const sortValue = `${route.sort}:${route.order}`;
   const allTrashSelected = section === 'trash' && visibleRows.length > 0 && visibleRows.every((entry) => trashSelection.includes(entry.id));
 
@@ -2156,8 +2187,11 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             <button className="upload-queue-open" onClick={() => setUploadManagerOpen(true)} aria-haspopup="dialog">
               <span className="upload-queue-mark"><CloudUpload size={17} /></span>
               <span className="upload-queue-summary">
-                <strong>Uploads</strong>
-                <small>{activeUploadJobs.length} uploading · {queuedUploadJobs.length} queued</small>
+                <strong>{retryingUploadJobs.length > 0 ? `Uploads · Retrying ${retryingUploadJobs.length}` : 'Uploads'}</strong>
+                <small>
+                  {activeUploadJobs.length} active · {queuedUploadJobs.length} queued
+                  {totalUploadEta !== null ? ` · ETA ${formatUploadEta(totalUploadEta)}` : ''}
+                </small>
               </span>
               <span className="upload-queue-speed">{formatSize(totalUploadSpeed)}/s</span>
               <ChevronDown size={16} />
@@ -2165,21 +2199,45 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             <details className="queue-menu">
               <summary className="icon-button" aria-label="Upload queue actions"><MoreHorizontal size={17} /></summary>
               <div className="menu-popover">
+                {activeUploadJobs.length > 0 && <button onClick={pauseAllActive}>Pause active</button>}
+                {pausedUploadJobs.length > 0 && <button onClick={resumeAllPaused}>Resume paused / failed</button>}
                 <button onClick={() => setJobs((items) => items.filter((job) => job.status !== 'done'))}>Clear completed</button>
               </div>
             </details>
           </div>
+          {unfinishedUploadJobs.length > 0 && (
+            <div className="upload-queue-overall">
+              <div className="upload-progress"><i style={{ width: overallBatchProgress + '%' }} /></div>
+              <small>
+                {Math.round(overallBatchProgress)}% · {formatSize(uploadedBatchBytes)} / {formatSize(totalBatchBytes)}
+              </small>
+            </div>
+          )}
           <div className="upload-queue-items">
-            {(activeUploadJobs.length ? activeUploadJobs : jobs.filter((job) => job.status !== 'done')).slice(0, 3).map((job) => (
-              <div className="upload-job" key={job.key}>
-                <span className="upload-job-icon"><Upload size={15} /></span>
-                <div className="upload-job-content">
-                  <div className="upload-job-title"><strong title={job.name}>{job.name}</strong><span>{job.status === 'uploading' ? Math.round(job.progress) + '%' : job.status === 'queued' ? 'Waiting' : job.status === 'paused' ? 'Paused' : 'Failed'}</span></div>
-                  <div className="upload-progress"><i style={{ width: job.progress + '%' }} /></div>
-                  <small>{formatSize(job.uploadedBytes)} / {formatSize(job.size)}{job.status === 'uploading' ? ' · ' + formatSize(job.speed) + '/s' : ''}</small>
+            {(activeUploadJobs.length ? activeUploadJobs : unfinishedUploadJobs).slice(0, 3).map((job) => {
+              const badgeLabel = job.status === 'uploading'
+                ? Math.round(job.progress) + '%'
+                : job.status === 'retrying'
+                  ? 'Retrying'
+                  : job.status === 'queued'
+                    ? 'Waiting'
+                    : job.status === 'paused'
+                      ? 'Paused'
+                      : 'Failed';
+              return (
+                <div className="upload-job" key={job.key}>
+                  <span className="upload-job-icon"><Upload size={15} /></span>
+                  <div className="upload-job-content">
+                    <div className="upload-job-title"><strong title={job.name}>{job.name}</strong><span className={job.status === 'retrying' ? 'upload-job-state upload-state-retrying' : ''}>{badgeLabel}</span></div>
+                    <div className="upload-progress"><i style={{ width: job.progress + '%' }} /></div>
+                    <small>
+                      {formatSize(job.uploadedBytes)} / {formatSize(job.size)}
+                      {job.status === 'uploading' ? ' · ' + formatSize(job.speed) + '/s' : job.status === 'retrying' ? ' · ' + job.detail : ''}
+                    </small>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </aside>
       )}
@@ -2191,9 +2249,14 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               <div>
                 <span className="eyebrow">TRANSFER ACTIVITY</span>
                 <h2 id="upload-manager-title">Upload manager</h2>
-                <p>{activeUploadJobs.length} uploading · {queuedUploadJobs.length} queued · {formatSize(totalUploadSpeed)}/s total</p>
+                <p>
+                  {activeUploadJobs.length} active{retryingUploadJobs.length > 0 ? ` (${retryingUploadJobs.length} retrying)` : ''} · {queuedUploadJobs.length} queued · {formatSize(totalUploadSpeed)}/s total
+                  {totalUploadEta !== null ? ` · ETA ${formatUploadEta(totalUploadEta)}` : ''}
+                </p>
               </div>
               <div className="upload-manager-header-actions">
+                {activeUploadJobs.length > 0 && <button className="upload-manager-clear" onClick={pauseAllActive}>Pause active</button>}
+                {pausedUploadJobs.length > 0 && <button className="upload-manager-clear" onClick={resumeAllPaused}>Resume all</button>}
                 <button className="upload-manager-clear" disabled={!completedUploadCount} onClick={() => setJobs((items) => items.filter((job) => job.status !== 'done'))}>Clear completed</button>
                 <button className="icon-button" onClick={() => setUploadManagerOpen(false)} aria-label="Close upload manager"><X size={18} /></button>
               </div>
@@ -2201,11 +2264,21 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
             <div className="upload-manager-summary">
               <div><span>Files</span><strong>{jobs.length}</strong></div>
-              <div><span>Uploading</span><strong>{activeUploadJobs.length} / {MAX_CONCURRENT_UPLOADS}</strong></div>
+              <div><span>Active</span><strong>{activeUploadJobs.length} / {MAX_CONCURRENT_UPLOADS}</strong></div>
               <div><span>Waiting</span><strong>{queuedUploadJobs.length}</strong></div>
               <div><span>Paused / failed</span><strong>{pausedUploadJobs.length}</strong></div>
               <div><span>Completed</span><strong>{completedUploadCount}</strong></div>
             </div>
+
+            {unfinishedUploadJobs.length > 0 && (
+              <div className="upload-manager-overall">
+                <div className="upload-manager-overall-meta">
+                  <span>Overall queue ({Math.round(overallBatchProgress)}%)</span>
+                  <span>{formatSize(uploadedBatchBytes)} / {formatSize(totalBatchBytes)} · ETA {formatUploadEta(totalUploadEta)}</span>
+                </div>
+                <div className="upload-progress"><i style={{ width: overallBatchProgress + '%' }} /></div>
+              </div>
+            )}
 
             <div className="upload-manager-list">
               {jobs.length === 0 && <p className="upload-manager-empty">No upload tasks.</p>}
@@ -2213,7 +2286,20 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                 const task = uploadTasksRef.current.get(job.key);
                 const isFinishing = !!task?.finalizing;
                 const isControlling = !!task?.action;
-                const statusLabel = isFinishing ? 'Finishing' : job.status === 'uploading' ? 'Uploading' : job.status === 'queued' ? 'Waiting' : job.status === 'paused' ? 'Paused' : job.status === 'error' ? 'Failed' : 'Complete';
+                const isActiveStatus = job.status === 'uploading' || job.status === 'retrying';
+                const statusLabel = isFinishing
+                  ? 'Finishing'
+                  : job.status === 'uploading'
+                    ? 'Uploading'
+                    : job.status === 'retrying'
+                      ? 'Retrying'
+                      : job.status === 'queued'
+                        ? 'Waiting'
+                        : job.status === 'paused'
+                          ? 'Paused'
+                          : job.status === 'error'
+                            ? 'Failed'
+                            : 'Complete';
                 const eta = job.status === 'uploading' && job.speed > 0 ? (job.size - job.uploadedBytes) / job.speed : null;
                 return (
                   <article className="upload-manager-job" key={job.key}>
@@ -2223,19 +2309,19 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                         <div className="upload-job-title"><strong title={job.name}>{job.name}</strong><span className={'upload-job-state upload-state-' + job.status}>{statusLabel}</span></div>
                         <div className="upload-progress" role="progressbar" aria-label={'Upload progress for ' + job.name} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress)}><i style={{ width: job.progress + '%' }} /></div>
                         <div className="upload-manager-job-stats">
-                          <span>{formatSize(job.uploadedBytes)} / {formatSize(job.size)}</span>
-                          <span>{job.status === 'uploading' ? formatSize(job.speed) + '/s' : '—'}</span>
+                          <span>{formatSize(job.uploadedBytes)} / {formatSize(job.size)} ({Math.round(job.progress)}%)</span>
+                          <span>{job.status === 'uploading' ? formatSize(job.speed) + '/s' : job.status === 'retrying' ? 'Recovering…' : '—'}</span>
                           <span>ETA {formatUploadEta(eta)}</span>
                         </div>
                         <small className="upload-manager-detail">{job.detail}</small>
                       </div>
                     </div>
                     <div className="upload-manager-job-actions">
-                      {job.status === 'uploading' && !isFinishing && !isControlling && <button className="queue-action" onClick={() => pauseUpload(job)} aria-label={'Pause ' + job.name} title="Pause upload"><Pause size={16} /></button>}
+                      {isActiveStatus && !isFinishing && !isControlling && <button className="queue-action" onClick={() => pauseUpload(job)} aria-label={'Pause ' + job.name} title="Pause upload"><Pause size={16} /></button>}
                       {job.status === 'queued' && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={'Cancel ' + job.name} title="Cancel upload"><X size={16} /></button>}
                       {job.status === 'paused' && <button className="queue-action" onClick={() => resumeUpload(job)} aria-label={'Resume ' + job.name} title="Resume upload"><Play size={16} /></button>}
                       {job.status === 'error' && <button className="queue-action" onClick={() => retryUpload(job)} aria-label={'Retry ' + job.name} title="Retry upload"><RotateCcw size={16} /></button>}
-                      {(job.status === 'uploading' || job.status === 'paused' || job.status === 'error') && !isFinishing && !isControlling && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={'Cancel ' + job.name} title="Cancel upload"><X size={16} /></button>}
+                      {(isActiveStatus || job.status === 'paused' || job.status === 'error') && !isFinishing && !isControlling && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={'Cancel ' + job.name} title="Cancel upload"><X size={16} /></button>}
                     </div>
                   </article>
                 );

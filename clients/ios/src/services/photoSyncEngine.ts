@@ -5,6 +5,7 @@ import type {
 import type { MyDriveClient } from './apiClient';
 import type { SyncLedgerStore } from './syncLedger';
 import { type ChunkUploader, uploadPreparedFile } from './uploadWorkflow';
+import { UploadThroughputTracker } from './uploadTracker';
 import type { SyncProgressSnapshot, SyncSettings } from '../types/mydrive';
 
 export interface MediaAssetSummary {
@@ -63,6 +64,11 @@ export function initialSyncSnapshot(): SyncProgressSnapshot {
     currentFilename: null,
     currentInICloud: false,
     currentProgress: 0,
+    currentBytesUploaded: 0,
+    currentTotalBytes: 0,
+    bytesPerSecond: 0,
+    etaSeconds: null,
+    statusDetail: null,
     totalDiscovered: 0,
     processedCount: 0,
     uploadedCount: 0,
@@ -263,6 +269,12 @@ export class PhotoSyncEngine {
           state.phase = 'uploading';
           state.currentFilename = prepared.filename;
           state.currentProgress = 0;
+          state.currentBytesUploaded = 0;
+          state.currentTotalBytes = prepared.sizeBytes;
+          state.bytesPerSecond = 0;
+          state.etaSeconds = null;
+          state.statusDetail = 'Uploading chunks to NAS…';
+          const tracker = new UploadThroughputTracker(0);
           emit();
 
           const modifiedIso =
@@ -281,7 +293,20 @@ export class PhotoSyncEngine {
             sha256: prepared.sha256,
             modifiedAtIso: modifiedIso,
             onProgress: (uploaded, total) => {
+              const now = Date.now();
+              tracker.record(uploaded, now);
+              state.currentBytesUploaded = uploaded;
+              state.currentTotalBytes = total;
               state.currentProgress = total > 0 ? Math.min(1, uploaded / total) : 1;
+              state.bytesPerSecond = tracker.sampleSpeed(now);
+              state.etaSeconds = tracker.estimateEtaSeconds(uploaded, total, now);
+              emit();
+            },
+            onPhase: (ev) => {
+              state.statusDetail = ev.detail;
+              if (ev.phase === 'retrying') {
+                state.bytesPerSecond = tracker.sampleSpeed(Date.now());
+              }
               emit();
             },
           });
@@ -359,6 +384,11 @@ export class PhotoSyncEngine {
     state.phase = 'completed';
     state.currentFilename = null;
     state.currentProgress = 1;
+    state.currentBytesUploaded = 0;
+    state.currentTotalBytes = 0;
+    state.bytesPerSecond = 0;
+    state.etaSeconds = null;
+    state.statusDetail = null;
     state.lastRunAt = new Date().toISOString();
     emit();
     return state;

@@ -24,7 +24,8 @@ use sqlx::{FromRow, Postgres, Transaction};
 use thiserror::Error;
 use tokio::{
     fs as tokio_fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom},
+    sync::Mutex,
 };
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
@@ -37,6 +38,11 @@ use crate::{
 };
 
 const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
+const WRITE_BUFFER_BYTES: usize = 512 * 1024;
+const CAPACITY_CHECK_STRIDE_BYTES: u64 = 2 * 1024 * 1024;
+const UPLOAD_LOCK_STRIPES: usize = 128;
+static UPLOAD_STRIPED_LOCKS: LazyLock<Vec<Mutex<()>>> =
+    LazyLock::new(|| (0..UPLOAD_LOCK_STRIPES).map(|_| Mutex::new(())).collect());
 const IMAGE_PREVIEW_RECIPE_VERSION: i16 = 1;
 const VIDEO_THUMBNAIL_RECIPE_VERSION: i16 = 1;
 const MAX_CARD_DERIVATIVE_BYTES: u64 = 512 * 1024;
@@ -597,8 +603,10 @@ async fn patch_upload(
         }
     }
 
-    let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
-    let session = fetch_upload_for_update(&mut transaction, user.id, id).await?;
+    let _upload_guard = UPLOAD_STRIPED_LOCKS[(id.as_u128() as usize) % UPLOAD_LOCK_STRIPES]
+        .lock()
+        .await;
+    let session = fetch_upload(&state, user.id, id).await?;
     require_active(&session)?;
     let current_offset =
         u64::try_from(session.received_size).map_err(|_| TransferError::Inconsistent)?;
@@ -611,6 +619,10 @@ async fn patch_upload(
         return Err(TransferError::Conflict);
     }
     let max_bytes = (expected_size - current_offset).min(MAX_PATCH_BYTES);
+    state
+        .storage
+        .check_write_capacity(max_bytes)
+        .map_err(TransferError::Storage)?;
     let path = state.storage.staging_path(session.staging_key);
     let mut file = tokio_fs::OpenOptions::new()
         .read(true)
@@ -635,13 +647,21 @@ async fn patch_upload(
         .await
         .map_err(|error| TransferError::Storage(StorageError::Io(error)))?;
 
-    let appended = match write_patch_body(&state, &mut body, &mut file, max_bytes).await {
+    let mut writer = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
+    let appended = match write_patch_body(&state, &mut body, &mut writer, max_bytes).await {
         Ok(appended) => appended,
         Err(error) => {
+            let file = writer.into_inner();
             let _ = file.set_len(current_offset).await;
             return Err(error);
         }
     };
+    if let Err(error) = writer.flush().await {
+        let file = writer.into_inner();
+        let _ = file.set_len(current_offset).await;
+        return Err(TransferError::Storage(StorageError::Io(error)));
+    }
+    let file = writer.into_inner();
     if appended == 0 {
         let _ = file.set_len(current_offset).await;
         return Err(TransferError::BadRequest);
@@ -653,16 +673,29 @@ async fn patch_upload(
     let new_offset = current_offset
         .checked_add(appended)
         .ok_or(TransferError::PayloadTooLarge)?;
-    sqlx::query(
+    let current_offset_i64 =
+        i64::try_from(current_offset).map_err(|_| TransferError::Inconsistent)?;
+    let new_offset_i64 = i64::try_from(new_offset).map_err(|_| TransferError::PayloadTooLarge)?;
+    let mut transaction = state.pool.begin().await.map_err(map_database_error)?;
+    let update = sqlx::query(
         "UPDATE upload_sessions SET received_size = $1, updated_at = now() \
-          WHERE id = $2 AND owner_id = $3 AND state = 'active'",
+          WHERE id = $2 AND owner_id = $3 AND state = 'active' AND received_size = $4",
     )
-    .bind(i64::try_from(new_offset).map_err(|_| TransferError::PayloadTooLarge)?)
+    .bind(new_offset_i64)
     .bind(id)
     .bind(user.id)
+    .bind(current_offset_i64)
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
+    if update.rows_affected() == 0 {
+        let latest = fetch_upload_for_update(&mut transaction, user.id, id).await?;
+        let _ = file.set_len(current_offset).await;
+        require_active(&latest)?;
+        let latest_offset =
+            u64::try_from(latest.received_size).map_err(|_| TransferError::Inconsistent)?;
+        return Err(TransferError::OffsetConflict(latest_offset));
+    }
     transaction.commit().await.map_err(map_database_error)?;
 
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -684,10 +717,11 @@ async fn patch_upload(
 async fn write_patch_body(
     state: &AppState,
     body: &mut Body,
-    file: &mut tokio_fs::File,
+    file: &mut BufWriter<tokio_fs::File>,
     max_bytes: u64,
 ) -> Result<u64, TransferError> {
     let mut written = 0_u64;
+    let mut unchecked = 0_u64;
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| TransferError::BadRequest)?;
         let Ok(data) = frame.into_data() else {
@@ -703,10 +737,14 @@ async fn write_patch_body(
         if next_size > max_bytes {
             return Err(TransferError::PayloadTooLarge);
         }
-        state
-            .storage
-            .check_write_capacity(chunk_size)
-            .map_err(TransferError::Storage)?;
+        unchecked = unchecked.saturating_add(chunk_size);
+        if unchecked >= CAPACITY_CHECK_STRIDE_BYTES {
+            state
+                .storage
+                .check_write_capacity(chunk_size)
+                .map_err(TransferError::Storage)?;
+            unchecked = 0;
+        }
         file.write_all(&data)
             .await
             .map_err(|error| TransferError::Storage(StorageError::Io(error)))?;

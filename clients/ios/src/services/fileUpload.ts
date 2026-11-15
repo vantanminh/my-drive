@@ -5,12 +5,18 @@ import {
 } from '../../modules/mydrive-media-sync/src';
 import type { MyDriveClient } from './apiClient';
 import {
+  type UploadWorkflowPhaseEvent,
   type ChunkUploader,
   type PreparedTransferResult,
   uploadPreparedFile,
 } from './uploadWorkflow';
 
-export { type ChunkUploader, type PreparedTransferResult, uploadPreparedFile } from './uploadWorkflow';
+export {
+  type ChunkUploader,
+  type PreparedTransferResult,
+  type UploadWorkflowPhaseEvent,
+  uploadPreparedFile,
+} from './uploadWorkflow';
 
 export function createNativeChunkUploader(client: MyDriveClient): ChunkUploader {
   return async (uploadId, startOffset, expectedSize, fileUri, onProgress) => {
@@ -29,7 +35,7 @@ export function createNativeChunkUploader(client: MyDriveClient): ChunkUploader 
         uploadId,
         fileUri,
         startOffset,
-        chunkSize: 4 * 1024 * 1024,
+        chunkSize: 2 * 1024 * 1024,
         csrfToken: client.getCsrfToken(),
       });
     } finally {
@@ -47,11 +53,22 @@ export async function uploadLocalDocument(params: {
   filename: string;
   fileUri: string;
   modifiedAtIso?: string | null;
-  onPhase?: (phase: 'hashing' | 'uploading', progress: number) => void;
+  onPhase?: (
+    phase: 'hashing' | 'uploading' | 'retrying' | 'finalizing',
+    progress: number,
+    bytes?: { uploadedBytes: number; totalBytes: number; detail?: string },
+  ) => void;
 }): Promise<PreparedTransferResult> {
   params.onPhase?.('hashing', 0);
   const { sha256, sizeBytes } = await hashFileSha256(params.fileUri);
-  params.onPhase?.('uploading', 0);
+  let lastUploaded = 0;
+  let lastPhase: 'uploading' | 'retrying' | 'finalizing' = 'uploading';
+  let lastDetail = 'Uploading chunks to NAS…';
+  params.onPhase?.('uploading', 0, {
+    uploadedBytes: 0,
+    totalBytes: sizeBytes,
+    detail: lastDetail,
+  });
 
   return uploadPreparedFile({
     client: params.client,
@@ -63,8 +80,23 @@ export async function uploadLocalDocument(params: {
     sha256,
     modifiedAtIso: params.modifiedAtIso,
     onProgress: (uploaded, total) => {
+      lastUploaded = uploaded;
       const ratio = total > 0 ? Math.min(1, uploaded / total) : 1;
-      params.onPhase?.('uploading', ratio);
+      params.onPhase?.(lastPhase, ratio, {
+        uploadedBytes: uploaded,
+        totalBytes: total > 0 ? total : sizeBytes,
+        detail: lastDetail,
+      });
+    },
+    onPhase: (ev: UploadWorkflowPhaseEvent) => {
+      lastPhase = ev.phase;
+      lastDetail = ev.detail;
+      const ratio = sizeBytes > 0 ? Math.min(1, lastUploaded / sizeBytes) : 1;
+      params.onPhase?.(ev.phase, ratio, {
+        uploadedBytes: lastUploaded,
+        totalBytes: sizeBytes,
+        detail: ev.detail,
+      });
     },
   });
 }

@@ -795,6 +795,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .upload-queue-summary small { color: #77847e; font-size: 9px; font-weight: 500; }
 .upload-queue-speed { flex: 0 0 auto; color: var(--green); font-size: 10px; font-weight: 700; white-space: nowrap; }
 .queue-menu .menu-popover { top: 32px; }
+.upload-queue-overall { padding: 7px 13px 4px; border-bottom: 1px solid #f0f3f2; }
+.upload-queue-overall .upload-progress { margin: 0 0 4px; }
+.upload-queue-overall small { color: #72817b; font-size: 9px; font-weight: 600; }
 .upload-queue-items { max-height: 205px; overflow: auto; padding: 2px 13px; }
 .upload-job { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #f0f3f2; }
 .upload-job:last-child { border-bottom: 0; }
@@ -806,10 +809,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .upload-job-title span { flex: 0 0 auto; color: #72817b; font-size: 9px; }
 .upload-job-state { padding: 3px 6px; background: #f0f4f2; border-radius: 20px; }
 .upload-state-uploading { color: #237454 !important; background: #e8f4ed; }
+.upload-state-retrying { color: #966d21 !important; background: #fbf2dd; }
 .upload-state-queued { color: #697971 !important; }
 .upload-state-paused { color: #966d21 !important; background: #fbf2dd; }
 .upload-state-error { color: #a3443d !important; background: #faeae8; }
 .upload-state-done { color: #237454 !important; background: #e8f4ed; }
+.upload-manager-overall { padding: 10px 25px 12px; border-bottom: 1px solid #e9eeec; background: #fbfdfc; }
+.upload-manager-overall-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; color: #54645e; font-size: 11px; font-weight: 600; }
+.upload-manager-overall .upload-progress { margin: 0; height: 6px; }
 .upload-progress { height: 4px; overflow: hidden; margin: 7px 0 4px; background: #e9eeee; border-radius: 99px; }
 .upload-progress i { display: block; height: 100%; background: #25805f; border-radius: inherit; transition: width .2s ease; }
 .upload-job small { display: block; overflow: hidden; color: #98a3a8; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }

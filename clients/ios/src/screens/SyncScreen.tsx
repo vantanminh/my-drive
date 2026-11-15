@@ -23,6 +23,7 @@ import {
 } from '../components/UiPrimitives';
 import { useSync } from '../context/SyncContext';
 import { formatBytes, formatDateTime } from '../services/format';
+import { formatEta, formatSpeed } from '../services/uploadTracker';
 import { colors, radius, spacing } from '../theme/tokens';
 import type { SyncLedgerRecord } from '../types/mydrive';
 
@@ -230,6 +231,33 @@ export function SyncScreen() {
                   { width: `${Math.max(4, Math.round(progressRatio * 100))}%` },
                 ]}
               />
+            </View>
+          ) : null}
+
+          {snapshot.running && snapshot.phase === 'uploading' && (snapshot.currentTotalBytes ?? 0) > 0 ? (
+            <View style={styles.fileTransferBox}>
+              <View style={styles.fileProgressTrack}>
+                <View
+                  style={[
+                    styles.fileProgressFill,
+                    { width: `${Math.max(2, Math.round(snapshot.currentProgress * 100))}%` },
+                  ]}
+                />
+              </View>
+              <Text style={styles.sampleText} numberOfLines={1}>
+                {Math.round(snapshot.currentProgress * 100)}% ·{' '}
+                {formatBytes(snapshot.currentBytesUploaded ?? 0)} /{' '}
+                {formatBytes(snapshot.currentTotalBytes ?? 0)}
+                {(snapshot.bytesPerSecond ?? 0) > 0
+                  ? ` · ${formatSpeed(snapshot.bytesPerSecond ?? 0)}`
+                  : ''}
+                {snapshot.etaSeconds != null ? ` · ${formatEta(snapshot.etaSeconds)}` : ''}
+              </Text>
+              {snapshot.statusDetail ? (
+                <Text style={styles.statText} numberOfLines={1}>
+                  {snapshot.statusDetail}
+                </Text>
+              ) : null}
             </View>
           ) : null}
 
@@ -560,6 +588,20 @@ const styles = StyleSheet.create({
     height: '100%',
     borderRadius: 4,
     backgroundColor: colors.accent,
+  },
+  fileTransferBox: {
+    gap: spacing.xs,
+  },
+  fileProgressTrack: {
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: colors.surfaceSubtle,
+    overflow: 'hidden',
+  },
+  fileProgressFill: {
+    height: '100%',
+    borderRadius: 3,
+    backgroundColor: '#25805f',
   },
   statsStrip: {
     flexDirection: 'row',

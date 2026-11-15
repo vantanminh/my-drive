@@ -32,6 +32,7 @@ import { useAuth } from '../context/AuthContext';
 import type { RootStackParamList } from '../navigation/types';
 import { uploadLocalDocument } from '../services/fileUpload';
 import { formatBytes, formatShortDate, resolveViewerKind } from '../services/format';
+import { UploadThroughputTracker, formatEta, formatSpeed } from '../services/uploadTracker';
 import { colors, radius, spacing } from '../theme/tokens';
 import type { Breadcrumb, Entry } from '../types/mydrive';
 
@@ -84,6 +85,12 @@ export function FilesScreen() {
   const [uploadStatus, setUploadStatus] = useState<{
     filename: string;
     phase: string;
+    progress: number;
+    uploadedBytes: number;
+    totalBytes: number;
+    bytesPerSecond: number;
+    etaSeconds: number | null;
+    detail?: string;
     currentIndex: number;
     totalCount: number;
   } | null>(null);
@@ -161,9 +168,16 @@ export function FilesScreen() {
 
       for (let i = 0; i < picked.assets.length; i += 1) {
         const asset = picked.assets[i];
+        const tracker = new UploadThroughputTracker(0);
         setUploadStatus({
           filename: asset.name,
           phase: 'hashing',
+          progress: 0,
+          uploadedBytes: 0,
+          totalBytes: asset.size ?? 0,
+          bytesPerSecond: 0,
+          etaSeconds: null,
+          detail: 'Preparing file & checksum…',
           currentIndex: i + 1,
           totalCount: picked.assets.length,
         });
@@ -175,10 +189,30 @@ export function FilesScreen() {
           modifiedAtIso: asset.lastModified
             ? new Date(asset.lastModified).toISOString()
             : undefined,
-          onPhase: (phase) => {
+          onPhase: (phase, progress, bytes) => {
+            const now = Date.now();
+            const uploadedBytes = bytes?.uploadedBytes ?? 0;
+            const totalBytes = bytes?.totalBytes ?? asset.size ?? 0;
+            if (phase === 'uploading') {
+              tracker.record(uploadedBytes, now);
+            }
+            const bytesPerSecond =
+              phase === 'uploading' || phase === 'retrying'
+                ? tracker.sampleSpeed(now)
+                : 0;
+            const etaSeconds =
+              phase === 'uploading' && totalBytes > 0
+                ? tracker.estimateEtaSeconds(uploadedBytes, totalBytes, now)
+                : null;
             setUploadStatus({
               filename: asset.name,
               phase,
+              progress,
+              uploadedBytes,
+              totalBytes,
+              bytesPerSecond,
+              etaSeconds,
+              detail: bytes?.detail,
               currentIndex: i + 1,
               totalCount: picked.assets.length,
             });
@@ -456,10 +490,14 @@ export function FilesScreen() {
       {uploadStatus ? (
         <View style={styles.topNotice}>
           <Banner
-            tone="accent"
+            tone={uploadStatus.phase === 'retrying' ? 'warning' : 'accent'}
             icon="cloud-upload-outline"
-            title={`Uploading ${uploadStatus.currentIndex} of ${uploadStatus.totalCount}`}
-            message={`${uploadStatus.filename} (${uploadStatus.phase}…)`}
+            title={`Uploading ${uploadStatus.currentIndex} of ${uploadStatus.totalCount} (${Math.round(uploadStatus.progress * 100)}%)`}
+            message={
+              uploadStatus.phase === 'uploading' && uploadStatus.totalBytes > 0
+                ? `${uploadStatus.filename} · ${formatBytes(uploadStatus.uploadedBytes)} / ${formatBytes(uploadStatus.totalBytes)}${uploadStatus.bytesPerSecond > 0 ? ` · ${formatSpeed(uploadStatus.bytesPerSecond)}` : ''}${uploadStatus.etaSeconds != null ? ` · ${formatEta(uploadStatus.etaSeconds)}` : ''}`
+                : `${uploadStatus.filename} · ${uploadStatus.detail ?? `${uploadStatus.phase}…`}`
+            }
           />
         </View>
       ) : null}

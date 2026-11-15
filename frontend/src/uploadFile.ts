@@ -1,22 +1,30 @@
 import { api } from './api';
-
-const CHUNK_SIZE = 8 * 1024 * 1024;
+import {
+  finalizeUploadWithRetry,
+  uploadFileChunksResilient,
+} from './uploadEngine';
 
 export async function uploadFile(
   file: File,
   parentId: string | null,
-  onProgress?: (loadedBytes: number, totalBytes: number) => void
+  onProgress?: (loadedBytes: number, totalBytes: number) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const created = await api.createUpload(file.name, file.size, parentId);
-  let offset = 0;
-  while (offset < file.size) {
-    const chunk = file.slice(offset, Math.min(file.size, offset + CHUNK_SIZE));
-    await api.uploadChunk(created.id, offset, chunk, (loaded) => {
-      onProgress?.(Math.min(file.size, offset + loaded), file.size);
-    });
-    offset += chunk.size;
-  }
+  await uploadFileChunksResilient({
+    file,
+    sessionId: created.id,
+    initialOffset: created.offset,
+    transport: api,
+    signal,
+    onProgress: (uploadedBytes) => {
+      onProgress?.(uploadedBytes, file.size);
+    },
+  });
   onProgress?.(file.size, file.size);
-  const finalized = await api.finalizeUpload(created.id);
+  const finalized = await finalizeUploadWithRetry(
+    () => api.finalizeUpload(created.id),
+    signal,
+  );
   return finalized.file_id;
 }

@@ -27,12 +27,19 @@ export class ApiError extends Error {
   status: number;
   code: string;
   retryAfter: string | null;
+  offset: number | null;
 
-  constructor(status: number, code: string, retryAfter: string | null = null) {
+  constructor(
+    status: number,
+    code: string,
+    retryAfter: string | null = null,
+    offset: number | null = null
+  ) {
     super(code);
     this.status = status;
     this.code = code;
     this.retryAfter = retryAfter;
+    this.offset = offset;
   }
 }
 
@@ -187,22 +194,42 @@ export async function request<T>(url: string, options: RequestOptions = {}): Pro
   return undefined as T;
 }
 
+const CHUNK_STALL_TIMEOUT_MS = 30_000;
+
 function uploadChunkWithProgress(
   id: string,
   offset: number,
   chunk: Blob,
   onProgress?: (loadedBytes: number, totalBytes: number) => void,
   signal?: AbortSignal
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     let settled = false;
-    const cleanup = () => signal?.removeEventListener('abort', abort);
-    const succeed = () => {
+    let stalled = false;
+    let stallTimer: number | null = null;
+    const clearStallTimer = () => {
+      if (stallTimer !== null) {
+        window.clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+    };
+    const armStallTimer = () => {
+      clearStallTimer();
+      stallTimer = window.setTimeout(() => {
+        stalled = true;
+        xhr.abort();
+      }, CHUNK_STALL_TIMEOUT_MS);
+    };
+    const cleanup = () => {
+      clearStallTimer();
+      signal?.removeEventListener('abort', abort);
+    };
+    const succeed = (nextOffset: number) => {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve();
+      resolve(nextOffset);
     };
     const fail = (cause: unknown) => {
       if (settled) return;
@@ -221,33 +248,59 @@ function uploadChunkWithProgress(
     xhr.withCredentials = true;
     xhr.setRequestHeader('Content-Type', 'application/offset+octet-stream');
     xhr.setRequestHeader('Upload-Offset', String(offset));
+    xhr.setRequestHeader('Tus-Resumable', '1.0.0');
     const token = currentCsrfToken();
     if (token) xhr.setRequestHeader('X-CSRF-Token', token);
     xhr.upload.addEventListener('progress', (event) => {
+      armStallTimer();
       onProgress?.(event.loaded, event.lengthComputable ? event.total : chunk.size);
+    });
+    xhr.upload.addEventListener('loadend', () => {
+      // Once request bytes leave TCP buffer, keep a stall guard for the server flush response.
+      armStallTimer();
     });
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        succeed();
+        const headerOffset = Number(xhr.getResponseHeader('Upload-Offset'));
+        const nextOffset =
+          Number.isFinite(headerOffset) && headerOffset >= offset
+            ? headerOffset
+            : offset + chunk.size;
+        succeed(nextOffset);
         return;
       }
       let code = 'request_failed';
+      let conflictOffset: number | null = null;
+      const headerOffset = xhr.getResponseHeader('Upload-Offset');
+      if (headerOffset && /^\d+$/.test(headerOffset)) {
+        conflictOffset = Number(headerOffset);
+      }
       try {
-        const payload = JSON.parse(xhr.responseText) as { error?: string };
+        const payload = JSON.parse(xhr.responseText) as { error?: string; offset?: number };
         if (payload.error) code = payload.error;
+        if (typeof payload.offset === 'number' && Number.isFinite(payload.offset)) {
+          conflictOffset = payload.offset;
+        }
       } catch {
         code = xhr.statusText || code;
       }
-      fail(new ApiError(xhr.status, code, xhr.getResponseHeader('Retry-After')));
+      fail(new ApiError(xhr.status, code, xhr.getResponseHeader('Retry-After'), conflictOffset));
     });
     xhr.addEventListener('error', () => fail(new ApiError(0, 'network_error')));
-    xhr.addEventListener('abort', () => fail(new DOMException('The upload was aborted.', 'AbortError')));
+    xhr.addEventListener('abort', () => {
+      if (stalled && !signal?.aborted) {
+        fail(new ApiError(0, 'upload_stalled'));
+      } else {
+        fail(new DOMException('The upload was aborted.', 'AbortError'));
+      }
+    });
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) {
       abort();
       return;
     }
     try {
+      armStallTimer();
       xhr.send(chunk);
     } catch (cause) {
       fail(cause);
