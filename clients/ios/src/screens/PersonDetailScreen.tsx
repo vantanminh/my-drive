@@ -237,6 +237,7 @@ const styles = StyleSheet.create({
   },
   heroInfo: {
     flex: 1,
+    minWidth: 0,
   },
   heroName: {
     fontSize: 17,

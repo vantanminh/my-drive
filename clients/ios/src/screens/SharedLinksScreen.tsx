@@ -368,8 +368,12 @@ export function SharedLinksScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
         <View style={styles.headerText}>
-          <Text style={styles.title}>Shared Links</Text>
-          <Text style={styles.subtitle}>Manage active URLs, expiry & permissions</Text>
+          <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
+            Shared Links
+          </Text>
+          <Text style={styles.subtitle} numberOfLines={2}>
+            Manage active URLs, expiry & permissions
+          </Text>
         </View>
         {stats.inactiveCount > 0 ? (
           <AppButton
@@ -848,6 +852,7 @@ const styles = StyleSheet.create({
   },
   headerText: {
     flex: 1,
+    minWidth: 0,
   },
   title: {
     fontSize: 22,

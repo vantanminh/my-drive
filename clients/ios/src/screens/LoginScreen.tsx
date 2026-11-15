@@ -244,10 +244,12 @@ const styles = StyleSheet.create({
   },
   serverMeta: {
     flex: 1,
+    minWidth: 0,
     gap: spacing.xs + 2,
   },
   serverTopRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: spacing.sm,
   },

@@ -534,9 +534,12 @@ const styles = StyleSheet.create({
     fontSize: 13.5,
     color: colors.muted,
     fontWeight: '500',
+    flexShrink: 1,
+    maxWidth: '46%',
   },
   kvValue: {
     flex: 1,
+    minWidth: 0,
     textAlign: 'right',
     fontSize: 13.5,
     color: colors.ink,

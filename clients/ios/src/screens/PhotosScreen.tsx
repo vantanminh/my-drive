@@ -124,9 +124,14 @@ export function PhotosScreen() {
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.header}>
         <View style={styles.headerTop}>
-          <View>
-            <Text style={styles.title}>Photos</Text>
-            <Text style={styles.subtitle}>
+          <View style={styles.headerTitleCol}>
+            <View style={styles.titleLine}>
+              <Text style={styles.title} numberOfLines={1}>
+                Photos
+              </Text>
+              <LanStatusBadge compact />
+            </View>
+            <Text style={styles.subtitle} numberOfLines={2}>
               {snapshot.running
                 ? `Syncing ${snapshot.processedCount}/${snapshot.totalDiscovered} originals…`
                 : icloudSummary.inICloudCount > 0
@@ -135,7 +140,6 @@ export function PhotosScreen() {
             </Text>
           </View>
           <View style={styles.headerActions}>
-            <LanStatusBadge compact />
             {subTab === 'albums' ? (
               <Pressable
                 onPress={() => setCreateAlbumOpen(true)}
@@ -159,7 +163,7 @@ export function PhotosScreen() {
                 size={15}
                 color={colors.accent}
               />
-              <Text style={styles.syncChipText}>
+              <Text style={styles.syncChipText} numberOfLines={1}>
                 {snapshot.running ? 'Syncing' : 'Backup'}
               </Text>
             </Pressable>
@@ -466,7 +470,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.md,
+    gap: spacing.sm,
+  },
+  headerTitleCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  titleLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
   },
   title: {
     fontSize: 26,
@@ -482,7 +496,8 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    flexShrink: 0,
+    gap: spacing.xs + 2,
   },
   iconBtn: {
     width: 36,

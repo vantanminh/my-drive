@@ -659,8 +659,10 @@ const styles = StyleSheet.create({
   },
   lanHeaderRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: spacing.sm,
     marginBottom: spacing.xs,
   },
   lanRefreshBtn: {
@@ -697,6 +699,7 @@ const styles = StyleSheet.create({
   },
   lanActionRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
     marginTop: spacing.sm,
   },
@@ -739,6 +742,7 @@ const styles = StyleSheet.create({
   },
   storageActionRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
     marginTop: spacing.xs,
   },

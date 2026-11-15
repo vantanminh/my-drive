@@ -367,58 +367,12 @@ export function FilesScreen() {
       <View style={styles.header}>
         <View style={styles.titleRow}>
           <View style={styles.titleLeft}>
-            <Text style={styles.title}>Files</Text>
+            <Text style={styles.title} numberOfLines={1}>
+              Files
+            </Text>
             <LanStatusBadge compact />
           </View>
           <View style={styles.headerActions}>
-            <Pressable
-              onPress={cycleSort}
-              style={({ pressed }) => [
-                styles.sortPill,
-                pressed && styles.pillPressed,
-              ]}
-            >
-              <Ionicons name="swap-vertical" size={14} color={colors.inkSoft} />
-              <Text style={styles.sortText}>{sortLabel}</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                if (selectionMode) {
-                  exitSelectionMode();
-                } else {
-                  setSelectionMode(true);
-                }
-              }}
-              style={({ pressed }) => [
-                styles.iconActionBtn,
-                selectionMode && styles.iconActionBtnActive,
-                pressed && styles.pillPressed,
-              ]}
-            >
-              <Ionicons
-                name={selectionMode ? 'close' : 'checkbox-outline'}
-                size={19}
-                color={selectionMode ? colors.white : colors.accent}
-              />
-            </Pressable>
-            <Pressable
-              onPress={() => rootNav.navigate('Trash')}
-              style={({ pressed }) => [
-                styles.iconActionBtn,
-                pressed && styles.pillPressed,
-              ]}
-            >
-              <Ionicons name="trash-outline" size={19} color={colors.accent} />
-            </Pressable>
-            <Pressable
-              onPress={() => setNewFolderOpen(true)}
-              style={({ pressed }) => [
-                styles.iconActionBtn,
-                pressed && styles.pillPressed,
-              ]}
-            >
-              <Ionicons name="folder-open-outline" size={19} color={colors.accent} />
-            </Pressable>
             <Pressable
               onPress={() => void handleUploadFiles()}
               style={({ pressed }) => [
@@ -426,11 +380,73 @@ export function FilesScreen() {
                 pressed && styles.uploadBtnPressed,
               ]}
             >
-              <Ionicons name="cloud-upload-outline" size={17} color={colors.white} />
-              <Text style={styles.uploadBtnText}>Upload</Text>
+              <Ionicons name="cloud-upload-outline" size={16} color={colors.white} />
+              <Text style={styles.uploadBtnText} numberOfLines={1}>
+                Upload
+              </Text>
             </Pressable>
           </View>
         </View>
+
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.toolbarRow}
+        >
+          <Pressable
+            onPress={cycleSort}
+            style={({ pressed }) => [
+              styles.toolPill,
+              pressed && styles.pillPressed,
+            ]}
+          >
+            <Ionicons name="swap-vertical" size={14} color={colors.inkSoft} />
+            <Text style={styles.toolPillText}>{sortLabel}</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              if (selectionMode) {
+                exitSelectionMode();
+              } else {
+                setSelectionMode(true);
+              }
+            }}
+            style={({ pressed }) => [
+              styles.toolPill,
+              selectionMode && styles.toolPillActive,
+              pressed && styles.pillPressed,
+            ]}
+          >
+            <Ionicons
+              name={selectionMode ? 'close' : 'checkbox-outline'}
+              size={15}
+              color={selectionMode ? colors.white : colors.accent}
+            />
+            <Text style={[styles.toolPillText, selectionMode && styles.toolPillTextActive]}>
+              {selectionMode ? 'Done' : 'Select'}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setNewFolderOpen(true)}
+            style={({ pressed }) => [
+              styles.toolPill,
+              pressed && styles.pillPressed,
+            ]}
+          >
+            <Ionicons name="folder-open-outline" size={15} color={colors.accent} />
+            <Text style={styles.toolPillText}>New Folder</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => rootNav.navigate('Trash')}
+            style={({ pressed }) => [
+              styles.toolPill,
+              pressed && styles.pillPressed,
+            ]}
+          >
+            <Ionicons name="trash-outline" size={15} color={colors.accent} />
+            <Text style={styles.toolPillText}>Trash</Text>
+          </Pressable>
+        </ScrollView>
 
         <View style={styles.searchBox}>
           <Ionicons name="search" size={17} color={colors.muted} />
@@ -795,48 +811,52 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    flexShrink: 1,
+    flex: 1,
+    minWidth: 0,
   },
   title: {
     fontSize: 26,
     fontWeight: '800',
     color: colors.ink,
     letterSpacing: -0.5,
+    flexShrink: 1,
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
     gap: spacing.sm,
   },
-  sortPill: {
+  toolbarRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: 7,
+    gap: spacing.sm,
+  },
+  toolPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
     borderRadius: radius.pill,
     backgroundColor: colors.surfaceSubtle,
     borderWidth: 1,
     borderColor: colors.line,
   },
-  pillPressed: {
-    backgroundColor: colors.surfacePressed,
+  toolPillActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
-  sortText: {
+  toolPillText: {
     fontSize: 12.5,
     fontWeight: '600',
     color: colors.inkSoft,
   },
-  iconActionBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.accentTint,
-    alignItems: 'center',
-    justifyContent: 'center',
+  toolPillTextActive: {
+    color: colors.white,
   },
-  iconActionBtnActive: {
-    backgroundColor: colors.accent,
+  pillPressed: {
+    backgroundColor: colors.surfacePressed,
   },
   uploadBtn: {
     flexDirection: 'row',
@@ -938,6 +958,7 @@ const styles = StyleSheet.create({
   },
   entryBody: {
     flex: 1,
+    minWidth: 0,
   },
   entryName: {
     fontSize: 15,
@@ -987,8 +1008,10 @@ const styles = StyleSheet.create({
   },
   selectionBar: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: spacing.sm,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     backgroundColor: colors.surface,
@@ -1002,6 +1025,7 @@ const styles = StyleSheet.create({
   },
   selectionActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
   },
 });

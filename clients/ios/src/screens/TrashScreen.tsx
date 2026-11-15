@@ -137,7 +137,7 @@ export function TrashScreen() {
     <View style={styles.root}>
       {items.length > 0 ? (
         <View style={styles.topBar}>
-          <Text style={styles.summaryText}>
+          <Text style={styles.summaryText} numberOfLines={2}>
             {items.length} {items.length === 1 ? 'item' : 'items'} • {formatBytes(totalVisibleBytes)} recoverable
           </Text>
           <AppButton
@@ -252,6 +252,7 @@ const styles = StyleSheet.create({
   },
   summaryText: {
     flex: 1,
+    minWidth: 0,
     fontSize: 13.5,
     fontWeight: '700',
     color: colors.inkSoft,

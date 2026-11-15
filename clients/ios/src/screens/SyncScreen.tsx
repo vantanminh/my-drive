@@ -90,11 +90,13 @@ export function SyncScreen() {
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.header}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm }}>
-          <Text style={styles.title}>Photo Sync</Text>
-          <LanStatusBadge />
+        <View style={styles.headerTopRow}>
+          <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
+            Photo Sync
+          </Text>
+          <LanStatusBadge compact />
         </View>
-        <Text style={styles.subtitle}>
+        <Text style={styles.subtitle} numberOfLines={2}>
           {lanStatus.isOnLan
             ? `Connected over LAN (${lanStatus.activeUrl}) for maximum backup speed.`
             : 'Backs up full-resolution iPhone & iCloud originals straight to your NAS.'}
@@ -489,7 +491,15 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.line,
   },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
   title: {
+    flex: 1,
+    minWidth: 0,
     fontSize: 26,
     fontWeight: '800',
     color: colors.ink,

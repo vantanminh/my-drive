@@ -71,7 +71,10 @@ export function LanStatusBadge({
     >
       <View style={[styles.dot, { backgroundColor: meta.fg }]} />
       <Ionicons name={meta.icon} size={compact ? 11 : 12} color={meta.fg} />
-      <Text style={[styles.label, { color: meta.fg }, compact && styles.labelCompact]}>
+      <Text
+        numberOfLines={1}
+        style={[styles.label, { color: meta.fg }, compact && styles.labelCompact]}
+      >
         {meta.label}
       </Text>
     </Pressable>
@@ -82,6 +85,7 @@ const styles = StyleSheet.create({
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
     gap: 5,
     paddingHorizontal: spacing.sm + 2,
     paddingVertical: 5,

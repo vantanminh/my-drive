@@ -542,9 +542,11 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   topTitleWrap: {
     flex: 1,
+    minWidth: 0,
   },
   topTitle: {
     color: colors.white,
