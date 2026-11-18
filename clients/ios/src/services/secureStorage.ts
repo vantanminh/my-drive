@@ -1,6 +1,13 @@
 import * as SecureStore from 'expo-secure-store';
 import * as Device from 'expo-device';
 
+import {
+  DEFAULT_CACHE_HISTORY,
+  DEFAULT_CACHE_SETTINGS,
+  normalizeCacheHistory,
+  normalizeCacheSettings,
+} from './cacheManager';
+import type { CacheSettings, CacheStatsHistory } from './cacheTypes';
 import type { SyncSettings } from '../types/mydrive';
 
 const KEYS = {
@@ -14,6 +21,8 @@ const KEYS = {
   allowHttpForUrl: 'mydrive_allow_http_url',
   syncSettings: 'mydrive_sync_settings',
   shareUrls: 'mydrive_share_urls_v1',
+  cacheSettings: 'mydrive_cache_settings_v1',
+  cacheHistory: 'mydrive_cache_history_v1',
 } as const;
 
 interface StoredShareUrlRecord {
@@ -268,5 +277,39 @@ export async function forgetRememberedShareUrls(
     await SecureStore.setItemAsync(KEYS.shareUrls, JSON.stringify(next));
   } catch {
     // Ignore non-critical cleanup failure.
+  }
+}
+
+export async function loadCacheSettings(): Promise<CacheSettings> {
+  try {
+    const raw = await SecureStore.getItemAsync(KEYS.cacheSettings);
+    if (!raw) return { ...DEFAULT_CACHE_SETTINGS };
+    return normalizeCacheSettings(JSON.parse(raw) as Partial<CacheSettings>);
+  } catch {
+    return { ...DEFAULT_CACHE_SETTINGS };
+  }
+}
+
+export async function saveCacheSettings(settings: CacheSettings): Promise<void> {
+  const normalized = normalizeCacheSettings(settings);
+  await SecureStore.setItemAsync(KEYS.cacheSettings, JSON.stringify(normalized));
+}
+
+export async function loadCacheHistory(): Promise<CacheStatsHistory> {
+  try {
+    const raw = await SecureStore.getItemAsync(KEYS.cacheHistory);
+    if (!raw) return { ...DEFAULT_CACHE_HISTORY };
+    return normalizeCacheHistory(JSON.parse(raw) as Partial<CacheStatsHistory>);
+  } catch {
+    return { ...DEFAULT_CACHE_HISTORY };
+  }
+}
+
+export async function saveCacheHistory(history: CacheStatsHistory): Promise<void> {
+  const normalized = normalizeCacheHistory(history);
+  try {
+    await SecureStore.setItemAsync(KEYS.cacheHistory, JSON.stringify(normalized));
+  } catch {
+    // Non-critical stats persistence failure must not block cache clearing.
   }
 }

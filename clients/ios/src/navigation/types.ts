@@ -25,6 +25,7 @@ export type RootStackParamList = {
     cluster: FaceCluster;
   };
   NasStorage: undefined;
+  CacheManagement: undefined;
   Trash: undefined;
   ChangePassword: {
     required?: boolean;

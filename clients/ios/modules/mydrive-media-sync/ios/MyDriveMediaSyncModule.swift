@@ -5,6 +5,7 @@ import Foundation
 import Network
 import Photos
 import UniformTypeIdentifiers
+import WebKit
 
 internal final class ICloudNetworkRequiredException: GenericException<String>, @unchecked Sendable {
   override var code: String { "ICLOUD_NETWORK_REQUIRED" }
@@ -529,6 +530,37 @@ public final class MyDriveMediaSyncModule: Module {
           .filter { $0 > 0 && $0 <= 65535 }
         let results = await Self.scanLanForServers(ports: candidatePorts)
         promise.resolve(results)
+      }
+    }
+
+    AsyncFunction("inspectLocalCaches") { (promise: Promise) in
+      Task.detached(priority: .utility) {
+        let stats = Self.collectLocalCacheStats()
+        promise.resolve(stats)
+      }
+    }
+
+    AsyncFunction("clearLocalCacheCategory") { (category: String, promise: Promise) in
+      Task.detached(priority: .userInitiated) {
+        let result = await Self.clearNativeCacheCategory(category)
+        promise.resolve(result)
+      }
+    }
+
+    AsyncFunction("deleteCachedFile") { (filePath: String, promise: Promise) in
+      Task.detached(priority: .userInitiated) {
+        let result = Self.removeSingleSafeCachedFile(filePath: filePath)
+        promise.resolve(result)
+      }
+    }
+
+    AsyncFunction("pruneExpiredTempCache") { (maxAgeSeconds: Double, includeSyncStaging: Bool, promise: Promise) in
+      Task.detached(priority: .utility) {
+        let result = Self.pruneExpiredTempFiles(
+          maxAgeSeconds: maxAgeSeconds,
+          includeSyncStaging: includeSyncStaging
+        )
+        promise.resolve(result)
       }
     }
   }
@@ -1210,5 +1242,631 @@ public final class MyDriveMediaSyncModule: Module {
     return servers.sorted {
       ($0["latencyMs"] as? Int ?? Int.max) < ($1["latencyMs"] as? Int ?? Int.max)
     }
+  }
+
+  // MARK: - Local Cache Inspection & Cleanup
+
+  private struct ScannedFileItem {
+    let path: String
+    let name: String
+    let sizeBytes: Int64
+    let modifiedAtMs: Double
+  }
+
+  private struct DirectoryScanStats {
+    var sizeBytes: Int64 = 0
+    var fileCount: Int = 0
+    var items: [ScannedFileItem] = []
+  }
+
+  private static let imageCacheDirName = "com.hackemist.SDImageCache"
+  private static let videoCacheDirName = "expo-video-cache"
+  private static let documentPickerDirName = "DocumentPicker"
+  private static let downloadsDirName = "mydrive-downloads"
+  private static let syncStagingDirName = "mydrive-sync-staging"
+  private static let webKitDirName = "WebKit"
+
+  private static func cachesRootDirectory(fm: FileManager = FileManager()) -> URL? {
+    fm.urls(for: .cachesDirectory, in: .userDomainMask).first
+  }
+
+  private static func documentsRootDirectory(fm: FileManager = FileManager()) -> URL? {
+    fm.urls(for: .documentDirectory, in: .userDomainMask).first
+  }
+
+  private static func temporaryRootDirectory(fm: FileManager = FileManager()) -> URL {
+    fm.temporaryDirectory
+  }
+
+  private static func isSystemManagedCacheEntry(_ name: String) -> Bool {
+    if name == "Snapshots" { return true }
+    if name.hasPrefix("com.apple.") { return true }
+    return false
+  }
+
+  private static func isKnownDedicatedCacheEntry(_ name: String, bundleId: String?) -> Bool {
+    if name == imageCacheDirName
+      || name == videoCacheDirName
+      || name == documentPickerDirName
+      || name == webKitDirName
+    {
+      return true
+    }
+    if let bundleId, !bundleId.isEmpty, name == bundleId {
+      return true
+    }
+    return false
+  }
+
+  private static func scanItemStats(
+    at url: URL,
+    collectFiles: Bool = false,
+    fm: FileManager = FileManager()
+  ) -> DirectoryScanStats {
+    var stats = DirectoryScanStats()
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
+      return stats
+    }
+
+    let keys: Set<URLResourceKey> = [
+      .isRegularFileKey,
+      .fileSizeKey,
+      .contentModificationDateKey,
+    ]
+
+    if !isDir.boolValue {
+      if let values = try? url.resourceValues(forKeys: keys),
+         values.isRegularFile == true
+      {
+        let size = Int64(values.fileSize ?? 0)
+        stats.sizeBytes = size
+        stats.fileCount = 1
+        if collectFiles {
+          let modMs = (values.contentModificationDate?.timeIntervalSince1970 ?? 0) * 1000.0
+          stats.items.append(
+            ScannedFileItem(
+              path: url.path,
+              name: url.lastPathComponent,
+              sizeBytes: size,
+              modifiedAtMs: modMs
+            )
+          )
+        }
+      }
+      return stats
+    }
+
+    guard let enumerator = fm.enumerator(
+      at: url,
+      includingPropertiesForKeys: Array(keys),
+      options: []
+    ) else {
+      return stats
+    }
+
+    while let entry = enumerator.nextObject() as? URL {
+      guard let values = try? entry.resourceValues(forKeys: keys),
+            values.isRegularFile == true
+      else {
+        continue
+      }
+      let size = Int64(values.fileSize ?? 0)
+      stats.sizeBytes += size
+      stats.fileCount += 1
+      if collectFiles {
+        let modMs = (values.contentModificationDate?.timeIntervalSince1970 ?? 0) * 1000.0
+        stats.items.append(
+          ScannedFileItem(
+            path: entry.path,
+            name: entry.lastPathComponent,
+            sizeBytes: size,
+            modifiedAtMs: modMs
+          )
+        )
+      }
+    }
+
+    return stats
+  }
+
+  private static func deviceStorageCapacity(fm: FileManager = FileManager()) -> (total: Int64, free: Int64) {
+    let probeUrl = documentsRootDirectory(fm: fm) ?? URL(fileURLWithPath: NSHomeDirectory())
+    let resourceValues = try? probeUrl.resourceValues(forKeys: [
+      .volumeTotalCapacityKey,
+      .volumeAvailableCapacityForImportantUsageKey,
+    ])
+    var total = Int64(resourceValues?.volumeTotalCapacity ?? 0)
+    var free = resourceValues?.volumeAvailableCapacityForImportantUsage ?? 0
+
+    if total <= 0 || free <= 0,
+       let attrs = try? fm.attributesOfFileSystem(forPath: probeUrl.path)
+    {
+      if total <= 0 {
+        total = (attrs[.systemSize] as? NSNumber)?.int64Value ?? 0
+      }
+      if free <= 0 {
+        free = (attrs[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+      }
+    }
+
+    return (max(0, total), max(0, free))
+  }
+
+  private static func collectLocalCacheStats() -> [String: Any] {
+    let fm = FileManager()
+    let cachesRoot = cachesRootDirectory(fm: fm)
+    let tempRoot = temporaryRootDirectory(fm: fm)
+    let docsRoot = documentsRootDirectory(fm: fm)
+    let bundleId = Bundle.main.bundleIdentifier
+
+    let imageScan = cachesRoot
+      .map { scanItemStats(at: $0.appendingPathComponent(imageCacheDirName, isDirectory: true), fm: fm) }
+      ?? DirectoryScanStats()
+
+    let videoScan = cachesRoot
+      .map { scanItemStats(at: $0.appendingPathComponent(videoCacheDirName, isDirectory: true), fm: fm) }
+      ?? DirectoryScanStats()
+
+    let downloadsDir = tempRoot.appendingPathComponent(downloadsDirName, isDirectory: true)
+    let downloadsScan = scanItemStats(at: downloadsDir, collectFiles: true, fm: fm)
+    let topDownloads: [[String: Any]] = downloadsScan.items
+      .sorted { $0.modifiedAtMs > $1.modifiedAtMs }
+      .prefix(60)
+      .map { item in
+        [
+          "id": item.path,
+          "path": item.path,
+          "name": item.name,
+          "sizeBytes": item.sizeBytes,
+          "modifiedAtMs": item.modifiedAtMs,
+        ]
+      }
+
+    var stagingBytes: Int64 = 0
+    var stagingFiles = 0
+    let syncStagingScan = scanItemStats(
+      at: tempRoot.appendingPathComponent(syncStagingDirName, isDirectory: true),
+      fm: fm
+    )
+    stagingBytes += syncStagingScan.sizeBytes
+    stagingFiles += syncStagingScan.fileCount
+
+    if let pickerDir = cachesRoot?.appendingPathComponent(documentPickerDirName, isDirectory: true) {
+      let pickerScan = scanItemStats(at: pickerDir, fm: fm)
+      stagingBytes += pickerScan.sizeBytes
+      stagingFiles += pickerScan.fileCount
+    }
+
+    if let tempEntries = try? fm.contentsOfDirectory(
+      at: tempRoot,
+      includingPropertiesForKeys: nil,
+      options: [.skipsHiddenFiles]
+    ) {
+      for entry in tempEntries {
+        let name = entry.lastPathComponent
+        if name == downloadsDirName || name == syncStagingDirName {
+          continue
+        }
+        let scan = scanItemStats(at: entry, fm: fm)
+        stagingBytes += scan.sizeBytes
+        stagingFiles += scan.fileCount
+      }
+    }
+
+    var networkBytes: Int64 = 0
+    var networkFiles = 0
+    if let cachesRoot {
+      if let bundleId, !bundleId.isEmpty {
+        let bundleCache = scanItemStats(
+          at: cachesRoot.appendingPathComponent(bundleId, isDirectory: true),
+          fm: fm
+        )
+        networkBytes += bundleCache.sizeBytes
+        networkFiles += bundleCache.fileCount
+      }
+      let webKitScan = scanItemStats(
+        at: cachesRoot.appendingPathComponent(webKitDirName, isDirectory: true),
+        fm: fm
+      )
+      networkBytes += webKitScan.sizeBytes
+      networkFiles += webKitScan.fileCount
+    }
+    let urlCacheDisk = Int64(URLCache.shared.currentDiskUsage)
+    let urlCacheMem = Int64(URLCache.shared.currentMemoryUsage)
+    networkBytes = max(networkBytes, urlCacheDisk)
+    if networkBytes > 0 && networkFiles == 0 {
+      networkFiles = 1
+    }
+
+    var otherBytes: Int64 = 0
+    var otherFiles = 0
+    if let cachesRoot,
+       let cacheEntries = try? fm.contentsOfDirectory(
+         at: cachesRoot,
+         includingPropertiesForKeys: nil,
+         options: [.skipsHiddenFiles]
+       )
+    {
+      for entry in cacheEntries {
+        let name = entry.lastPathComponent
+        if isKnownDedicatedCacheEntry(name, bundleId: bundleId) || isSystemManagedCacheEntry(name) {
+          continue
+        }
+        let scan = scanItemStats(at: entry, fm: fm)
+        otherBytes += scan.sizeBytes
+        otherFiles += scan.fileCount
+      }
+    }
+
+    var syncDbBytes: Int64 = 0
+    if let sqliteDir = docsRoot?.appendingPathComponent("SQLite", isDirectory: true),
+       let dbEntries = try? fm.contentsOfDirectory(
+         at: sqliteDir,
+         includingPropertiesForKeys: [.fileSizeKey],
+         options: []
+       )
+    {
+      for entry in dbEntries where entry.lastPathComponent.hasPrefix("mydrive_sync.db") {
+        let scan = scanItemStats(at: entry, fm: fm)
+        syncDbBytes += scan.sizeBytes
+      }
+    }
+
+    let capacity = deviceStorageCapacity(fm: fm)
+
+    return [
+      "deviceTotalBytes": capacity.total,
+      "deviceFreeBytes": capacity.free,
+      "imageCache": [
+        "sizeBytes": imageScan.sizeBytes,
+        "fileCount": imageScan.fileCount,
+      ],
+      "videoCache": [
+        "sizeBytes": videoScan.sizeBytes,
+        "fileCount": videoScan.fileCount,
+      ],
+      "downloadsCache": [
+        "sizeBytes": downloadsScan.sizeBytes,
+        "fileCount": downloadsScan.fileCount,
+        "items": topDownloads,
+      ],
+      "stagingCache": [
+        "sizeBytes": stagingBytes,
+        "fileCount": stagingFiles,
+      ],
+      "networkCache": [
+        "sizeBytes": networkBytes,
+        "fileCount": networkFiles,
+        "memoryBytes": urlCacheMem,
+      ],
+      "otherCache": [
+        "sizeBytes": otherBytes,
+        "fileCount": otherFiles,
+      ],
+      "syncDatabaseBytes": syncDbBytes,
+      "inspectedAt": isoString(Date()) ?? "",
+    ]
+  }
+
+  private static func clearDirectoryChildren(at url: URL, fm: FileManager = FileManager()) -> (bytes: Int64, files: Int) {
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
+      return (0, 0)
+    }
+    if !isDir.boolValue {
+      let scan = scanItemStats(at: url, fm: fm)
+      do {
+        try fm.removeItem(at: url)
+        return (scan.sizeBytes, scan.fileCount)
+      } catch {
+        return (0, 0)
+      }
+    }
+
+    guard let children = try? fm.contentsOfDirectory(
+      at: url,
+      includingPropertiesForKeys: nil,
+      options: []
+    ) else {
+      return (0, 0)
+    }
+
+    var deletedBytes: Int64 = 0
+    var deletedFiles = 0
+    for child in children {
+      let scan = scanItemStats(at: child, fm: fm)
+      do {
+        try fm.removeItem(at: child)
+        deletedBytes += scan.sizeBytes
+        deletedFiles += scan.fileCount
+      } catch {
+        // Ignore locked in-flight system files.
+      }
+    }
+    return (deletedBytes, deletedFiles)
+  }
+
+  @MainActor
+  private static func clearWebKitCaches() async {
+    let cacheTypes: Set<String> = [
+      WKWebsiteDataTypeDiskCache,
+      WKWebsiteDataTypeMemoryCache,
+      WKWebsiteDataTypeOfflineWebApplicationCache,
+      WKWebsiteDataTypeFetchCache,
+    ]
+    await WKWebsiteDataStore.default().removeData(
+      ofTypes: cacheTypes,
+      modifiedSince: .distantPast
+    )
+  }
+
+  private static func clearDownloadsCache(fm: FileManager = FileManager()) -> (bytes: Int64, files: Int) {
+    let downloadsDir = temporaryRootDirectory(fm: fm).appendingPathComponent(downloadsDirName, isDirectory: true)
+    return clearDirectoryChildren(at: downloadsDir, fm: fm)
+  }
+
+  private static func clearStagingCache(fm: FileManager = FileManager()) -> (bytes: Int64, files: Int) {
+    let tempRoot = temporaryRootDirectory(fm: fm)
+    let cachesRoot = cachesRootDirectory(fm: fm)
+    var totalBytes: Int64 = 0
+    var totalFiles = 0
+
+    let syncRes = clearDirectoryChildren(
+      at: tempRoot.appendingPathComponent(syncStagingDirName, isDirectory: true),
+      fm: fm
+    )
+    totalBytes += syncRes.bytes
+    totalFiles += syncRes.files
+
+    if let pickerDir = cachesRoot?.appendingPathComponent(documentPickerDirName, isDirectory: true) {
+      let pickerRes = clearDirectoryChildren(at: pickerDir, fm: fm)
+      totalBytes += pickerRes.bytes
+      totalFiles += pickerRes.files
+    }
+
+    if let tempEntries = try? fm.contentsOfDirectory(
+      at: tempRoot,
+      includingPropertiesForKeys: nil,
+      options: [.skipsHiddenFiles]
+    ) {
+      for entry in tempEntries {
+        let name = entry.lastPathComponent
+        if name == downloadsDirName || name == syncStagingDirName {
+          continue
+        }
+        let scan = scanItemStats(at: entry, fm: fm)
+        do {
+          try fm.removeItem(at: entry)
+          totalBytes += scan.sizeBytes
+          totalFiles += scan.fileCount
+        } catch {
+          // Skip files currently held open by the OS.
+        }
+      }
+    }
+
+    return (totalBytes, totalFiles)
+  }
+
+  private static func clearNetworkCache(fm: FileManager = FileManager()) async -> (bytes: Int64, files: Int) {
+    let cachesRoot = cachesRootDirectory(fm: fm)
+    let bundleId = Bundle.main.bundleIdentifier
+    var beforeBundleBytes: Int64 = 0
+    var beforeBundleFiles = 0
+    if let cachesRoot, let bundleId, !bundleId.isEmpty {
+      let bundleDir = cachesRoot.appendingPathComponent(bundleId, isDirectory: true)
+      let beforeScan = scanItemStats(at: bundleDir, fm: fm)
+      beforeBundleBytes = beforeScan.sizeBytes
+      beforeBundleFiles = beforeScan.fileCount
+    }
+
+    let beforeUrlDisk = Int64(URLCache.shared.currentDiskUsage)
+    URLCache.shared.removeAllCachedResponses()
+    await clearWebKitCaches()
+
+    var totalBytes: Int64 = 0
+    var totalFiles = 0
+    if let cachesRoot {
+      if let bundleId, !bundleId.isEmpty {
+        let bundleDir = cachesRoot.appendingPathComponent(bundleId, isDirectory: true)
+        let fsCached = bundleDir.appendingPathComponent("fsCachedData", isDirectory: true)
+        let fsRes = clearDirectoryChildren(at: fsCached, fm: fm)
+        let afterScan = scanItemStats(at: bundleDir, fm: fm)
+        let deltaBytes = max(fsRes.bytes, max(0, beforeBundleBytes - afterScan.sizeBytes))
+        let deltaFiles = max(fsRes.files, max(0, beforeBundleFiles - afterScan.fileCount))
+        let urlCacheDelta = max(0, beforeUrlDisk - Int64(URLCache.shared.currentDiskUsage))
+        totalBytes += max(deltaBytes, urlCacheDelta)
+        totalFiles += deltaFiles
+      } else {
+        totalBytes += max(0, beforeUrlDisk - Int64(URLCache.shared.currentDiskUsage))
+      }
+      let webKitDir = cachesRoot.appendingPathComponent(webKitDirName, isDirectory: true)
+      let wkRes = clearDirectoryChildren(at: webKitDir, fm: fm)
+      totalBytes += wkRes.bytes
+      totalFiles += wkRes.files
+    } else {
+      totalBytes += max(0, beforeUrlDisk - Int64(URLCache.shared.currentDiskUsage))
+    }
+
+    return (totalBytes, totalFiles)
+  }
+
+  private static func clearOtherAppCache(fm: FileManager = FileManager()) -> (bytes: Int64, files: Int) {
+    let bundleId = Bundle.main.bundleIdentifier
+    guard let cachesRoot = cachesRootDirectory(fm: fm),
+          let cacheEntries = try? fm.contentsOfDirectory(
+            at: cachesRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+          )
+    else {
+      return (0, 0)
+    }
+
+    var totalBytes: Int64 = 0
+    var totalFiles = 0
+    for entry in cacheEntries {
+      let name = entry.lastPathComponent
+      if isKnownDedicatedCacheEntry(name, bundleId: bundleId) || isSystemManagedCacheEntry(name) {
+        continue
+      }
+      let scan = scanItemStats(at: entry, fm: fm)
+      do {
+        try fm.removeItem(at: entry)
+        totalBytes += scan.sizeBytes
+        totalFiles += scan.fileCount
+      } catch {
+        // Ignore non-deletable system cache files.
+      }
+    }
+    return (totalBytes, totalFiles)
+  }
+
+  private static func clearNativeCacheCategory(_ category: String) async -> [String: Any] {
+    let fm = FileManager()
+    var totalBytes: Int64 = 0
+    var totalFiles = 0
+
+    switch category {
+    case "downloads":
+      let res = clearDownloadsCache(fm: fm)
+      totalBytes += res.bytes
+      totalFiles += res.files
+    case "staging":
+      let res = clearStagingCache(fm: fm)
+      totalBytes += res.bytes
+      totalFiles += res.files
+    case "network":
+      let res = await clearNetworkCache(fm: fm)
+      totalBytes += res.bytes
+      totalFiles += res.files
+    case "other":
+      let res = clearOtherAppCache(fm: fm)
+      totalBytes += res.bytes
+      totalFiles += res.files
+    case "all_native":
+      let dlRes = clearDownloadsCache(fm: fm)
+      let stRes = clearStagingCache(fm: fm)
+      let netRes = await clearNetworkCache(fm: fm)
+      let otherRes = clearOtherAppCache(fm: fm)
+      totalBytes = dlRes.bytes + stRes.bytes + netRes.bytes + otherRes.bytes
+      totalFiles = dlRes.files + stRes.files + netRes.files + otherRes.files
+    default:
+      break
+    }
+
+    return [
+      "deletedBytes": totalBytes,
+      "deletedFiles": totalFiles,
+    ]
+  }
+
+  private static func removeSingleSafeCachedFile(filePath: String) -> [String: Any] {
+    guard !filePath.isEmpty else {
+      return ["deletedBytes": Int64(0), "deletedFiles": 0]
+    }
+    let fm = FileManager()
+    let tempRoot = temporaryRootDirectory(fm: fm)
+    let downloadsRoot = tempRoot.appendingPathComponent(downloadsDirName, isDirectory: true)
+    let syncStagingRoot = tempRoot.appendingPathComponent(syncStagingDirName, isDirectory: true)
+    var allowedRoots: [URL] = [downloadsRoot, syncStagingRoot]
+    if let pickerRoot = cachesRootDirectory(fm: fm)?.appendingPathComponent(documentPickerDirName, isDirectory: true) {
+      allowedRoots.append(pickerRoot)
+    }
+
+    let targetUrl = resolveLocalFileURL(filePath).resolvingSymlinksInPath().standardizedFileURL
+    let targetPath = targetUrl.path
+    let normalizedRoots = allowedRoots.map { url -> String in
+      let p = url.resolvingSymlinksInPath().standardizedFileURL.path
+      return p.hasSuffix("/") ? p : "\(p)/"
+    }
+    guard normalizedRoots.contains(where: { targetPath.hasPrefix($0) }) else {
+      return ["deletedBytes": Int64(0), "deletedFiles": 0]
+    }
+
+    let scan = scanItemStats(at: targetUrl, fm: fm)
+    do {
+      try fm.removeItem(at: targetUrl)
+      // Clean empty UUID parent folders inside mydrive-downloads.
+      let downloadsRaw = downloadsRoot.resolvingSymlinksInPath().standardizedFileURL.path
+      let downloadsPrefix = downloadsRaw.hasSuffix("/") ? downloadsRaw : "\(downloadsRaw)/"
+      let parentUrl = targetUrl.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+      if parentUrl.path.hasPrefix(downloadsPrefix),
+         let remaining = try? fm.contentsOfDirectory(atPath: parentUrl.path),
+         remaining.isEmpty
+      {
+        try? fm.removeItem(at: parentUrl)
+      }
+      return [
+        "deletedBytes": scan.sizeBytes,
+        "deletedFiles": max(1, scan.fileCount),
+      ]
+    } catch {
+      return ["deletedBytes": Int64(0), "deletedFiles": 0]
+    }
+  }
+
+  private static func pruneExpiredTempFiles(
+    maxAgeSeconds: Double,
+    includeSyncStaging: Bool
+  ) -> [String: Any] {
+    let fm = FileManager()
+    let cutoff = Date().addingTimeInterval(-max(0, maxAgeSeconds))
+    let tempRoot = temporaryRootDirectory(fm: fm)
+    var targetDirs: [URL] = [
+      tempRoot.appendingPathComponent(downloadsDirName, isDirectory: true),
+    ]
+    if let pickerDir = cachesRootDirectory(fm: fm)?.appendingPathComponent(documentPickerDirName, isDirectory: true) {
+      targetDirs.append(pickerDir)
+    }
+    if includeSyncStaging {
+      targetDirs.append(tempRoot.appendingPathComponent(syncStagingDirName, isDirectory: true))
+    }
+
+    var deletedBytes: Int64 = 0
+    var deletedFiles = 0
+    let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+
+    for rootDir in targetDirs {
+      guard fm.fileExists(atPath: rootDir.path),
+            let enumerator = fm.enumerator(at: rootDir, includingPropertiesForKeys: Array(keys), options: [])
+      else {
+        continue
+      }
+      var expiredFiles: [(url: URL, size: Int64)] = []
+      var subdirs: [URL] = []
+      while let entry = enumerator.nextObject() as? URL {
+        guard let values = try? entry.resourceValues(forKeys: keys) else { continue }
+        if values.isRegularFile == true {
+          let modDate = values.contentModificationDate ?? Date.distantPast
+          if modDate <= cutoff {
+            expiredFiles.append((url: entry, size: Int64(values.fileSize ?? 0)))
+          }
+        } else {
+          subdirs.append(entry)
+        }
+      }
+      for item in expiredFiles {
+        do {
+          try fm.removeItem(at: item.url)
+          deletedBytes += item.size
+          deletedFiles += 1
+        } catch {
+          // Ignore locked files.
+        }
+      }
+      // Remove empty subdirectories bottom-up.
+      for dir in subdirs.reversed() {
+        if let contents = try? fm.contentsOfDirectory(atPath: dir.path), contents.isEmpty {
+          try? fm.removeItem(at: dir)
+        }
+      }
+    }
+
+    return [
+      "deletedBytes": deletedBytes,
+      "deletedFiles": deletedFiles,
+    ]
   }
 }

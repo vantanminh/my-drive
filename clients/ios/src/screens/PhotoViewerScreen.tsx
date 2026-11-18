@@ -22,7 +22,10 @@ import * as Sharing from 'expo-sharing';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 
-import { downloadToLocalFile } from '../../modules/mydrive-media-sync/src';
+import {
+  deleteCachedFile,
+  downloadToLocalFile,
+} from '../../modules/mydrive-media-sync/src';
 import { ShareLinkModal } from '../components/ShareLinkModal';
 import { AppButton, KeyValueRow } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
@@ -187,7 +190,11 @@ export function PhotoViewerScreen({ navigation, route }: Props) {
         currentItem.name,
         client.getSessionToken(),
       );
-      await MediaLibrary.Asset.create(downloaded.localUri);
+      try {
+        await MediaLibrary.Asset.create(downloaded.localUri);
+      } finally {
+        await deleteCachedFile(downloaded.path).catch(() => {});
+      }
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert('Saved to Photos', `${currentItem.name} saved to your Photo Library.`);
     } catch (err) {

@@ -20,7 +20,10 @@ import * as Haptics from 'expo-haptics';
 import * as Sharing from 'expo-sharing';
 import { Ionicons } from '@expo/vector-icons';
 
-import { downloadToLocalFile } from '../../modules/mydrive-media-sync/src';
+import {
+  deleteCachedFile,
+  downloadToLocalFile,
+} from '../../modules/mydrive-media-sync/src';
 import { FolderPickerModal } from '../components/FolderPickerModal';
 import { LanStatusBadge } from '../components/LanStatusBadge';
 import {
@@ -182,43 +185,47 @@ export function FilesScreen() {
           currentIndex: i + 1,
           totalCount: picked.assets.length,
         });
-        await uploadLocalDocument({
-          client,
-          parentId: currentFolderId,
-          filename: asset.name,
-          fileUri: asset.uri,
-          modifiedAtIso: asset.lastModified
-            ? new Date(asset.lastModified).toISOString()
-            : undefined,
-          onPhase: (phase, progress, bytes) => {
-            const now = Date.now();
-            const uploadedBytes = bytes?.uploadedBytes ?? 0;
-            const totalBytes = bytes?.totalBytes ?? asset.size ?? 0;
-            if (phase === 'uploading') {
-              tracker.record(uploadedBytes, now);
-            }
-            const bytesPerSecond =
-              phase === 'uploading' || phase === 'retrying'
-                ? tracker.sampleSpeed(now)
-                : 0;
-            const etaSeconds =
-              phase === 'uploading' && totalBytes > 0
-                ? tracker.estimateEtaSeconds(uploadedBytes, totalBytes, now)
-                : null;
-            setUploadStatus({
-              filename: asset.name,
-              phase,
-              progress,
-              uploadedBytes,
-              totalBytes,
-              bytesPerSecond,
-              etaSeconds,
-              detail: bytes?.detail,
-              currentIndex: i + 1,
-              totalCount: picked.assets.length,
-            });
-          },
-        });
+        try {
+          await uploadLocalDocument({
+            client,
+            parentId: currentFolderId,
+            filename: asset.name,
+            fileUri: asset.uri,
+            modifiedAtIso: asset.lastModified
+              ? new Date(asset.lastModified).toISOString()
+              : undefined,
+            onPhase: (phase, progress, bytes) => {
+              const now = Date.now();
+              const uploadedBytes = bytes?.uploadedBytes ?? 0;
+              const totalBytes = bytes?.totalBytes ?? asset.size ?? 0;
+              if (phase === 'uploading') {
+                tracker.record(uploadedBytes, now);
+              }
+              const bytesPerSecond =
+                phase === 'uploading' || phase === 'retrying'
+                  ? tracker.sampleSpeed(now)
+                  : 0;
+              const etaSeconds =
+                phase === 'uploading' && totalBytes > 0
+                  ? tracker.estimateEtaSeconds(uploadedBytes, totalBytes, now)
+                  : null;
+              setUploadStatus({
+                filename: asset.name,
+                phase,
+                progress,
+                uploadedBytes,
+                totalBytes,
+                bytesPerSecond,
+                etaSeconds,
+                detail: bytes?.detail,
+                currentIndex: i + 1,
+                totalCount: picked.assets.length,
+              });
+            },
+          });
+        } finally {
+          await deleteCachedFile(asset.uri).catch(() => {});
+        }
       }
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await loadEntries(0, true);

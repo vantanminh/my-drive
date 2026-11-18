@@ -11,7 +11,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
@@ -26,7 +26,10 @@ import {
   StatusBadge,
 } from '../components/UiPrimitives';
 import { useAuth } from '../context/AuthContext';
+import { useSync } from '../context/SyncContext';
 import type { RootStackParamList } from '../navigation/types';
+import { clearAllCaches, fetchCacheSnapshot } from '../services/cacheRuntime';
+import type { CacheSnapshot } from '../services/cacheTypes';
 import { formatBytes, formatShortDate } from '../services/format';
 import { colors, radius, spacing } from '../theme/tokens';
 import type {
@@ -51,9 +54,12 @@ export function SettingsScreen() {
     setAutoSwitchLan,
     refreshLanStatus,
   } = useAuth();
+  const { snapshot: syncSnap } = useSync();
   const rootNav = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [storage, setStorage] = useState<AccountStorage | null>(null);
   const [serverStorage, setServerStorage] = useState<ServerStorage | null>(null);
+  const [cacheSnap, setCacheSnap] = useState<CacheSnapshot | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
   const [sessions, setSessions] = useState<BrowserSession[]>([]);
   const [devices, setDevices] = useState<BackupDevice[]>([]);
   const [loadingStorage, setLoadingStorage] = useState(true);
@@ -64,6 +70,15 @@ export function SettingsScreen() {
   const [lanPromptOpen, setLanPromptOpen] = useState(false);
 
   const canManageServer = user?.role === 'owner' || user?.role === 'admin';
+
+  const loadLocalCache = useCallback(async () => {
+    try {
+      const snap = await fetchCacheSnapshot({ syncRunning: syncSnap.running });
+      setCacheSnap(snap);
+    } catch {
+      // Non-fatal in environments without native cache inspection.
+    }
+  }, [syncSnap.running]);
 
   const loadStorage = useCallback(async () => {
     if (!client) return;
@@ -87,6 +102,49 @@ export function SettingsScreen() {
   useEffect(() => {
     void loadStorage();
   }, [loadStorage]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadLocalCache();
+    }, [loadLocalCache]),
+  );
+
+  const confirmQuickClearCache = () => {
+    if (!cacheSnap || clearingCache) return;
+    Alert.alert(
+      'Clear Local App Cache?',
+      `Free ${formatBytes(cacheSnap.totalCacheBytes)} (${cacheSnap.totalFileCount} cached files) on this device? Your NAS files, login session, and photo sync ledger will stay intact.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear Cache',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setClearingCache(true);
+              try {
+                const res = await clearAllCaches({ syncRunning: syncSnap.running });
+                setCacheSnap(res.snapshot);
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                const msg =
+                  res.freedBytes > 0
+                    ? `Freed ${formatBytes(res.freedBytes)} across ${res.freedFiles} cached ${res.freedFiles === 1 ? 'file' : 'files'}.`
+                    : 'Local cache is clean.';
+                Alert.alert(
+                  'Cache Cleared',
+                  res.warnings.length > 0 ? `${msg}\n\n${res.warnings.join('\n')}` : msg,
+                );
+              } catch (err) {
+                Alert.alert('Clear Failed', err instanceof Error ? err.message : String(err));
+              } finally {
+                setClearingCache(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
 
   const confirmSwitchServer = () => {
     Alert.alert(
@@ -245,7 +303,7 @@ export function SettingsScreen() {
             refreshing={refreshing}
             onRefresh={() => {
               setRefreshing(true);
-              void loadStorage();
+              void Promise.all([loadStorage(), loadLocalCache()]);
             }}
             tintColor={colors.accent}
           />
@@ -365,6 +423,90 @@ export function SettingsScreen() {
             </>
           ) : (
             <Text style={styles.unavailableText}>Storage details unavailable.</Text>
+          )}
+        </Card>
+
+        <SectionTitle title="Local App Cache" />
+        <Card style={styles.storageCard}>
+          {cacheSnap ? (
+            <>
+              <View style={styles.storageHeader}>
+                <Text style={styles.storageUsed}>{formatBytes(cacheSnap.totalCacheBytes)}</Text>
+                <Text style={styles.storageQuota}>
+                  {cacheSnap.totalFileCount} {cacheSnap.totalFileCount === 1 ? 'file' : 'files'}
+                  {cacheSnap.deviceFreeBytes > 0
+                    ? ` · ${formatBytes(cacheSnap.deviceFreeBytes)} free`
+                    : ''}
+                </Text>
+              </View>
+              {cacheSnap.totalCacheBytes > 0 ? (
+                <View style={styles.cacheStackBar}>
+                  {cacheSnap.categories
+                    .filter((cat) => cat.sizeBytes > 0)
+                    .map((cat) => (
+                      <View
+                        key={cat.id}
+                        style={{
+                          width: `${Math.max(3, cat.percentOfCache)}%`,
+                          backgroundColor: cat.color,
+                        }}
+                      />
+                    ))}
+                </View>
+              ) : null}
+              <View style={styles.categoriesWrap}>
+                {cacheSnap.categories
+                  .filter((cat) => cat.sizeBytes > 0)
+                  .map((cat) => (
+                    <View key={cat.id} style={styles.categoryChip}>
+                      <View style={[styles.cacheChipDot, { backgroundColor: cat.color }]} />
+                      <Text style={styles.categoryLabel}>
+                        {cat.title.split(' ')[0]}: {formatBytes(cat.sizeBytes)}
+                      </Text>
+                    </View>
+                  ))}
+              </View>
+              <Text style={styles.deviceMeta}>
+                {cacheSnap.history.lastClearedAt
+                  ? `Last cleared ${formatShortDate(cacheSnap.history.lastClearedAt)} · Total freed ${formatBytes(cacheSnap.history.totalClearedBytes)}`
+                  : `Auto-clean ${cacheSnap.settings.autoCleanExpiredTemp ? `enabled (${cacheSnap.settings.tempRetentionDays}d)` : 'disabled'}`}
+              </Text>
+              <View style={styles.storageActionRow}>
+                <AppButton
+                  title="Manage Cache"
+                  icon="analytics-outline"
+                  variant="secondary"
+                  compact
+                  style={styles.flex}
+                  onPress={() => rootNav.navigate('CacheManagement')}
+                />
+                <AppButton
+                  title="Clear Cache"
+                  icon="trash-outline"
+                  variant="subtle"
+                  compact
+                  loading={clearingCache}
+                  disabled={
+                    clearingCache ||
+                    (cacheSnap.totalCacheBytes === 0 && cacheSnap.totalFileCount === 0)
+                  }
+                  style={styles.flex}
+                  onPress={confirmQuickClearCache}
+                />
+              </View>
+            </>
+          ) : (
+            <View style={styles.storageActionRow}>
+              <ActivityIndicator size="small" color={colors.accent} />
+              <AppButton
+                title="Manage Cache"
+                icon="analytics-outline"
+                variant="secondary"
+                compact
+                style={styles.flex}
+                onPress={() => rootNav.navigate('CacheManagement')}
+              />
+            </View>
           )}
         </Card>
 
@@ -727,12 +869,28 @@ const styles = StyleSheet.create({
     gap: spacing.xs + 2,
   },
   categoryChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     paddingHorizontal: spacing.sm + 2,
     paddingVertical: 5,
     borderRadius: radius.pill,
     backgroundColor: colors.surfaceSubtle,
     borderWidth: 1,
     borderColor: colors.line,
+  },
+  cacheStackBar: {
+    flexDirection: 'row',
+    height: 8,
+    borderRadius: 4,
+    overflow: 'hidden',
+    backgroundColor: colors.surfaceSubtle,
+    gap: 1,
+  },
+  cacheChipDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
   },
   categoryLabel: {
     fontSize: 12,

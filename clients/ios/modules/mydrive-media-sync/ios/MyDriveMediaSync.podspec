@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   s.platforms      = { :ios => '16.4' }
   s.source         = { :git => '' }
   s.static_framework = true
-  s.frameworks     = 'Photos', 'CryptoKit', 'UniformTypeIdentifiers'
+  s.frameworks     = 'Photos', 'CryptoKit', 'UniformTypeIdentifiers', 'WebKit'
 
   s.dependency 'ExpoModulesCore'
 

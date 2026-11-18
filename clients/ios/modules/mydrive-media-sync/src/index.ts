@@ -67,6 +67,44 @@ export interface NativeDiscoveredLanServer {
   latencyMs: number;
 }
 
+export interface NativeCacheBucketStats {
+  sizeBytes: number;
+  fileCount: number;
+}
+
+export interface NativeCachedFileItem {
+  id: string;
+  path: string;
+  name: string;
+  sizeBytes: number;
+  modifiedAtMs: number;
+}
+
+export interface NativeLocalCacheStats {
+  deviceTotalBytes: number;
+  deviceFreeBytes: number;
+  imageCache: NativeCacheBucketStats;
+  videoCache: NativeCacheBucketStats;
+  downloadsCache: NativeCacheBucketStats & { items: NativeCachedFileItem[] };
+  stagingCache: NativeCacheBucketStats;
+  networkCache: NativeCacheBucketStats & { memoryBytes: number };
+  otherCache: NativeCacheBucketStats;
+  syncDatabaseBytes: number;
+  inspectedAt: string;
+}
+
+export interface NativeCacheClearResult {
+  deletedBytes: number;
+  deletedFiles: number;
+}
+
+export type NativeCacheCategory =
+  | 'downloads'
+  | 'staging'
+  | 'network'
+  | 'other'
+  | 'all_native';
+
 export type ICloudProgressEvent = {
   assetId: string;
   progress: number;
@@ -96,6 +134,13 @@ interface NativeMyDriveMediaSyncShape {
   clearSessionCookies(baseUrl: string): Promise<void>;
   getWifiSubnetInfo(): Promise<WifiSubnetInfo | null>;
   discoverLanServers(ports: number[] | null): Promise<NativeDiscoveredLanServer[]>;
+  inspectLocalCaches(): Promise<NativeLocalCacheStats>;
+  clearLocalCacheCategory(category: NativeCacheCategory): Promise<NativeCacheClearResult>;
+  deleteCachedFile(filePath: string): Promise<NativeCacheClearResult>;
+  pruneExpiredTempCache(
+    maxAgeSeconds: number,
+    includeSyncStaging: boolean,
+  ): Promise<NativeCacheClearResult>;
 }
 
 type MediaSyncEventsMap = {
@@ -178,6 +223,39 @@ export async function discoverLanServersNative(
 ): Promise<NativeDiscoveredLanServer[]> {
   if (!nativeModule?.discoverLanServers) return [];
   return nativeModule.discoverLanServers(ports ?? null);
+}
+
+export async function inspectLocalCaches(): Promise<NativeLocalCacheStats | null> {
+  if (!nativeModule?.inspectLocalCaches) return null;
+  return nativeModule.inspectLocalCaches();
+}
+
+export async function clearLocalCacheCategory(
+  category: NativeCacheCategory,
+): Promise<NativeCacheClearResult> {
+  if (!nativeModule?.clearLocalCacheCategory) {
+    return { deletedBytes: 0, deletedFiles: 0 };
+  }
+  return nativeModule.clearLocalCacheCategory(category);
+}
+
+export async function deleteCachedFile(
+  filePath: string,
+): Promise<NativeCacheClearResult> {
+  if (!nativeModule?.deleteCachedFile) {
+    return { deletedBytes: 0, deletedFiles: 0 };
+  }
+  return nativeModule.deleteCachedFile(filePath);
+}
+
+export async function pruneExpiredTempCache(
+  maxAgeSeconds: number,
+  includeSyncStaging: boolean,
+): Promise<NativeCacheClearResult> {
+  if (!nativeModule?.pruneExpiredTempCache) {
+    return { deletedBytes: 0, deletedFiles: 0 };
+  }
+  return nativeModule.pruneExpiredTempCache(maxAgeSeconds, includeSyncStaging);
 }
 
 export function addICloudProgressListener(

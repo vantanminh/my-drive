@@ -6,6 +6,7 @@ import {
   isNativeMediaSyncAvailable,
 } from '../../modules/mydrive-media-sync/src';
 import { createIosPhotoSyncDeps, syncBackgroundTaskRegistration } from '../services/backgroundSync';
+import { runStartupCacheMaintenance } from '../services/cacheRuntime';
 import { PhotoSyncEngine, initialSyncSnapshot } from '../services/photoSyncEngine';
 import { defaultSyncSettings, loadSyncSettings, saveSyncSettings } from '../services/secureStorage';
 import { SqliteSyncLedgerStore, type SyncLedgerStats } from '../services/syncDatabase';
@@ -147,6 +148,7 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
     void loadSyncSettings().then((loaded) => {
       if (active) setSettings(loaded);
     });
+    void runStartupCacheMaintenance({ syncRunning: runningRef.current }).catch(() => {});
     return () => {
       active = false;
     };

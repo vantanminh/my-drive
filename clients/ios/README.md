@@ -13,6 +13,7 @@ Native iOS companion client for self-hosted **MyDrive** NAS servers.
   - Persists per-server sync ledger in SQLite (`expo-sqlite`) and cleans temporary staging files after every transfer.
 - **Photos & Albums**: 3-column cached thumbnail timeline, Albums browser & creation, full-screen swipeable viewer with pinch-to-zoom, native video playback, album tagging, NAS metadata drawer, iOS Share Sheet, and **Save Original to Photos** (`MediaLibrary.Asset.create`).
 - **Files & Document Viewer**: Folder breadcrumb navigation, live search, sort toggle, multi-file upload via `expo-document-picker` with resumable chunk transfers, folder creation/renaming/trashing, and inline preview for images, videos, PDFs, Office documents, text/code files, plus native iOS QuickLook (`File.preview`).
+- **Local Cache & Storage Management**: Real-time cache usage breakdown across thumbnails/images, video streaming segments, downloaded document previews, sync/upload staging temp files, and HTTP/WebView caches, with per-category and full clearing, configurable disk limits, and automatic expired temp cleanup.
 
 ## Local Development
 

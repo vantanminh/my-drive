@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { useSync } from '../context/SyncContext';
 import { AlbumDetailScreen } from '../screens/AlbumDetailScreen';
+import { CacheManagementScreen } from '../screens/CacheManagementScreen';
 import { ChangePasswordModal } from '../screens/ChangePasswordModal';
 import { FileViewerScreen } from '../screens/FileViewerScreen';
 import { FilesScreen } from '../screens/FilesScreen';
@@ -155,6 +156,11 @@ export function AppNavigator() {
               name="NasStorage"
               component={NasStorageScreen}
               options={{ title: 'NAS Storage Manager', headerBackTitle: 'Settings' }}
+            />
+            <Stack.Screen
+              name="CacheManagement"
+              component={CacheManagementScreen}
+              options={{ title: 'Cache & Storage', headerBackTitle: 'Settings' }}
             />
             <Stack.Screen
               name="Trash"
