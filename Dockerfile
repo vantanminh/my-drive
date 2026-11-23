@@ -124,6 +124,7 @@ RUN apt-get update \
     && chown 10001:10001 /srv/view
 COPY docker/smb.conf /etc/samba/smb.conf
 COPY docker/smb-entrypoint.sh /usr/local/bin/smb-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/smb-entrypoint.sh
+COPY docker/smb-dfree.sh /usr/local/bin/smb-dfree.sh
+RUN chmod 0755 /usr/local/bin/smb-entrypoint.sh /usr/local/bin/smb-dfree.sh
 EXPOSE 445
 ENTRYPOINT ["/usr/local/bin/smb-entrypoint.sh"]

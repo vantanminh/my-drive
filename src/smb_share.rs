@@ -26,7 +26,11 @@ use sha2::Sha256;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{auth, drive, health::TransferSettings, storage::LocalStorage};
+use crate::{
+    auth, drive,
+    health::TransferSettings,
+    storage::{FilesystemUsage, LocalStorage},
+};
 
 pub(crate) static VIEW_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -35,6 +39,41 @@ const MAX_ENTRIES_PER_USER: i64 = 500_000;
 
 pub(crate) fn available() -> bool {
     VIEW_DIR.get().is_some()
+}
+
+/// Compute accurate `(total_bytes, free_bytes)` for a mapped network drive (SMB / WebDAV).
+///
+/// - When the user has a finite quota, reports their quota and remaining space,
+///   clamped by actual underlying HDD free space so OS copy dialogs never think
+///   there is more free space than the physical disk can hold.
+/// - When the user has unlimited quota, reports the real HDD filesystem total
+///   and free space rather than the Docker `smb-view` volume.
+pub(crate) fn compute_mapped_drive_space(
+    quota_bytes: Option<i64>,
+    used_bytes: i64,
+    disk: Option<FilesystemUsage>,
+) -> (u64, u64) {
+    let used = u64::try_from(used_bytes.max(0)).unwrap_or(0);
+    match quota_bytes {
+        Some(quota) if quota > 0 => {
+            let quota_u64 = quota as u64;
+            let quota_free = quota_u64.saturating_sub(used);
+            match disk {
+                Some(d) => {
+                    let free = quota_free.min(d.free_bytes);
+                    let total = quota_u64
+                        .min(used.saturating_add(d.free_bytes))
+                        .max(used);
+                    (total, free)
+                }
+                None => (quota_u64.max(used), quota_free),
+            }
+        }
+        _ => match disk {
+            Some(d) => (d.total_bytes, d.free_bytes),
+            None => (0, 0),
+        },
+    }
 }
 
 /// NT hash: MD4 over the UTF-16LE password.
@@ -442,7 +481,40 @@ async fn sync_account(
     })
     .await??;
 
-    // 3. Persist snapshot for next cycle.
+    // 3. Write per-user capacity file for Samba's dfree command.
+    let (used_bytes, reserved_bytes): (i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT COALESCE(SUM(v.size_bytes), 0)::BIGINT \
+               FROM drive_entries e \
+               JOIN files f ON f.id = e.id \
+               JOIN file_versions v ON v.id = f.current_version_id \
+               JOIN storage_objects o ON o.id = v.storage_object_id AND o.state = 'ready' \
+              WHERE e.owner_id = $1) AS used_bytes, \
+            (SELECT COALESCE(SUM(expected_size), 0)::BIGINT \
+               FROM upload_sessions \
+              WHERE owner_id = $1 \
+                AND (state = 'finalizing' OR (state = 'active' AND expires_at > now()))) \
+                AS reserved_bytes",
+    )
+    .bind(account.user_id)
+    .fetch_one(pool)
+    .await?;
+    let effective_quota = auth::effective_quota_bytes(
+        &account.role,
+        account.quota_bytes,
+        transfer_settings.owner_quota_bytes,
+    );
+    let committed = used_bytes.max(0).saturating_add(reserved_bytes.max(0));
+    let disk_usage = storage.filesystem_usage().ok();
+    let (total_bytes, free_bytes) = compute_mapped_drive_space(effective_quota, committed, disk_usage);
+    let view_for_quota = view.to_path_buf();
+    let username_for_quota = account.username.clone();
+    tokio::task::spawn_blocking(move || {
+        write_quota_file(&view_for_quota, &username_for_quota, total_bytes, free_bytes)
+    })
+    .await??;
+
+    // 4. Persist snapshot for next cycle.
     memory
         .snapshots
         .insert(account.username.clone(), db_snap.clone());
@@ -1012,6 +1084,27 @@ fn write_users_list(view: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn write_quota_file(
+    view: &Path,
+    username: &str,
+    total_bytes: u64,
+    free_bytes: u64,
+) -> anyhow::Result<()> {
+    let dir = view.join("quota");
+    std::fs::create_dir_all(&dir)?;
+    let total_kb = total_bytes / 1024;
+    let free_kb = free_bytes / 1024;
+    let content = format!("{total_kb} {free_kb}\n");
+    let target = dir.join(username);
+    if std::fs::read_to_string(&target).is_ok_and(|existing| existing == content) {
+        return Ok(());
+    }
+    let tmp = dir.join(format!("{username}.tmp"));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(tmp, target)?;
+    Ok(())
+}
+
 fn cleanup_inactive_users(view: &Path, active: &HashSet<String>) -> anyhow::Result<()> {
     let root = view.join("tree");
     std::fs::create_dir_all(&root)?;
@@ -1030,6 +1123,15 @@ fn cleanup_inactive_users(view: &Path, active: &HashSet<String>) -> anyhow::Resu
                 if !active.contains(username) {
                     let _ = std::fs::remove_file(entry.path());
                 }
+            }
+        }
+    }
+    let quota_dir = view.join("quota");
+    if quota_dir.is_dir() {
+        for entry in std::fs::read_dir(&quota_dir)?.flatten() {
+            let username = entry.file_name().to_string_lossy().into_owned();
+            if !active.contains(&username) {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }
@@ -1296,5 +1398,41 @@ mod tests {
         );
         assert_eq!(diff.deleted_files, vec![(file_b, "b.txt".into())]);
         assert_eq!(diff.deleted_dirs, vec![(dir_id, "OldDir".into())]);
+    }
+
+    #[test]
+    fn mapped_drive_space_respects_quota_and_physical_hdd_limits() {
+        let hdd = FilesystemUsage {
+            total_bytes: 1_000_000,
+            free_bytes: 400_000,
+        };
+        // Finite quota smaller than HDD free space: reports exact quota & remaining.
+        assert_eq!(
+            compute_mapped_drive_space(Some(100_000), 25_000, Some(hdd)),
+            (100_000, 75_000)
+        );
+        // Finite quota larger than HDD free space: clamps free space to HDD free.
+        assert_eq!(
+            compute_mapped_drive_space(Some(800_000), 100_000, Some(hdd)),
+            (500_000, 400_000)
+        );
+        // Unlimited quota: reports real HDD total & free.
+        assert_eq!(
+            compute_mapped_drive_space(None, 50_000, Some(hdd)),
+            (1_000_000, 400_000)
+        );
+        // Over quota: free space is 0 and total >= used.
+        assert_eq!(
+            compute_mapped_drive_space(Some(100_000), 120_000, Some(hdd)),
+            (120_000, 0)
+        );
+    }
+
+    #[test]
+    fn write_quota_file_outputs_kb_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        write_quota_file(dir.path(), "alice", 1024 * 500, 1024 * 350).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("quota/alice")).unwrap();
+        assert_eq!(text, "500 350\n");
     }
 }

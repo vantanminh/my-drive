@@ -630,15 +630,22 @@ struct Item {
     modified: DateTime<Utc>,
     created: DateTime<Utc>,
     mime: String,
+    quota_available: Option<u64>,
+    quota_used: Option<u64>,
 }
 
 impl Item {
-    fn from_row(row: Row, parent_href: &str) -> Self {
+    fn from_row(row: Row, parent_href: &str, quota: Option<(u64, u64)>) -> Self {
         let is_dir = row.kind == "folder";
         let mut href = format!("{parent_href}{}", encode_segment(&row.name));
         if is_dir {
             href.push('/');
         }
+        let (quota_available, quota_used) = if is_dir {
+            quota.map_or((None, None), |(avail, used)| (Some(avail), Some(used)))
+        } else {
+            (None, None)
+        };
         Self {
             href,
             is_dir,
@@ -652,8 +659,44 @@ impl Item {
                 .mime_detected
                 .unwrap_or_else(|| "application/octet-stream".into()),
             name: row.name,
+            quota_available,
+            quota_used,
         }
     }
+}
+
+async fn user_webdav_quota(state: &AppState, owner: Uuid) -> Option<(u64, u64)> {
+    let row: Option<(String, Option<i64>, i64, i64)> = sqlx::query_as(
+        "SELECT u.role, u.quota_bytes, \
+            (SELECT COALESCE(SUM(v.size_bytes), 0)::BIGINT \
+               FROM drive_entries e \
+               JOIN files f ON f.id = e.id \
+               JOIN file_versions v ON v.id = f.current_version_id \
+               JOIN storage_objects o ON o.id = v.storage_object_id AND o.state = 'ready' \
+              WHERE e.owner_id = u.id) AS used_bytes, \
+            (SELECT COALESCE(SUM(expected_size), 0)::BIGINT \
+               FROM upload_sessions \
+              WHERE owner_id = u.id \
+                AND (state = 'finalizing' OR (state = 'active' AND expires_at > now()))) \
+                AS reserved_bytes \
+           FROM users u WHERE u.id = $1",
+    )
+    .bind(owner)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let (role, quota_bytes, used_bytes, reserved_bytes) = row?;
+    let effective_quota = auth::effective_quota_bytes(
+        &role,
+        quota_bytes,
+        state.transfer_settings.owner_quota_bytes,
+    );
+    let committed = used_bytes.max(0).saturating_add(reserved_bytes.max(0));
+    let disk = state.storage.filesystem_usage().ok();
+    let (total, free) = smb_share::compute_mapped_drive_space(effective_quota, committed, disk);
+    let used = total.saturating_sub(free);
+    Some((free, used))
 }
 
 async fn propfind(
@@ -675,6 +718,7 @@ async fn propfind(
         .get("depth")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.trim() == "0");
+    let quota = user_webdav_quota(state, owner).await;
     let result = async {
         let mut items = Vec::new();
         let parent_href = base
@@ -693,6 +737,8 @@ async fn propfind(
                     modified: now,
                     created: now,
                     mime: "httpd/unix-directory".into(),
+                    quota_available: quota.map(|(avail, _)| avail),
+                    quota_used: quota.map(|(_, used)| used),
                 });
                 None
             }
@@ -705,7 +751,7 @@ async fn propfind(
                 let Some(row) = row else {
                     return Ok(None);
                 };
-                let item = Item::from_row(row, &parent_href);
+                let item = Item::from_row(row, &parent_href, quota);
                 let is_dir = item.is_dir;
                 items.push(item);
                 is_dir.then_some(id)
@@ -722,7 +768,7 @@ async fn propfind(
             .bind(MAX_LISTING)
             .fetch_all(&state.pool)
             .await?;
-            items.extend(rows.into_iter().map(|row| Item::from_row(row, &base)));
+            items.extend(rows.into_iter().map(|row| Item::from_row(row, &base, quota)));
         }
         Ok::<_, sqlx::Error>(Some(items))
     }
@@ -765,7 +811,13 @@ fn multistatus(items: &[Item]) -> String {
         xml.push_str("</D:creationdate><D:getlastmodified>");
         xml.push_str(&httpdate::fmt_http_date(SystemTime::from(item.modified)));
         xml.push_str("</D:getlastmodified>");
-        if !item.is_dir {
+        if item.is_dir {
+            if let (Some(avail), Some(used)) = (item.quota_available, item.quota_used) {
+                xml.push_str(&format!(
+                    "<D:quota-available-bytes>{avail}</D:quota-available-bytes><D:quota-used-bytes>{used}</D:quota-used-bytes>"
+                ));
+            }
+        } else {
             xml.push_str(&format!(
                 "<D:getcontentlength>{}</D:getcontentlength><D:getcontenttype>{}</D:getcontenttype>",
                 item.size,
@@ -873,18 +925,35 @@ mod tests {
         assert_eq!(xml_escape("a&b<c>\"'"), "a&amp;b&lt;c&gt;&quot;&apos;");
         assert_eq!(encode_segment("Ảnh 1+a.jpg"), "%E1%BA%A2nh%201%2Ba.jpg");
         let now = Utc::now();
-        let xml = multistatus(&[Item {
-            href: "/webdav/a%20b.txt".into(),
-            name: "a b & c.txt".into(),
-            is_dir: false,
-            size: 5,
-            modified: now,
-            created: now,
-            mime: "text/plain".into(),
-        }]);
+        let xml = multistatus(&[
+            Item {
+                href: "/webdav/".into(),
+                name: String::new(),
+                is_dir: true,
+                size: 0,
+                modified: now,
+                created: now,
+                mime: "httpd/unix-directory".into(),
+                quota_available: Some(75_000),
+                quota_used: Some(25_000),
+            },
+            Item {
+                href: "/webdav/a%20b.txt".into(),
+                name: "a b & c.txt".into(),
+                is_dir: false,
+                size: 5,
+                modified: now,
+                created: now,
+                mime: "text/plain".into(),
+                quota_available: None,
+                quota_used: None,
+            },
+        ]);
         assert!(xml.contains("<D:displayname>a b &amp; c.txt</D:displayname>"));
         assert!(xml.contains("<D:getcontentlength>5</D:getcontentlength>"));
-        assert!(!xml.contains("<D:collection/>"));
+        assert!(xml.contains("<D:collection/>"));
+        assert!(xml.contains("<D:quota-available-bytes>75000</D:quota-available-bytes>"));
+        assert!(xml.contains("<D:quota-used-bytes>25000</D:quota-used-bytes>"));
     }
 
     #[test]
