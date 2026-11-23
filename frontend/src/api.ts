@@ -847,6 +847,28 @@ export const api = {
       csrf: true,
       cache: 'no-store'
     }),
+  updateHostLanTls: (payload: {
+    mode: 'off' | 'letsencrypt_cloudflare' | 'internal_ca';
+    host: string;
+    ip: string;
+    port: number;
+    bind: string;
+    cloudflareToken?: string;
+    configureUfw: boolean;
+  }) =>
+    request<HostNetworkStatus>('/api/admin/host/network/lan-tls', {
+      method: 'POST',
+      json: payload,
+      csrf: true,
+      cache: 'no-store'
+    }),
+  renewHostLanTls: () =>
+    request<HostNetworkStatus>('/api/admin/host/network/lan-tls/renew', {
+      method: 'POST',
+      csrf: true,
+      cache: 'no-store'
+    }),
+  hostLanTlsCaUrl: () => '/api/admin/host/network/lan-tls/ca.crt',
   applyHostNetplan: (payload: {
     interface: string;
     mode: 'dhcp' | 'static';

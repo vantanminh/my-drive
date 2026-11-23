@@ -37,6 +37,15 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/admin/host/services/logs", get(host_service_logs))
         .route("/api/admin/host/network", get(host_network))
         .route("/api/admin/host/network/lan", post(update_host_lan))
+        .route("/api/admin/host/network/lan-tls", post(update_host_lan_tls))
+        .route(
+            "/api/admin/host/network/lan-tls/renew",
+            post(renew_host_lan_tls),
+        )
+        .route(
+            "/api/admin/host/network/lan-tls/ca.crt",
+            get(download_host_lan_tls_ca),
+        )
         .route("/api/admin/host/network/netplan", post(apply_host_netplan))
         .route(
             "/api/admin/host/network/confirm",
@@ -356,6 +365,40 @@ pub(crate) struct PendingNetplanRollback {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct HostLanTlsCertificate {
+    pub present: bool,
+    pub valid: bool,
+    pub subject: Option<String>,
+    pub issuer: Option<String>,
+    pub not_after: Option<String>,
+    pub days_remaining: Option<i64>,
+    #[serde(default)]
+    pub sans: Vec<String>,
+    #[serde(default)]
+    pub needs_renewal: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostLanTlsStatus {
+    pub mode: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub ip: String,
+    pub port: u16,
+    #[serde(default)]
+    pub bind: String,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub has_cloudflare_token: bool,
+    pub certificate: Option<HostLanTlsCertificate>,
+    #[serde(default)]
+    pub ca_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct HostNetworkStatus {
     pub connected: bool,
     pub netplan_available: bool,
@@ -363,6 +406,8 @@ pub(crate) struct HostNetworkStatus {
     pub dns_servers: Vec<String>,
     pub ufw: HostUfwStatus,
     pub lan: HostLanConfig,
+    #[serde(default)]
+    pub lan_tls: Option<HostLanTlsStatus>,
     pub pending_rollback: Option<PendingNetplanRollback>,
 }
 
@@ -373,6 +418,23 @@ struct UpdateHostLanRequest {
     port: u16,
     #[serde(default)]
     bind: String,
+    #[serde(default)]
+    configure_ufw: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateHostLanTlsRequest {
+    mode: String,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    ip: String,
+    port: u16,
+    #[serde(default)]
+    bind: String,
+    #[serde(default)]
+    cloudflare_token: String,
     #[serde(default)]
     configure_ufw: bool,
 }
@@ -733,6 +795,132 @@ async fn update_host_lan(
         tracing::warn!(error = %error, "failed to record host_lan_updated audit event");
     }
     Ok(no_store_json(updated))
+}
+
+async fn update_host_lan_tls(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    Json(request): Json<UpdateHostLanTlsRequest>,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    drive::require_request_csrf(&headers, &user, state.auth_settings)
+        .map_err(|_| UpdateError::Csrf)?;
+    let mode = request.mode.trim().to_ascii_lowercase();
+    if !matches!(
+        mode.as_str(),
+        "off" | "letsencrypt_cloudflare" | "internal_ca"
+    ) {
+        return Err(UpdateError::BadRequest(
+            "LAN SSL mode must be off, letsencrypt_cloudflare, or internal_ca",
+        ));
+    }
+    if request.port != 443 && request.port < 1024 {
+        return Err(UpdateError::BadRequest(
+            "LAN HTTPS port must be 443 or >= 1024",
+        ));
+    }
+    let bind = request.bind.trim().to_owned();
+    if !bind.is_empty() && bind.parse::<Ipv4Addr>().is_err() {
+        return Err(UpdateError::BadRequest(
+            "invalid LAN HTTPS bind IPv4 address",
+        ));
+    }
+
+    let payload = serde_json::json!({
+        "mode": mode,
+        "host": request.host.trim(),
+        "ip": request.ip.trim(),
+        "port": request.port,
+        "bind": bind,
+        "cloudflareToken": request.cloudflare_token.trim(),
+        "configureUfw": request.configure_ufw,
+    });
+    let updated: HostNetworkStatus = send_updater_json(
+        &state.update_settings,
+        "POST",
+        "/network/lan-tls",
+        Some(payload),
+    )
+    .await?;
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, details) \
+         VALUES ('host_lan_tls_updated', $1, jsonb_build_object('mode', $2, 'port', $3))",
+    )
+    .bind(user.id)
+    .bind(&mode)
+    .bind(i32::from(request.port))
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(error = %error, "failed to record host_lan_tls_updated audit event");
+    }
+    Ok(no_store_json(updated))
+}
+
+async fn renew_host_lan_tls(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    drive::require_request_csrf(&headers, &user, state.auth_settings)
+        .map_err(|_| UpdateError::Csrf)?;
+    let updated: HostNetworkStatus = send_updater_json(
+        &state.update_settings,
+        "POST",
+        "/network/lan-tls/renew",
+        Some(serde_json::json!({})),
+    )
+    .await?;
+
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id) VALUES ('host_lan_tls_renewed', $1)",
+    )
+    .bind(user.id)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(error = %error, "failed to record host_lan_tls_renewed audit event");
+    }
+    Ok(no_store_json(updated))
+}
+
+#[derive(Deserialize)]
+struct LanTlsCaResponse {
+    pem: String,
+}
+
+async fn download_host_lan_tls_ca(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, UpdateError> {
+    require_owner(&user)?;
+    let data: LanTlsCaResponse = send_updater_json(
+        &state.update_settings,
+        "GET",
+        "/network/lan-tls/ca.crt",
+        None,
+    )
+    .await?;
+    let mut response = (StatusCode::OK, data.pem).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/x-x509-ca-cert".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        "attachment; filename=\"my-drive-lan-ca.crt\""
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-store".parse().unwrap(),
+    );
+    Ok(response)
 }
 
 async fn apply_host_netplan(

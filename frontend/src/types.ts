@@ -461,6 +461,31 @@ export type PendingNetplanRollback = {
   remainingSeconds: number | null;
 };
 
+export type HostLanTlsMode = 'off' | 'letsencrypt_cloudflare' | 'internal_ca';
+
+export type HostLanTlsCertificate = {
+  present: boolean;
+  valid: boolean;
+  subject: string | null;
+  issuer: string | null;
+  notAfter: string | null;
+  daysRemaining: number | null;
+  sans: string[];
+  needsRenewal: boolean;
+};
+
+export type HostLanTlsStatus = {
+  mode: HostLanTlsMode;
+  host: string;
+  ip: string;
+  port: number;
+  bind: string;
+  url: string | null;
+  hasCloudflareToken: boolean;
+  certificate: HostLanTlsCertificate | null;
+  caAvailable: boolean;
+};
+
 export type HostNetworkStatus = {
   connected: boolean;
   netplanAvailable: boolean;
@@ -468,6 +493,7 @@ export type HostNetworkStatus = {
   dnsServers: string[];
   ufw: HostUfwStatus;
   lan: HostLanConfig;
+  lanTls?: HostLanTlsStatus | null;
   pendingRollback: PendingNetplanRollback | null;
 };
 

@@ -149,3 +149,53 @@ def wait_connected(token, account, tunnel_id, replicas, timeout=180):
         time.sleep(5)
     raise CloudflareError(f'only {seen} tunnel connection(s) came up within {timeout}s; '
                           'check outbound access to Cloudflare (TCP/UDP 7844) and run my-drive logs cloudflared')
+
+
+def upsert_a_record(token, host, ipv4, comment='My Drive Local LAN SSL'):
+    """Create or update an unproxied DNS A record pointing a LAN hostname to a private IPv4."""
+    token = valid_token(token)
+    zone = find_zone(token, host)
+    zone_id = zone['id']
+    records = api(token, 'GET', f'/zones/{zone_id}/dns_records', query={'name': host}) or []
+    blocking = [f"{r['type']} {r['content']}" for r in records if r['type'] not in ('A', 'AAAA', 'CNAME')]
+    if blocking:
+        raise CloudflareError(f'{host} has conflicting DNS records: ' + ', '.join(blocking))
+    existing_a = next((r for r in records if r['type'] == 'A'), None)
+    for stale in records:
+        if stale['type'] in ('AAAA', 'CNAME') or (stale['type'] == 'A' and stale is not existing_a):
+            api(token, 'DELETE', f"/zones/{zone_id}/dns_records/{stale['id']}")
+    record = {
+        'type': 'A',
+        'name': host,
+        'content': ipv4,
+        'proxied': False,
+        'ttl': 60,
+        'comment': comment,
+    }
+    if existing_a:
+        api(token, 'PUT', f"/zones/{zone_id}/dns_records/{existing_a['id']}", record)
+    else:
+        api(token, 'POST', f'/zones/{zone_id}/dns_records', record)
+    return {'zone': zone['name'], 'zone_id': zone_id, 'host': host, 'ipv4': ipv4}
+
+
+def create_txt_record(token, name, value, comment='My Drive ACME DNS-01'):
+    """Create a TXT record for ACME DNS-01 validation and return (zone_id, record_id)."""
+    token = valid_token(token)
+    zone = find_zone(token, name)
+    zone_id = zone['id']
+    created = api(token, 'POST', f'/zones/{zone_id}/dns_records', {
+        'type': 'TXT',
+        'name': name,
+        'content': value,
+        'ttl': 60,
+        'comment': comment,
+    })
+    return zone_id, created['id']
+
+
+def delete_dns_record(token, zone_id, record_id):
+    """Best-effort deletion of a temporary DNS record."""
+    token = valid_token(token)
+    api(token, 'DELETE', f'/zones/{zone_id}/dns_records/{record_id}')
+

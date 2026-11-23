@@ -113,7 +113,8 @@ def validate(config):
     allowed = {'host', 'tls', 'email', 'owner_password', 'storage', 'database',
                'previews', 'media_indexing', 'images', 'quota_gib', 'max_file_gib',
                'min_free_gib', 'trash_days', 'cf_token', 'cf_replicas',
-               'lan_enabled', 'lan_port', 'lan_bind'}
+               'lan_enabled', 'lan_port', 'lan_bind',
+               'lan_tls_mode', 'lan_tls_host', 'lan_tls_ip', 'lan_tls_port', 'lan_tls_bind'}
     if set(config) - allowed:
         raise ValueError(f'unknown configuration fields: {sorted(set(config) - allowed)}')
     result = dict(config)
@@ -335,6 +336,7 @@ def make_compose(model, config):
     }
     if config['tls'] == 'cloudflare':
         services['cloudflared'] = cloudflared_service(config.get('cf_replicas', 2))
+    ensure_lan_tls_compose(model, config)
     ensure_updater_compose(model)
     return model
 
@@ -362,6 +364,45 @@ def ensure_lan_compose(model, config, force=False):
             app['ports'] = [mapping]
     elif force:
         app['ports'] = []
+    return model
+
+
+def ensure_lan_tls_compose(model, config):
+    """Configure Caddy proxy ports and lan-certs bind mount for Local LAN SSL."""
+    proxy = model['services'].get('proxy')
+    if not isinstance(proxy, dict):
+        return model
+    tls_mode = config.get('tls', 'acme')
+    if tls_mode == 'cloudflare':
+        ports = ['127.0.0.1:80:80']
+    else:
+        ports = ['80:80']
+    if tls_mode not in ('http', 'cloudflare'):
+        ports.append('443:443')
+
+    lan_tls_mode = str(config.get('lan_tls_mode') or 'off').strip().lower()
+    if lan_tls_mode in ('letsencrypt_cloudflare', 'internal_ca'):
+        default_port = 443 if tls_mode == 'cloudflare' else 8443
+        lan_port = int(config.get('lan_tls_port') or default_port)
+        bind_ip = str(config.get('lan_tls_bind') or '').strip()
+        mapping = f'{bind_ip}:{lan_port}:{lan_port}' if bind_ip else f'{lan_port}:{lan_port}'
+        if mapping not in ports and not (not bind_ip and lan_port == 443 and '443:443' in ports):
+            ports.append(mapping)
+    proxy['ports'] = ports
+
+    volumes = proxy.setdefault('volumes', [])
+    target = '/etc/caddy/lan-certs'
+    if lan_tls_mode == 'letsencrypt_cloudflare':
+        if not any(isinstance(v, dict) and v.get('target') == target for v in volumes):
+            volumes.append({
+                'type': 'bind',
+                'source': str(INSTALL / 'lan-certs'),
+                'target': target,
+                'read_only': True,
+                'bind': {'create_host_path': False},
+            })
+    else:
+        proxy['volumes'] = [v for v in volumes if not (isinstance(v, dict) and v.get('target') == target)]
     return model
 
 
@@ -395,20 +436,59 @@ def cloudflared_service(replicas):
     }
 
 
+def _lan_tls_caddy_block(config):
+    mode = str(config.get('lan_tls_mode') or 'off').strip().lower()
+    if mode not in ('letsencrypt_cloudflare', 'internal_ca'):
+        return ''
+    host = str(config.get('lan_tls_host') or '').strip()
+    if not host:
+        return ''
+    default_port = 443 if config.get('tls') == 'cloudflare' else 8443
+    port = int(config.get('lan_tls_port') or default_port)
+    addr = f'https://{host}' if port == 443 else f'https://{host}:{port}'
+    if mode == 'letsencrypt_cloudflare':
+        tls_line = '    tls /etc/caddy/lan-certs/fullchain.pem /etc/caddy/lan-certs/privkey.pem\n'
+    else:
+        tls_line = '    tls internal\n'
+    return (
+        f'\n{addr} {{\n'
+        + tls_line
+        + '    @lan remote_ip private_ranges\n'
+        + '    handle @lan {\n'
+        + '        reverse_proxy app:3000\n'
+        + '        header X-Content-Type-Options nosniff\n'
+        + '        header Strict-Transport-Security "max-age=31536000; includeSubDomains"\n'
+        + '    }\n'
+        + '    handle {\n'
+        + '        respond "Forbidden (LAN only)" 403\n'
+        + '    }\n'
+        + '}\n'
+    )
+
+
 def caddyfile(config):
+    lan_block = _lan_tls_caddy_block(config)
+    lan_mode = str(config.get('lan_tls_mode') or 'off').strip().lower()
     if config['tls'] == 'cloudflare':
         # TLS ends at Cloudflare's edge; the tunnel reaches Caddy over the private Docker network.
-        return '{\n    admin off\n    auto_https off\n}\n' + f"http://{config['host']} {{\n" + '''    reverse_proxy app:3000
+        # Keep internal PKI active when Local CA LAN SSL is enabled.
+        auto_https = '    auto_https disable_redirects\n' if lan_mode == 'internal_ca' else '    auto_https off\n'
+        return (
+            '{\n    admin off\n' + auto_https + '}\n'
+            + f"http://{config['host']} {{\n"
+            + '''    reverse_proxy app:3000
     header X-Content-Type-Options nosniff
 }
 '''
+            + lan_block
+        )
     global_options = '{\n    admin off\n' + (f"    email {config['email']}\n" if config['tls'] == 'acme' else '') + '}\n'
     tls = '    tls internal\n' if config['tls'] == 'internal' else ''
     scheme = 'http' if config['tls'] == 'http' else 'https'
     return global_options + f"{scheme}://{config['host']} {{\n" + tls + '''    reverse_proxy app:3000
     header X-Content-Type-Options nosniff
 }
-'''
+''' + lan_block
 
 
 def build_images(config, source):
@@ -1171,6 +1251,60 @@ def read_pending_netplan():
         return None
 
 
+def _lan_tls_token_path():
+    return INSTALL / 'lan-certs' / 'cf.token'
+
+
+def read_lan_tls_cf_token():
+    path = _lan_tls_token_path()
+    if not path.is_file():
+        return ''
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ''
+
+
+def write_lan_tls_cf_token(token):
+    cert_dir = INSTALL / 'lan-certs'
+    cert_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    atomic(_lan_tls_token_path(), token.strip() + '\n', mode=0o600)
+
+
+def lan_tls_status_payload(state):
+    cfg = state.get('config', {}) if isinstance(state, dict) else {}
+    mode = str(cfg.get('lan_tls_mode') or 'off').strip().lower()
+    if mode not in ('off', 'letsencrypt_cloudflare', 'internal_ca'):
+        mode = 'off'
+    default_port = 443 if cfg.get('tls') == 'cloudflare' else 8443
+    port = int(cfg.get('lan_tls_port') or default_port)
+    host = str(cfg.get('lan_tls_host') or '').strip()
+    ip = str(cfg.get('lan_tls_ip') or '').strip()
+    bind = str(cfg.get('lan_tls_bind') or '').strip()
+    url = None
+    if mode != 'off' and host:
+        url = f'https://{host}' if port == 443 else f'https://{host}:{port}'
+    cert_info = None
+    if mode == 'letsencrypt_cloudflare':
+        try:
+            lan_tls_mod = local_module('lan_tls')
+            cert_info = lan_tls_mod.inspect_certificate(INSTALL / 'lan-certs' / 'fullchain.pem')
+        except Exception:
+            cert_info = None
+    ca_path = INSTALL / 'caddy-data' / 'caddy' / 'pki' / 'authorities' / 'local' / 'root.crt'
+    return {
+        'mode': mode,
+        'host': host,
+        'ip': ip,
+        'port': port,
+        'bind': bind,
+        'url': url,
+        'hasCloudflareToken': bool(read_lan_tls_cf_token()),
+        'certificate': cert_info,
+        'caAvailable': ca_path.is_file(),
+    }
+
+
 def network_status_payload(state):
     cfg = state.get('config', {}) if isinstance(state, dict) else {}
     addr_res = subprocess.run(['ip', '-j', 'addr', 'show'], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
@@ -1190,6 +1324,7 @@ def network_status_payload(state):
             'tlsMode': cfg.get('tls'),
             'host': cfg.get('host'),
         },
+        'lanTls': lan_tls_status_payload(state),
         'pendingRollback': read_pending_netplan(),
     }
 
@@ -1434,9 +1569,127 @@ def updater_serve():
                 except Exception as error:
                     self.send_json(500, {'error': 'internal_error', 'message': str(error)})
                 return
+            if parsed_url.path == '/network/lan-tls/ca.crt':
+                try:
+                    ca_path = INSTALL / 'caddy-data' / 'caddy' / 'pki' / 'authorities' / 'local' / 'root.crt'
+                    if not ca_path.is_file():
+                        self.send_json(404, {'error': 'not_found', 'message': 'Local CA root certificate has not been generated yet. Enable Local CA LAN SSL first.'})
+                        return
+                    self.send_json(200, {'pem': ca_path.read_text()})
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
             self.send_json(404, {'error': 'not_found'})
 
         def do_POST(self):
+            if self.path == '/network/lan-tls':
+                try:
+                    body = self.read_json_body()
+                    lan_tls_mod = local_module('lan_tls')
+                    cf_mod = local_module('cloudflare')
+                    spec = lan_tls_mod.validate_lan_tls_config(
+                        body.get('mode', 'off'),
+                        body.get('host', ''),
+                        body.get('ip', ''),
+                        body.get('port', 443),
+                        body.get('bind', ''),
+                    )
+                    configure_ufw = bool(body.get('configureUfw'))
+                    cf_token_input = str(body.get('cloudflareToken') or '').strip()
+
+                    with job_lock:
+                        state = load_install_state()
+                        if spec['mode'] == 'letsencrypt_cloudflare':
+                            token = cf_token_input or read_lan_tls_cf_token()
+                            if not token:
+                                raise ValueError('Cloudflare API token (Zone DNS Edit + Zone Read) is required for Let\'s Encrypt DNS-01 LAN SSL')
+                            token = cf_mod.valid_token(token)
+                            write_lan_tls_cf_token(token)
+                            cf_mod.upsert_a_record(token, spec['host'], spec['ip'])
+                            cert_dir = INSTALL / 'lan-certs'
+                            fullchain = cert_dir / 'fullchain.pem'
+                            existing = lan_tls_mod.inspect_certificate(fullchain)
+                            need_issue = (
+                                not existing.get('valid')
+                                or existing.get('needsRenewal')
+                                or spec['host'] not in (existing.get('sans') or [])
+                            )
+                            if need_issue:
+                                lan_tls_mod.issue_letsencrypt_cloudflare(
+                                    cert_dir,
+                                    spec['host'],
+                                    token,
+                                    email=state['config'].get('email'),
+                                )
+                        elif spec['mode'] == 'internal_ca':
+                            (INSTALL / 'lan-certs').mkdir(parents=True, exist_ok=True, mode=0o750)
+
+                        state['config']['lan_tls_mode'] = spec['mode']
+                        state['config']['lan_tls_host'] = spec['host']
+                        state['config']['lan_tls_ip'] = spec['ip']
+                        state['config']['lan_tls_port'] = spec['port']
+                        state['config']['lan_tls_bind'] = spec['bind']
+                        save(state)
+
+                        atomic(INSTALL / 'Caddyfile', caddyfile(state['config']))
+                        compose_path = INSTALL / 'compose.yaml'
+                        model = json.loads(compose_path.read_text())
+                        ensure_lan_tls_compose(model, state['config'])
+                        atomic(compose_path, json.dumps(model, indent=2) + '\n')
+
+                    if configure_ufw and shutil.which('ufw') and spec['mode'] != 'off':
+                        ufw = read_ufw_status()
+                        if ufw.get('active'):
+                            for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'):
+                                subprocess.run(
+                                    ['ufw', 'allow', 'from', cidr, 'to', 'any', 'port', str(spec['port']), 'proto', 'tcp'],
+                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                )
+
+                    def _apply_proxy():
+                        time.sleep(0.25)
+                        compose('up', '-d', '--force-recreate', 'proxy')
+
+                    threading.Thread(target=_apply_proxy, daemon=True).start()
+                    self.send_json(202, network_status_payload(state))
+                except ValueError as error:
+                    self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
+            if self.path == '/network/lan-tls/renew':
+                try:
+                    lan_tls_mod = local_module('lan_tls')
+                    with job_lock:
+                        state = load_install_state()
+                        cfg = state.get('config', {})
+                        if cfg.get('lan_tls_mode') != 'letsencrypt_cloudflare':
+                            raise ValueError('Let\'s Encrypt LAN SSL is not currently enabled')
+                        host = str(cfg.get('lan_tls_host') or '').strip()
+                        token = read_lan_tls_cf_token()
+                        if not host or not token:
+                            raise ValueError('Saved LAN SSL hostname or Cloudflare API token is missing')
+                        lan_tls_mod.issue_letsencrypt_cloudflare(
+                            INSTALL / 'lan-certs',
+                            host,
+                            token,
+                            email=cfg.get('email'),
+                        )
+
+                    def _reload_proxy():
+                        time.sleep(0.2)
+                        try:
+                            compose('exec', '-T', 'proxy', 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile')
+                        except Exception:
+                            compose('restart', 'proxy')
+
+                    threading.Thread(target=_reload_proxy, daemon=True).start()
+                    self.send_json(200, network_status_payload(state))
+                except ValueError as error:
+                    self.send_json(400, {'error': 'invalid_request', 'message': str(error)})
+                except Exception as error:
+                    self.send_json(500, {'error': 'internal_error', 'message': str(error)})
+                return
             if self.path == '/network/lan':
                 try:
                     body = self.read_json_body()
@@ -1580,6 +1833,36 @@ def updater_serve():
 
     class ThreadedUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         daemon_threads = True
+
+    def _lan_tls_auto_renew_loop():
+        while True:
+            time.sleep(12 * 3600)
+            try:
+                lan_tls_mod = local_module('lan_tls')
+                with job_lock:
+                    state = load_install_state()
+                    cfg = state.get('config', {})
+                    if cfg.get('lan_tls_mode') != 'letsencrypt_cloudflare':
+                        continue
+                    host = str(cfg.get('lan_tls_host') or '').strip()
+                    token = read_lan_tls_cf_token()
+                    cert_path = INSTALL / 'lan-certs' / 'fullchain.pem'
+                    if not host or not token or not lan_tls_mod.needs_renewal(cert_path, threshold_days=30):
+                        continue
+                    lan_tls_mod.issue_letsencrypt_cloudflare(
+                        INSTALL / 'lan-certs',
+                        host,
+                        token,
+                        email=cfg.get('email'),
+                    )
+                try:
+                    compose('exec', '-T', 'proxy', 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile')
+                except Exception:
+                    compose('restart', 'proxy')
+            except Exception as error:
+                print(f'lan-tls auto-renewal failed: {error}', file=sys.stderr)
+
+    threading.Thread(target=_lan_tls_auto_renew_loop, daemon=True).start()
 
     with ThreadedUnixServer(str(UPDATER_SOCKET), Handler) as server:
         os.chmod(UPDATER_SOCKET, 0o660)

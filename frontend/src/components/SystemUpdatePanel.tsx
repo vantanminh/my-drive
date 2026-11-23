@@ -87,6 +87,14 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
   const [lanBind, setLanBind] = useState('');
   const [configureUfw, setConfigureUfw] = useState(true);
 
+  const [lanTlsMode, setLanTlsMode] = useState<'off' | 'letsencrypt_cloudflare' | 'internal_ca'>('off');
+  const [lanTlsHost, setLanTlsHost] = useState('');
+  const [lanTlsIp, setLanTlsIp] = useState('');
+  const [lanTlsPort, setLanTlsPort] = useState('443');
+  const [lanTlsBind, setLanTlsBind] = useState('');
+  const [lanTlsCfToken, setLanTlsCfToken] = useState('');
+  const [lanTlsConfigureUfw, setLanTlsConfigureUfw] = useState(true);
+
   const [netIface, setNetIface] = useState('');
   const [netMode, setNetMode] = useState<'dhcp' | 'static'>('static');
   const [netCidr, setNetCidr] = useState('');
@@ -99,6 +107,19 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
     setLanPort(String(net.lan.port || 3000));
     setLanBind(net.lan.bind || '');
     const primary = net.interfaces.find((iface) => iface.state === 'up') || net.interfaces[0];
+    const primaryIp = primary?.ipv4[0]?.split('/')[0] || '';
+    if (net.lanTls) {
+      setLanTlsMode(net.lanTls.mode);
+      setLanTlsHost(
+        net.lanTls.host ||
+          (net.lan.host && net.lan.host.includes('.') ? `lan.${net.lan.host}` : '')
+      );
+      setLanTlsIp(net.lanTls.ip || primaryIp);
+      setLanTlsPort(String(net.lanTls.port || (net.lan.tlsMode === 'cloudflare' ? 443 : 8443)));
+      setLanTlsBind(net.lanTls.bind || '');
+    } else if (primaryIp) {
+      setLanTlsIp((current) => current || primaryIp);
+    }
     if (primary) {
       setNetIface((current) => current || primary.name);
       setNetCidr((current) => current || primary.ipv4[0] || '');
@@ -261,6 +282,56 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
       applyNetworkState(updated);
       setNotice('LAN endpoint settings saved. Restarting app container if port binding changed.');
       window.setTimeout(() => void loadOverview(), 2500);
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function saveLanTlsSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const port = Number(lanTlsPort);
+    if (!Number.isInteger(port) || (port !== 443 && (port < 1024 || port > 65535))) {
+      setError('LAN HTTPS port must be 443 or an integer between 1024 and 65535.');
+      return;
+    }
+    setBusyAction('lan-tls');
+    setError('');
+    setNotice('');
+    try {
+      const updated = await api.updateHostLanTls({
+        mode: lanTlsMode,
+        host: lanTlsHost.trim(),
+        ip: lanTlsIp.trim(),
+        port,
+        bind: lanTlsBind.trim(),
+        cloudflareToken: lanTlsCfToken.trim(),
+        configureUfw: lanTlsConfigureUfw
+      });
+      setLanTlsCfToken('');
+      applyNetworkState(updated);
+      setNotice(
+        lanTlsMode === 'off'
+          ? 'Local LAN SSL disabled. Reloading reverse proxy.'
+          : 'Local LAN SSL configured and certificate ready. Reloading reverse proxy.'
+      );
+      window.setTimeout(() => void loadOverview(), 3000);
+    } catch (cause: unknown) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function renewLanTlsCert() {
+    setBusyAction('lan-tls-renew');
+    setError('');
+    setNotice('');
+    try {
+      const updated = await api.renewHostLanTls();
+      applyNetworkState(updated);
+      setNotice('Local LAN SSL certificate renewed and Caddy reloaded.');
     } catch (cause: unknown) {
       setError(friendlyError(cause));
     } finally {
@@ -939,6 +1010,162 @@ export default function SystemUpdatePanel({ onClose, onStatusChange }: Props) {
                     <button className="button button-secondary" type="submit" disabled={busyAction !== null}>
                       {busyAction === 'lan' ? 'Applying LAN…' : 'Save LAN endpoint'}
                     </button>
+                  </form>
+
+                  <form
+                    className="system-update-form"
+                    onSubmit={(event) => void saveLanTlsSettings(event)}
+                    style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--line, #e6ece9)' }}
+                  >
+                    <strong>Local LAN SSL (HTTPS — Synology-style)</strong>
+                    <small style={{ display: 'block', marginTop: '4px', opacity: 0.8 }}>
+                      Connect over HTTPS inside your private LAN with standard trusted SSL (Let&apos;s Encrypt DNS-01 via Cloudflare pointing to your local IP) or an offline Local CA. Non-LAN IPs are blocked with 403 by Caddy.
+                    </small>
+
+                    {network.lanTls?.url ? (
+                      <dl className="system-update-facts" style={{ marginTop: '8px' }}>
+                        <div>
+                          <dt>LAN HTTPS URL</dt>
+                          <dd>
+                            <a href={network.lanTls.url} target="_blank" rel="noreferrer">
+                              <code>{network.lanTls.url}</code>
+                            </a>
+                          </dd>
+                        </div>
+                        {network.lanTls.certificate?.present ? (
+                          <div>
+                            <dt>Certificate</dt>
+                            <dd>
+                              {network.lanTls.certificate.valid ? 'Valid' : 'Invalid / Expired'}
+                              {network.lanTls.certificate.daysRemaining !== null
+                                ? ` · ${network.lanTls.certificate.daysRemaining} days left`
+                                : ''}
+                              {network.lanTls.certificate.issuer ? ` · ${network.lanTls.certificate.issuer}` : ''}
+                            </dd>
+                          </div>
+                        ) : null}
+                      </dl>
+                    ) : null}
+
+                    <div className="system-update-actions" style={{ alignItems: 'flex-end', marginTop: '8px' }}>
+                      <label className="account-form-field">
+                        <span>LAN SSL mode</span>
+                        <select
+                          className="text-input"
+                          value={lanTlsMode}
+                          onChange={(event) => setLanTlsMode(event.target.value as 'off' | 'letsencrypt_cloudflare' | 'internal_ca')}
+                        >
+                          <option value="off">Off</option>
+                          <option value="letsencrypt_cloudflare">Let&apos;s Encrypt DNS-01 (Trusted SSL, no warnings)</option>
+                          <option value="internal_ca">Local CA (Offline LAN SSL)</option>
+                        </select>
+                      </label>
+                      <label className="account-form-field">
+                        <span>LAN HTTPS port</span>
+                        <input
+                          className="text-input"
+                          type="number"
+                          min={443}
+                          max={65535}
+                          value={lanTlsPort}
+                          onChange={(event) => setLanTlsPort(event.target.value)}
+                          disabled={lanTlsMode === 'off'}
+                        />
+                      </label>
+                    </div>
+
+                    {lanTlsMode !== 'off' ? (
+                      <>
+                        <div className="system-update-actions" style={{ alignItems: 'flex-end' }}>
+                          <label className="account-form-field">
+                            <span>
+                              {lanTlsMode === 'letsencrypt_cloudflare'
+                                ? 'LAN domain (e.g. lan.drive.example.com)'
+                                : 'LAN hostname or IPv4'}
+                            </span>
+                            <input
+                              className="text-input"
+                              type="text"
+                              placeholder={lanTlsMode === 'letsencrypt_cloudflare' ? 'lan.drive.example.com' : '192.168.1.50'}
+                              value={lanTlsHost}
+                              onChange={(event) => setLanTlsHost(event.target.value)}
+                            />
+                          </label>
+                          <label className="account-form-field">
+                            <span>Private LAN IPv4</span>
+                            <input
+                              className="text-input"
+                              type="text"
+                              placeholder="192.168.1.50"
+                              value={lanTlsIp}
+                              onChange={(event) => setLanTlsIp(event.target.value)}
+                            />
+                          </label>
+                          <label className="account-form-field">
+                            <span>Bind IPv4 (blank = all)</span>
+                            <input
+                              className="text-input"
+                              type="text"
+                              placeholder="0.0.0.0"
+                              value={lanTlsBind}
+                              onChange={(event) => setLanTlsBind(event.target.value)}
+                            />
+                          </label>
+                        </div>
+
+                        {lanTlsMode === 'letsencrypt_cloudflare' ? (
+                          <label className="account-form-field">
+                            <span>
+                              Cloudflare API token (Zone:DNS:Edit + Zone:Read)
+                              {network.lanTls?.hasCloudflareToken ? ' — saved (leave blank to reuse)' : ''}
+                            </span>
+                            <input
+                              className="text-input"
+                              type="password"
+                              autoComplete="off"
+                              placeholder={network.lanTls?.hasCloudflareToken ? '•••••••• (saved on host)' : 'Paste Cloudflare API token'}
+                              value={lanTlsCfToken}
+                              onChange={(event) => setLanTlsCfToken(event.target.value)}
+                            />
+                          </label>
+                        ) : null}
+
+                        {network.ufw.installed && network.ufw.active ? (
+                          <label className="system-update-toggle">
+                            <input
+                              type="checkbox"
+                              checked={lanTlsConfigureUfw}
+                              onChange={(event) => setLanTlsConfigureUfw(event.target.checked)}
+                            />
+                            <span>
+                              <strong>Allow private RFC1918 LAN subnets in UFW on port {lanTlsPort || '443'}</strong>
+                              <small>Permits 10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16 for HTTPS LAN access.</small>
+                            </span>
+                          </label>
+                        ) : null}
+                      </>
+                    ) : null}
+
+                    <div className="system-update-actions" style={{ marginTop: '8px' }}>
+                      <button className="button button-primary" type="submit" disabled={busyAction !== null}>
+                        {busyAction === 'lan-tls' ? 'Provisioning LAN SSL…' : 'Save Local LAN SSL'}
+                      </button>
+                      {network.lanTls?.mode === 'letsencrypt_cloudflare' ? (
+                        <button
+                          className="button button-secondary"
+                          type="button"
+                          disabled={busyAction !== null}
+                          onClick={() => void renewLanTlsCert()}
+                        >
+                          {busyAction === 'lan-tls-renew' ? 'Renewing…' : 'Renew SSL now'}
+                        </button>
+                      ) : null}
+                      {network.lanTls?.mode === 'internal_ca' && network.lanTls.caAvailable ? (
+                        <a className="button button-secondary" href={api.hostLanTlsCaUrl()} download="my-drive-lan-ca.crt">
+                          Download Local Root CA (.crt)
+                        </a>
+                      ) : null}
+                    </div>
                   </form>
 
                   {network.netplanAvailable && network.interfaces.length > 0 ? (
