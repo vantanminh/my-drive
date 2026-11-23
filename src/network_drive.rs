@@ -104,6 +104,7 @@ async fn status(State(state): State<AppState>, user: AuthenticatedUser) -> Respo
         "smbEnabled": settings.smb_enabled,
         "smbAvailable": smb_share::available(),
         "smbUsername": smb_username,
+        "smbReadOnly": false,
     }))
     .into_response();
     response

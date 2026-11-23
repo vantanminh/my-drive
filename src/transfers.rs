@@ -2119,7 +2119,7 @@ fn if_range_matches(value: &str, etag: &str, last_modified: SystemTime) -> bool 
     httpdate::parse_http_date(value).is_ok_and(|date| last_modified <= date)
 }
 
-fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff_media_type(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(b"%PDF-") {
         return Some("application/pdf");
     }

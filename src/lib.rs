@@ -97,7 +97,11 @@ pub async fn run() -> anyhow::Result<()> {
     let update_settings = config.update_settings.clone();
     if let Some(view_dir) = std::env::var_os("SMB_VIEW_DIR").filter(|value| !value.is_empty()) {
         let _ = smb_share::VIEW_DIR.set(std::path::PathBuf::from(view_dir));
-        tokio::spawn(smb_share::run_worker(pool.clone()));
+        tokio::spawn(smb_share::run_worker(
+            pool.clone(),
+            storage.clone(),
+            transfer_settings,
+        ));
     }
     // Drop the configuration now so database and bootstrap secrets are not
     // retained for the lifetime of the HTTP server. Google OAuth material stays

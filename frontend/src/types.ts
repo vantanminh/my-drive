@@ -480,4 +480,5 @@ export type NetworkDriveStatus = {
   smbEnabled: boolean;
   smbAvailable: boolean;
   smbUsername: string | null;
+  smbReadOnly?: boolean;
 };

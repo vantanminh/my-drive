@@ -101,7 +101,7 @@ export default function NetworkDrivePanel({ email, onClose, onOpenDeveloper }: P
         <div>
           <span className="eyebrow">LOCAL NETWORK</span>
           <h2 id="network-drive-title">Network drive</h2>
-          <p>Mount your drive in Windows File Explorer, macOS Finder or Linux as a read-only network drive on your private LAN.</p>
+          <p>Mount your drive in Windows File Explorer, macOS Finder or Linux on your private LAN.</p>
         </div>
         <div className="account-admin-header-actions">
           <button className="icon-button media-index-close" type="button" aria-label="Close network drive" onClick={onClose}>
@@ -119,7 +119,7 @@ export default function NetworkDrivePanel({ email, onClose, onOpenDeveloper }: P
               <span className="security-card-icon"><HardDrive size={17} /></span>
               <div>
                 <h3>SMB drive (Windows Z:): {data.smbEnabled ? 'Enabled' : 'Disabled'}</h3>
-                <p>Real SMB/CIFS share (port 445), read-only and restricted to private LAN addresses.</p>
+                <p>Real SMB/CIFS share (port 445), read-write (browse, create folders, upload, rename, delete to Trash) and restricted to private LAN addresses.</p>
               </div>
             </div>
 
@@ -139,7 +139,7 @@ export default function NetworkDrivePanel({ email, onClose, onOpenDeveloper }: P
                 />
                 <span>
                   <strong>Enable SMB network drive</strong>
-                  <small>Builds a read-only view for the Samba container (refreshed every ~10 seconds). Disable to clear the share tree and SMB user list.</small>
+                  <small>Builds a read-write view for the Samba container (synced every ~2 seconds). Disable to clear the share tree and SMB user list.</small>
                 </span>
               </label>
             ) : (
@@ -212,7 +212,7 @@ export default function NetworkDrivePanel({ email, onClose, onOpenDeveloper }: P
                 <strong>macOS:</strong> Finder → Go → Connect to Server → <code>smb://{smbHost}/drive</code>.
               </li>
               <li>
-                <strong>Linux:</strong> <code>smb://{smbHost}/drive</code> in your file manager, or <code>mount -t cifs //{smbHost}/drive /mnt/drive -o username={data.smbUsername ?? '<smb-username>'},ro</code>.
+                <strong>Linux:</strong> <code>smb://{smbHost}/drive</code> in your file manager, or <code>mount -t cifs //{smbHost}/drive /mnt/drive -o username={data.smbUsername ?? '<smb-username>'}</code>.
               </li>
             </ol>
           </div>
