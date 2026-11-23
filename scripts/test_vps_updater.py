@@ -133,6 +133,38 @@ class VpsUpdaterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 vps.build_netplan_yaml(*bad_args)
 
+    def test_build_rollout_docker_args_clones_network_alias_env_and_mounts(self):
+        inspect = {
+            'Config': {
+                'Env': [
+                    'DATABASE_URL=postgres://x',
+                    'BOOTSTRAP_OWNER_PASSWORD=secret',
+                    'COOKIE_SECURE=true',
+                ]
+            },
+            'HostConfig': {'ReadonlyRootfs': False},
+            'Mounts': [
+                {'Type': 'bind', 'Source': '/mnt/hdd', 'Destination': '/srv/my-drive/data', 'RW': True},
+                {'Type': 'bind', 'Source': '/mnt/ssd', 'Destination': '/srv/my-drive/previews', 'RW': False},
+                {'Type': 'volume', 'Name': 'my-drive_smb-view', 'Destination': '/srv/my-drive/smb-view', 'RW': True},
+            ],
+            'NetworkSettings': {
+                'Networks': {
+                    'my-drive_default': {},
+                    'my-drive_preview-private': {},
+                }
+            },
+        }
+        cmd, extra_nets = vps.build_rollout_docker_args(inspect, 'ghcr.io/vantanminh/my-drive:v0.1.11')
+        self.assertIn('--network-alias', cmd)
+        self.assertIn('app', cmd)
+        self.assertIn('my-drive_default', cmd)
+        self.assertEqual(extra_nets, ['my-drive_preview-private'])
+        self.assertIn('DATABASE_URL=postgres://x', cmd)
+        self.assertNotIn('BOOTSTRAP_OWNER_PASSWORD=secret', cmd)
+        self.assertIn('type=bind,source=/mnt/ssd,target=/srv/my-drive/previews,readonly', cmd)
+        self.assertEqual(cmd[-1], 'ghcr.io/vantanminh/my-drive:v0.1.11')
+
 
 if __name__ == '__main__':
     unittest.main()

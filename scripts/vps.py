@@ -455,7 +455,11 @@ def _lan_tls_caddy_block(config):
         + tls_line
         + '    @lan remote_ip private_ranges\n'
         + '    handle @lan {\n'
-        + '        reverse_proxy app:3000\n'
+        + '        reverse_proxy app:3000 {\n'
+        + '            lb_try_duration 5s\n'
+        + '            lb_try_interval 250ms\n'
+        + '            fail_duration 10s\n'
+        + '        }\n'
         + '        header X-Content-Type-Options nosniff\n'
         + '        header Strict-Transport-Security "max-age=31536000; includeSubDomains"\n'
         + '    }\n'
@@ -469,6 +473,14 @@ def _lan_tls_caddy_block(config):
 def caddyfile(config):
     lan_block = _lan_tls_caddy_block(config)
     lan_mode = str(config.get('lan_tls_mode') or 'off').strip().lower()
+    upstream_block = '''    reverse_proxy app:3000 {
+        lb_try_duration 5s
+        lb_try_interval 250ms
+        fail_duration 10s
+    }
+    header X-Content-Type-Options nosniff
+}
+'''
     if config['tls'] == 'cloudflare':
         # TLS ends at Cloudflare's edge; the tunnel reaches Caddy over the private Docker network.
         # Keep internal PKI active when Local CA LAN SSL is enabled.
@@ -476,19 +488,13 @@ def caddyfile(config):
         return (
             '{\n    admin off\n' + auto_https + '}\n'
             + f"http://{config['host']} {{\n"
-            + '''    reverse_proxy app:3000
-    header X-Content-Type-Options nosniff
-}
-'''
+            + upstream_block
             + lan_block
         )
     global_options = '{\n    admin off\n' + (f"    email {config['email']}\n" if config['tls'] == 'acme' else '') + '}\n'
     tls = '    tls internal\n' if config['tls'] == 'internal' else ''
     scheme = 'http' if config['tls'] == 'http' else 'https'
-    return global_options + f"{scheme}://{config['host']} {{\n" + tls + '''    reverse_proxy app:3000
-    header X-Content-Type-Options nosniff
-}
-''' + lan_block
+    return global_options + f"{scheme}://{config['host']} {{\n" + tls + upstream_block + lan_block
 
 
 def build_images(config, source):
@@ -581,6 +587,143 @@ def start(state):
                 break
             time.sleep(1)
         args += ['--cacert', str(root)]
+    scheme = 'http' if state['config']['tls'] in ('http', 'cloudflare') else 'https'
+    port = 80 if scheme == 'http' else 443
+    args += ['--resolve', f"{state['config']['host']}:{port}:127.0.0.1"]
+    run(*args, f"{scheme}://{state['config']['host']}/health/ready")
+
+
+def _wait_container_ready(container_name, timeout_seconds=180):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        running = subprocess.run(
+            ['docker', 'inspect', '-f', '{{.State.Running}}', container_name],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+        )
+        if running.returncode != 0 or running.stdout.strip() != 'true':
+            return False
+        probe = subprocess.run(
+            ['docker', 'exec', container_name, 'curl', '--fail', '--silent', 'http://127.0.0.1:3000/health/ready'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        if probe.returncode == 0:
+            return True
+        time.sleep(2)
+    return False
+
+
+def build_rollout_docker_args(inspect_info, new_image, container_name='my-drive-app-rollout'):
+    """Build `docker run` arguments for a standby green app container matching the running app."""
+    cfg = inspect_info.get('Config') or {}
+    host_cfg = inspect_info.get('HostConfig') or {}
+    net_settings = (inspect_info.get('NetworkSettings') or {}).get('Networks') or {}
+    networks = list(net_settings.keys())
+    primary_net = next((n for n in networks if n.endswith('_default')), networks[0] if networks else None)
+
+    cmd = ['docker', 'run', '-d', '--name', container_name]
+    if primary_net:
+        cmd += ['--network', primary_net, '--network-alias', 'app']
+    for env_item in cfg.get('Env') or []:
+        if env_item.startswith(('BOOTSTRAP_OWNER_EMAIL=', 'BOOTSTRAP_OWNER_PASSWORD=')):
+            continue
+        cmd += ['-e', env_item]
+    for mount in inspect_info.get('Mounts') or []:
+        mtype = mount.get('Type')
+        source = mount.get('Source') if mtype == 'bind' else mount.get('Name')
+        target = mount.get('Destination')
+        if not source or not target:
+            continue
+        ro = ',readonly' if not mount.get('RW', True) else ''
+        if mtype == 'bind':
+            cmd += ['--mount', f'type=bind,source={source},target={target}{ro}']
+        elif mtype == 'volume':
+            cmd += ['--mount', f'type=volume,source={source},target={target}{ro}']
+    if host_cfg.get('ReadonlyRootfs'):
+        cmd.append('--read-only')
+    cmd.append(new_image)
+    extra_nets = [n for n in networks if n != primary_net]
+    return cmd, extra_nets
+
+
+def zero_downtime_rollout(state, previous_state=None):
+    """Roll out a new app image with zero downtime via a standby green container behind Caddy."""
+    if getattr(os, 'geteuid', lambda: -1)() == 0:
+        ensure_updater_runtime_dir()
+    check(state)
+
+    old_app_id = compose('ps', '-q', 'app', capture=True).strip()
+    new_app_image = state['env'].get('MY_DRIVE_IMAGE')
+    if not old_app_id or not new_app_image:
+        start(state)
+        return
+
+    inspected_raw = subprocess.run(
+        ['docker', 'inspect', old_app_id],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    if inspected_raw.returncode != 0:
+        start(state)
+        return
+    try:
+        inspect_info = json.loads(inspected_raw.stdout)[0]
+    except (ValueError, IndexError):
+        start(state)
+        return
+
+    rollout_name = 'my-drive-app-rollout'
+    subprocess.run(['docker', 'rm', '-f', rollout_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    print('phase: rollout Starting standby container and verifying health before switching traffic', flush=True)
+    run_cmd, extra_nets = build_rollout_docker_args(inspect_info, new_app_image, rollout_name)
+    started = subprocess.run(run_cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if started.returncode != 0:
+        # Fall back to standard start if standby container cannot be created.
+        start(state)
+        return
+    for net in extra_nets:
+        subprocess.run(['docker', 'network', 'connect', net, rollout_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    try:
+        if not _wait_container_ready(rollout_name, timeout_seconds=180):
+            if previous_state is not None:
+                save(previous_state)
+                write_env(INSTALL / '.env', previous_state['env'])
+            raise ValueError('new release failed readiness check during zero-downtime rollout; previous version remains active')
+
+        # Standby green container is healthy and answering `app:3000` in Docker DNS.
+        # Now replace the permanent `app` container while green serves 100% of traffic!
+        print('phase: switching Switching traffic to updated release without downtime', flush=True)
+        compose('up', '-d', '--no-deps', 'app')
+        wait_ready()
+    finally:
+        subprocess.run(['docker', 'stop', '-t', '15', rollout_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(['docker', 'rm', '-f', rollout_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    # Update companion services and proxy cleanly.
+    compose('up', '-d')
+    subprocess.run(
+        ['docker', 'compose', '--project-directory', str(INSTALL), '--env-file', str(INSTALL / '.env'),
+         '-f', str(INSTALL / 'compose.yaml'), '-p', 'my-drive', 'exec', '-T', 'proxy',
+         'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=compose_environment(),
+    )
+    if state['config'].get('media_indexing'):
+        setup_id = compose('ps', '--all', '-q', 'media-indexer-db-setup', capture=True).strip()
+        if not setup_id or run('docker', 'wait', setup_id, capture=True).strip() != '0':
+            raise ValueError('indexer role setup failed; run my-drive logs media-indexer-db-setup')
+        indexer_id = compose('ps', '-q', 'media-indexer', capture=True).strip()
+        if not indexer_id or run('docker', 'inspect', '-f', '{{.State.Running}}', indexer_id, capture=True).strip() != 'true':
+            raise ValueError('media indexer is not running')
+    # Verify end-to-end readiness through Caddy.
+    args = ['curl', '--fail', '--silent', '--show-error', '--retry', '12', '--retry-delay', '3',
+            '--retry-all-errors', '--max-time', '10']
+    if state['config']['tls'] == 'internal':
+        root = INSTALL / 'caddy-data/caddy/pki/authorities/local/root.crt'
+        if root.exists():
+            args += ['--cacert', str(root)]
     scheme = 'http' if state['config']['tls'] in ('http', 'cloudflare') else 'https'
     port = 80 if scheme == 'http' else 443
     args += ['--resolve', f"{state['config']['host']}:{port}:127.0.0.1"]
@@ -1821,8 +1964,20 @@ def updater_serve():
                         self.send_json(409, {'error': 'update_in_progress', 'message': 'An update is already running.'})
                         return
                     if not state.get('config', {}).get('images'):
-                        self.send_json(400, {'error': 'invalid_request', 'message': 'Host installation has no configured registry image track.'})
-                        return
+                        # Auto-initialize the official GHCR track so dashboard updates work even after local builds.
+                        state['config']['images'] = prebuilt_images(
+                            state['config'], 'ghcr.io/vantanminh/my-drive', target_tag or 'latest'
+                        )
+                        save(state)
+                    started_at = datetime.now(timezone.utc).isoformat()
+                    write_updater_status({
+                        'status': 'running',
+                        'phase': 'starting',
+                        'message': f"Starting zero-downtime update{f' to {target_tag}' if target_tag else ''}...",
+                        'targetTag': target_tag,
+                        'startedAt': started_at,
+                        'finishedAt': None,
+                    })
                     worker = threading.Thread(target=run_update_worker, args=(target_tag,), daemon=True)
                     worker.start()
                 self.send_json(202, _updater_status_payload(state))
@@ -1984,23 +2139,35 @@ def main():
                 # Re-pull the same configured registry tags (or target release tag) and resolve to digests.
                 base_images = dict(state['config']['images'])
                 candidate['images'] = apply_release_tag(base_images, args.tag) if args.tag else base_images
+            elif args.tag:
+                candidate['images'] = prebuilt_images(candidate, 'ghcr.io/vantanminh/my-drive', args.tag)
             else:
-                raise ValueError('this installation has no registry update track; use --source or --images')
+                raise ValueError('this installation has no registry update track; use --source, --images, or --tag')
             candidate = validate(candidate)
             print('phase: pulling Downloading and verifying container images', flush=True)
             images = build_images(candidate, source)  # Build/pull while old app remains available.
-            image_env = {'app': 'MY_DRIVE_IMAGE', 'document-preview': 'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE',
-                         'media-indexer': 'MY_DRIVE_INDEXER_IMAGE'}
-            # Keep compose.yaml and host updater unit in sync even when migrating from older installs.
+            image_env = {
+                'app': 'MY_DRIVE_IMAGE',
+                'document-preview': 'MY_DRIVE_DOCUMENT_PREVIEW_IMAGE',
+                'media-indexer': 'MY_DRIVE_INDEXER_IMAGE',
+                'smb': 'MY_DRIVE_SMB_IMAGE',
+            }
+            # Keep compose.yaml, Caddyfile, and host updater unit in sync even when migrating from older installs.
             compose_path = INSTALL / 'compose.yaml'
             before_compose = compose_path.read_text()
             model = json.loads(before_compose)
             ensure_updater_compose(model)
             ensure_lan_compose(model, candidate)
+            ensure_lan_tls_compose(model, candidate)
             after_compose = json.dumps(model, indent=2) + '\n'
             compose_changed = after_compose != before_compose
             if compose_changed:
                 atomic(compose_path, after_compose)
+            caddy_path = INSTALL / 'Caddyfile'
+            new_caddy = caddyfile(candidate)
+            caddy_changed = not caddy_path.is_file() or caddy_path.read_text() != new_caddy
+            if caddy_changed:
+                atomic(caddy_path, new_caddy)
             bundle_updated = False
             if args.source and source != INSTALL and (source / 'scripts').is_dir():
                 for directory in ('scripts', 'docker'):
@@ -2015,22 +2182,24 @@ def main():
                 install_updater_service(prepare_only=False, restart=True)
             elif bundle_updated:
                 install_updater_service(prepare_only=True, restart=False)
-            if all(state['env'].get(image_env[service]) == image for service, image in images.items()):
-                if compose_changed:
-                    print('phase: restarting Applying updated Compose configuration', flush=True)
-                    start(state)
-                    print('Compose configuration updated and verified.')
+            if all(state['env'].get(image_env[service]) == image for service, image in images.items() if service in image_env):
+                if compose_changed or caddy_changed:
+                    print('phase: restarting Applying updated Compose and proxy configuration', flush=True)
+                    zero_downtime_rollout(state)
+                    print('Configuration updated and verified without downtime.')
                 else:
                     print('Already up to date; no services were restarted.')
                 return
-            atomic(INSTALL / 'state.previous.json', json.dumps(state, indent=2) + '\n')
+            previous_state = json.loads(json.dumps(state))
+            atomic(INSTALL / 'state.previous.json', json.dumps(previous_state, indent=2) + '\n')
             state['config']['images'] = candidate['images']
             for service, image in images.items():
-                state['env'][image_env[service]] = image
+                if service in image_env:
+                    state['env'][image_env[service]] = image
             save(state)
-            print('phase: restarting Restarting My Drive services and verifying health', flush=True)
-            start(state)
-            print('Updated and verified. Previous image references: /opt/my-drive/state.previous.json.')
+            print('phase: rollout Rolling out My Drive update with zero downtime', flush=True)
+            zero_downtime_rollout(state, previous_state=previous_state)
+            print('Updated and verified without downtime. Previous image references: /opt/my-drive/state.previous.json.')
 
 
 if __name__ == '__main__':

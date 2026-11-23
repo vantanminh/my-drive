@@ -44,6 +44,9 @@ jobs:
       - name: Check VPS host updater helpers
         run: python3 scripts/test_vps_updater.py
 
+      - name: Check Local LAN SSL helpers
+        run: python3 scripts/test_lan_tls.py
+
       - name: Build frontend
         working-directory: frontend
         run: npm ci --no-audit --no-fund && npm test && npm run build

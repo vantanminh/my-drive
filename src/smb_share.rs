@@ -61,9 +61,7 @@ pub(crate) fn compute_mapped_drive_space(
             match disk {
                 Some(d) => {
                     let free = quota_free.min(d.free_bytes);
-                    let total = quota_u64
-                        .min(used.saturating_add(d.free_bytes))
-                        .max(used);
+                    let total = quota_u64.min(used.saturating_add(d.free_bytes)).max(used);
                     (total, free)
                 }
                 None => (quota_u64.max(used), quota_free),
@@ -135,8 +133,10 @@ fn extract_storage_key(data_target: &str, link_target: &Path) -> Option<String> 
 /// OS metadata / temporary files created by Windows/macOS SMB clients that should
 /// not be ingested as user drive files.
 fn is_ignored_smb_name(name: &str) -> bool {
-    matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini" | "Desktop.ini")
-        || name.starts_with("._")
+    matches!(
+        name,
+        ".DS_Store" | "Thumbs.db" | "desktop.ini" | "Desktop.ini"
+    ) || name.starts_with("._")
         || name.starts_with("~$")
         || name.starts_with(".~")
 }
@@ -178,8 +178,15 @@ pub(crate) async fn run_worker(
     tracing::info!(view = %view.display(), "SMB view worker started");
     let mut memory = WorkerMemory::default();
     loop {
-        if let Err(error) =
-            cycle(&pool, &storage, transfer_settings, &view, &data_target, &mut memory).await
+        if let Err(error) = cycle(
+            &pool,
+            &storage,
+            transfer_settings,
+            &view,
+            &data_target,
+            &mut memory,
+        )
+        .await
         {
             tracing::warn!(error = %error, "SMB view refresh failed");
         }
@@ -342,7 +349,9 @@ async fn sync_account(
     memory: &mut WorkerMemory,
 ) -> anyhow::Result<()> {
     let user_root = view.join("tree").join(&account.username);
-    let state_path = view.join("state").join(format!("{}.json", account.username));
+    let state_path = view
+        .join("state")
+        .join(format!("{}.json", account.username));
 
     let prev = if let Some(existing) = memory.snapshots.get(&account.username) {
         Some(existing.clone())
@@ -407,22 +416,16 @@ async fn sync_account(
         }
         seen_regular.insert(reg.rel_path.clone());
         let sig = (reg.size, reg.mtime_secs, reg.mtime_nanos);
-        let stable = pending_map.get(&reg.rel_path).is_some_and(|prev_sig| *prev_sig == sig);
+        let stable = pending_map
+            .get(&reg.rel_path)
+            .is_some_and(|prev_sig| *prev_sig == sig);
         if !stable {
             pending_map.insert(reg.rel_path.clone(), sig);
             keep_regular.insert(reg.abs_path.clone());
             continue;
         }
         // File size & mtime have been stable across two consecutive cycles — ingest it!
-        match ingest_regular_file(
-            pool,
-            storage,
-            transfer_settings,
-            account,
-            data_target,
-            reg,
-        )
-        .await
+        match ingest_regular_file(pool, storage, transfer_settings, account, data_target, reg).await
         {
             Ok(()) => {
                 pending_map.remove(&reg.rel_path);
@@ -506,11 +509,17 @@ async fn sync_account(
     );
     let committed = used_bytes.max(0).saturating_add(reserved_bytes.max(0));
     let disk_usage = storage.filesystem_usage().ok();
-    let (total_bytes, free_bytes) = compute_mapped_drive_space(effective_quota, committed, disk_usage);
+    let (total_bytes, free_bytes) =
+        compute_mapped_drive_space(effective_quota, committed, disk_usage);
     let view_for_quota = view.to_path_buf();
     let username_for_quota = account.username.clone();
     tokio::task::spawn_blocking(move || {
-        write_quota_file(&view_for_quota, &username_for_quota, total_bytes, free_bytes)
+        write_quota_file(
+            &view_for_quota,
+            &username_for_quota,
+            total_bytes,
+            free_bytes,
+        )
     })
     .await??;
 
@@ -540,7 +549,7 @@ fn diff_smb_changes(
         .filter(|dir| {
             !path_has_ignored_component(dir)
                 && !db.dirs.contains_key(*dir)
-                && prev.map_or(true, |p| !p.dirs.contains_key(*dir))
+                && prev.is_none_or(|p| !p.dirs.contains_key(*dir))
         })
         .cloned()
         .collect();
@@ -591,12 +600,12 @@ fn diff_smb_changes(
         let Some(key) = extract_storage_key(data_target, target) else {
             continue;
         };
-        if let Some(candidates) = missing_by_key.get_mut(key.as_str()) {
-            if let Some((old_path, entry_id)) = candidates.pop() {
-                matched_old_paths.insert(old_path.to_owned());
-                diff.renamed_files
-                    .push((entry_id, old_path.to_owned(), new_path.clone()));
-            }
+        if let Some(candidates) = missing_by_key.get_mut(key.as_str())
+            && let Some((old_path, entry_id)) = candidates.pop()
+        {
+            matched_old_paths.insert(old_path.to_owned());
+            diff.renamed_files
+                .push((entry_id, old_path.to_owned(), new_path.clone()));
         }
     }
 
@@ -774,9 +783,8 @@ async fn ingest_regular_file(
 
     let object_id = Uuid::new_v4();
     let storage_key = LocalStorage::storage_key(object_id);
-    let modified_at = DateTime::<Utc>::from(
-        UNIX_EPOCH + Duration::new(reg.mtime_secs, reg.mtime_nanos),
-    );
+    let modified_at =
+        DateTime::<Utc>::from(UNIX_EPOCH + Duration::new(reg.mtime_secs, reg.mtime_nanos));
 
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
@@ -973,10 +981,7 @@ fn guess_mime(header: &[u8], filename: &str) -> Option<String> {
 }
 
 fn replace_with_symlink(path: &Path, target: &Path) -> std::io::Result<()> {
-    let tmp = path.with_file_name(format!(
-        ".smb-link-{}.tmp",
-        Uuid::new_v4().simple()
-    ));
+    let tmp = path.with_file_name(format!(".smb-link-{}.tmp", Uuid::new_v4().simple()));
     make_symlink(target, &tmp)?;
     if let Err(error) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
@@ -1119,10 +1124,10 @@ fn cleanup_inactive_users(view: &Path, active: &HashSet<String>) -> anyhow::Resu
     if state_dir.is_dir() {
         for entry in std::fs::read_dir(&state_dir)?.flatten() {
             let file_name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(username) = file_name.strip_suffix(".json") {
-                if !active.contains(username) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
+            if let Some(username) = file_name.strip_suffix(".json")
+                && !active.contains(username)
+            {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }
@@ -1272,7 +1277,10 @@ mod tests {
             Some("aa/bb/one")
         );
         assert_eq!(
-            extract_storage_key("/srv/my-drive/data", Path::new("/srv/my-drive/data/aa/bb/one")),
+            extract_storage_key(
+                "/srv/my-drive/data",
+                Path::new("/srv/my-drive/data/aa/bb/one")
+            ),
             None
         );
     }
@@ -1294,11 +1302,7 @@ mod tests {
         let root = dir.path().join("alice");
         std::fs::create_dir_all(root.join("Docs")).unwrap();
         // Simulate legacy broken symlink (missing /objects/)
-        make_symlink(
-            Path::new("/srv/data/aa/bb/one"),
-            &root.join("Docs/a.txt"),
-        )
-        .unwrap();
+        make_symlink(Path::new("/srv/data/aa/bb/one"), &root.join("Docs/a.txt")).unwrap();
 
         let mut first = Snapshot::default();
         first.dirs.insert("Docs".into(), Uuid::new_v4());

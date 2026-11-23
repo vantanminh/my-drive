@@ -1461,6 +1461,14 @@ pub(crate) async fn send_updater_json<T: DeserializeOwned>(
     Err(UpdateError::UpdaterUnavailable)
 }
 
+fn updater_timeout_seconds(path: &str) -> u64 {
+    if path.starts_with("/network/lan-tls") {
+        240
+    } else {
+        UPDATER_REQUEST_TIMEOUT_SECONDS
+    }
+}
+
 async fn send_updater_http<T: DeserializeOwned>(
     base_url: &str,
     token: Option<&str>,
@@ -1469,7 +1477,7 @@ async fn send_updater_http<T: DeserializeOwned>(
     body: Option<serde_json::Value>,
 ) -> Result<T, UpdateError> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(UPDATER_REQUEST_TIMEOUT_SECONDS))
+        .timeout(Duration::from_secs(updater_timeout_seconds(path)))
         .build()
         .map_err(|_| UpdateError::UpdaterUnavailable)?;
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
@@ -1544,7 +1552,7 @@ async fn send_updater_unix<T: DeserializeOwned>(
 
     let mut raw = Vec::new();
     tokio::time::timeout(
-        Duration::from_secs(UPDATER_REQUEST_TIMEOUT_SECONDS),
+        Duration::from_secs(updater_timeout_seconds(path)),
         stream.take(1024 * 1024).read_to_end(&mut raw),
     )
     .await
