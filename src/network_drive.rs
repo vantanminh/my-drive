@@ -768,7 +768,10 @@ async fn propfind(
             .bind(MAX_LISTING)
             .fetch_all(&state.pool)
             .await?;
-            items.extend(rows.into_iter().map(|row| Item::from_row(row, &base, quota)));
+            items.extend(
+                rows.into_iter()
+                    .map(|row| Item::from_row(row, &base, quota)),
+            );
         }
         Ok::<_, sqlx::Error>(Some(items))
     }
