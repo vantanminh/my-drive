@@ -35,8 +35,9 @@ ARG FACE_MODEL_BUNDLE_SHA256=80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb
 ARG FACE_DET_MODEL_SHA256=5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91
 ARG FACE_REC_MODEL_SHA256=4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43
 ARG ORT_VERSION=1.31.0
-ARG ORT_ARCHIVE_URL=https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-linux-x64-1.31.0.tgz
-ARG ORT_ARCHIVE_SHA256=cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57
+ARG ORT_ARCHIVE_URL=https://files.pythonhosted.org/packages/0d/ac/67ebbaab4b3083f2a6b27ee6c4aa400c7f8d6c72b5499aac7e4cd6ba74f5/onnxruntime-1.31.0-cp313-cp313-manylinux_2_28_x86_64.whl
+ARG ORT_ARCHIVE_SHA256=37fd78cee5160c7a43a1730ccb3682ffd880af9c9e80385d625c0c2f8b125809
+ARG ORT_LIB_SHA256=21901b1b02233484b80888c16f4f5473742f796bf5528d5d0c4073dbe9802001
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/* \
@@ -52,13 +53,15 @@ RUN apt-get update \
         | sha256sum --check --status \
     && rm -f /tmp/buffalo_l.zip \
     && curl --fail --silent --show-error --location --retry 3 "$ORT_ARCHIVE_URL" \
-        --output /tmp/ort.tgz \
-    && echo "$ORT_ARCHIVE_SHA256  /tmp/ort.tgz" \
+        --output /tmp/ort.whl \
+    && echo "$ORT_ARCHIVE_SHA256  /tmp/ort.whl" \
         | sha256sum --check --status \
-    && tar -xzf /tmp/ort.tgz -C /tmp/ort --strip-components=1 \
-    && install -m 0755 "/tmp/ort/lib/libonnxruntime.so.${ORT_VERSION}" "/usr/local/lib/libonnxruntime.so.${ORT_VERSION}" \
+    && unzip -q -j /tmp/ort.whl "onnxruntime/capi/libonnxruntime.so.${ORT_VERSION}" -d /tmp/ort \
+    && echo "$ORT_LIB_SHA256  /tmp/ort/libonnxruntime.so.${ORT_VERSION}" \
+        | sha256sum --check --status \
+    && install -m 0755 "/tmp/ort/libonnxruntime.so.${ORT_VERSION}" "/usr/local/lib/libonnxruntime.so.${ORT_VERSION}" \
     && ln -sf "libonnxruntime.so.${ORT_VERSION}" /usr/local/lib/libonnxruntime.so \
-    && rm -rf /tmp/ort /tmp/ort.tgz
+    && rm -rf /tmp/ort /tmp/ort.whl
 
 FROM debian:bookworm-slim AS runtime
 ARG MY_DRIVE_VERSION=0.1.0

@@ -34,10 +34,11 @@ SOFTWARE.
 
 ## ONNX Runtime
 
-The `media-indexer` image downloads the pinned `microsoft/onnxruntime` Linux x64
-shared library archive in `Dockerfile`, verifies its SHA-256 checksum, and
-copies `libonnxruntime.so` into the runtime image. ONNX Runtime is licensed
-under the MIT License.
+The `media-indexer` image downloads the pinned ONNX Runtime Linux x64
+shared library in `Dockerfile` (from the official `onnxruntime` PyPI
+wheel), verifies SHA-256 checksums of both the archive and the library,
+and copies `libonnxruntime.so` into the runtime image. ONNX Runtime is
+licensed under the MIT License.
 
 MIT License
 
