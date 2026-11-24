@@ -1158,6 +1158,19 @@ fn relative(path: &str) -> PathBuf {
     path.split('/').collect()
 }
 
+/// ext4/fuse filesystems reject name components longer than 255 bytes. Entry
+/// names in PostgreSQL can exceed that (a ~150-character Vietnamese name is
+/// already ~200 bytes of UTF-8), so unrepresentable paths are skipped with a
+/// warning instead of aborting the entire view projection.
+const MAX_NAME_BYTES: usize = 255;
+
+fn unrepresentable_component(path: &Path) -> Option<std::ffi::OsString> {
+    path.components().find_map(|component| {
+        let name = component.as_os_str();
+        (name.len() > MAX_NAME_BYTES).then(|| name.to_os_string())
+    })
+}
+
 fn sync_tree(
     root: &Path,
     data_target: &str,
@@ -1187,7 +1200,13 @@ fn sync_tree(
     }
     prune(root, &dirs, &links, keep_regular);
     for dir in &dirs {
-        std::fs::create_dir_all(dir)?;
+        if let Some(bad) = unrepresentable_component(dir) {
+            tracing::warn!(component = %bad.to_string_lossy(), "skipping SMB view folder with an overlong name");
+            continue;
+        }
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            tracing::warn!(path = %dir.display(), error = %error, "could not create SMB view folder");
+        }
     }
     for (path, target) in &links {
         if keep_regular.contains(path) {
@@ -1196,10 +1215,19 @@ fn sync_tree(
         if std::fs::symlink_metadata(path).is_ok() {
             continue;
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if let Some(bad) = unrepresentable_component(path) {
+            tracing::warn!(path = %path.display(), component = %bad.to_string_lossy(), "skipping SMB view entry with an overlong name");
+            continue;
         }
-        make_symlink(target, path)?;
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(path = %path.display(), error = %error, "could not create SMB view parent folder");
+            continue;
+        }
+        if let Err(error) = make_symlink(target, path) {
+            tracing::warn!(path = %path.display(), error = %error, "could not materialise SMB view symlink");
+        }
     }
     Ok(())
 }
@@ -1353,6 +1381,38 @@ mod tests {
             std::fs::read_link(root.join("b.txt")).unwrap(),
             Path::new("/srv/data/objects/ee/ff/three")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_tree_skips_overlong_names_instead_of_aborting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("alice");
+
+        let mut snap = Snapshot::default();
+        let long_name = "x".repeat(300);
+        snap.files.insert(
+            format!("{long_name}.bin"),
+            SyncedFile {
+                entry_id: Uuid::new_v4(),
+                storage_key: "aa/bb/one".into(),
+            },
+        );
+        snap.files.insert(
+            "ok.txt".into(),
+            SyncedFile {
+                entry_id: Uuid::new_v4(),
+                storage_key: "cc/dd/two".into(),
+            },
+        );
+
+        sync_tree(&root, "/srv/data", &snap, &HashSet::new()).unwrap();
+        assert_eq!(
+            std::fs::read_link(root.join("ok.txt")).unwrap(),
+            Path::new("/srv/data/objects/cc/dd/two")
+        );
+        assert!(unrepresentable_component(&root.join(format!("{long_name}.bin"))).is_some());
+        assert!(unrepresentable_component(&root.join("ok.txt")).is_none());
     }
 
     #[test]
