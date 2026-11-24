@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { api } from '../api';
 import { friendlyError } from '../format';
+import { useI18n } from '../i18n';
 
 type Props = {
   currentPasswordLabel: string;
@@ -11,6 +12,7 @@ type Props = {
 };
 
 export default function PasswordChangeForm({ currentPasswordLabel, submitLabel, autoFocus = false, onChanged }: Props) {
+  const { t } = useI18n();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -21,19 +23,19 @@ export default function PasswordChangeForm({ currentPasswordLabel, submitLabel, 
     event.preventDefault();
     setError('');
     if ([...newPassword].length < 12) {
-      setError('Choose a password with at least 12 characters.');
+      setError(t('password.too_short'));
       return;
     }
     if (new TextEncoder().encode(newPassword).length > 1024) {
-      setError('The new password must be no more than 1,024 bytes.');
+      setError(t('password.too_long'));
       return;
     }
     if (newPassword !== confirmPassword) {
-      setError('The new passwords do not match.');
+      setError(t('password.mismatch'));
       return;
     }
     if (currentPassword === newPassword) {
-      setError('Choose a password different from your current password.');
+      setError(t('password.same'));
       return;
     }
 
@@ -65,7 +67,7 @@ export default function PasswordChangeForm({ currentPasswordLabel, submitLabel, 
         value={currentPassword}
         onChange={(event) => setCurrentPassword(event.target.value)}
       />
-      <label className="field-label" htmlFor="security-new-password">New password</label>
+      <label className="field-label" htmlFor="security-new-password">{t('password.new')}</label>
       <input
         id="security-new-password"
         className="text-input"
@@ -77,8 +79,8 @@ export default function PasswordChangeForm({ currentPasswordLabel, submitLabel, 
         onChange={(event) => setNewPassword(event.target.value)}
         aria-describedby="security-password-hint"
       />
-      <small className="password-field-hint" id="security-password-hint">Use at least 12 characters.</small>
-      <label className="field-label" htmlFor="security-confirm-password">Confirm new password</label>
+      <small className="password-field-hint" id="security-password-hint">{t('password.hint')}</small>
+      <label className="field-label" htmlFor="security-confirm-password">{t('password.confirm')}</label>
       <input
         id="security-confirm-password"
         className="text-input"
@@ -91,7 +93,7 @@ export default function PasswordChangeForm({ currentPasswordLabel, submitLabel, 
       />
       {error && <div className="inline-alert" role="alert">{error}</div>}
       <button className="button button-primary" type="submit" disabled={busy}>
-        {busy ? 'Updating password…' : submitLabel}
+        {busy ? t('password.updating') : submitLabel}
         {!busy && <ArrowRight size={16} />}
       </button>
     </form>

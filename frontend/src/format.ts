@@ -1,4 +1,6 @@
 import { ApiError } from './api';
+import { tGlobal } from './i18n';
+import type { MessageKey } from './i18n';
 
 export function formatSize(bytes: number | null | undefined): string {
   if (bytes == null) return '—';
@@ -19,54 +21,57 @@ export function formatDate(value: string | null | undefined): string {
   if (Number.isNaN(date.getTime())) return '—';
   const sameDay = new Date().toDateString() === date.toDateString();
   if (sameDay) {
-    return 'Today, ' + new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date);
+    return tGlobal('date.today_at', { time: new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date) });
   }
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
 }
 
+// Maps API error codes onto the translated `err.*` dictionary entries.
+const ERROR_CODE_KEYS: Record<string, MessageKey> = {
+  invalid_credentials: 'err.invalid_credentials',
+  current_password_incorrect: 'err.current_password_incorrect',
+  credentials_changed: 'err.credentials_changed',
+  email_exists: 'err.email_exists',
+  owner_required: 'err.owner_required',
+  quota_below_current_usage: 'err.quota_below_current_usage',
+  password_change_required: 'err.password_change_required',
+  password_requirements: 'err.password_requirements',
+  too_many_attempts: 'err.too_many_attempts',
+  expired_token: 'err.expired_token',
+  access_denied: 'err.access_denied',
+  insufficient_scope: 'err.insufficient_scope',
+  content_not_found: 'err.content_not_found',
+  invalid_request: 'err.invalid_request',
+  conflict: 'err.conflict',
+  protected_entry: 'err.protected_entry',
+  not_found: 'err.not_found',
+  upload_closed: 'err.upload_closed',
+  offset_mismatch: 'err.offset_mismatch',
+  upload_stalled: 'err.upload_stalled',
+  network_error: 'err.network_error',
+  payload_too_large: 'err.payload_too_large',
+  quota_exceeded: 'err.quota_exceeded',
+  storage_low: 'err.storage_low',
+  password_required: 'err.password_required',
+  invalid_password: 'err.invalid_password',
+  download_disabled: 'err.download_disabled',
+  share_unavailable: 'err.share_unavailable',
+  service_unavailable: 'err.service_unavailable',
+  google_drive_unconfigured: 'err.google_drive_unconfigured',
+  invalid_google_settings: 'err.invalid_google_settings',
+  google_drive_not_connected: 'err.google_drive_not_connected',
+  reauth_required: 'err.reauth_required',
+  too_many_folders: 'err.too_many_folders',
+  already_selected: 'err.already_selected',
+  google_auth_failed: 'err.google_auth_failed',
+  google_request_failed: 'err.google_request_failed'
+};
+
 export function friendlyError(error: unknown): string {
-  if (!(error instanceof ApiError)) return 'Something went wrong. Check your connection and try again.';
-  if (error.status === 403 && error.code === 'csrf_failed') return 'Your session token expired. Sign in again to continue.';
-  const messages: Record<string, string> = {
-    invalid_credentials: 'That email and password do not match.',
-    current_password_incorrect: 'The current password is not correct.',
-    credentials_changed: 'Your account changed during this request. Sign in again and retry.',
-    email_exists: 'An account with this email address already exists.',
-    owner_required: 'Only the owner can manage accounts.',
-    quota_below_current_usage: 'The quota cannot be lower than the account’s current storage and active uploads.',
-    password_change_required: 'Change your temporary password before using the drive.',
-    password_requirements: 'Choose a different password with at least 12 characters.',
-    too_many_attempts: 'Too many attempts. Wait a little before trying again.',
-    expired_token: 'This device code has expired. Start the connection again from the Windows app.',
-    access_denied: 'This device was not authorized.',
-    insufficient_scope: 'This device is not allowed to do that.',
-    content_not_found: 'The server does not already have this file content.',
-    invalid_request: 'Check the information and try again.',
-    conflict: 'An item with that name already exists in this location.',
-    protected_entry: 'The Photos folder is managed for you and cannot be renamed, moved, or deleted.',
-    not_found: 'This item is no longer available.',
-    upload_closed: 'This upload session has expired. Start the upload again.',
-    offset_mismatch: 'The upload position changed. Resynchronizing automatically.',
-    upload_stalled: 'Connection stalled during transfer. Retrying automatically…',
-    network_error: 'Temporary connection loss. Check your network and try again.',
-    payload_too_large: 'This file is larger than the configured upload limit.',
-    quota_exceeded: 'There is not enough available drive quota for this file.',
-    storage_low: 'There is not enough free space on the storage drive.',
-    password_required: 'Enter the password to open this shared link.',
-    invalid_password: 'That password is not correct.',
-    download_disabled: 'The owner has disabled downloads for this link.',
-    share_unavailable: 'This shared link has expired or was revoked.',
-    service_unavailable: 'The service is temporarily unavailable. Try again shortly.',
-    google_drive_unconfigured: 'Google Drive is not configured on this server yet.',
-    invalid_google_settings: 'Check the Client ID, Client Secret, and Redirect URI. Use HTTPS (or HTTP on localhost) and the exact /api/google-drive/callback path.',
-    google_drive_not_connected: 'Connect a Google account before choosing folders.',
-    reauth_required: 'Google needs you to connect again.',
-    too_many_folders: 'You can sync up to 20 Google Drive folders.',
-    already_selected: 'That folder is already being synced.',
-    google_auth_failed: 'Google did not accept the connection. Try again.',
-    google_request_failed: 'Google Drive could not be reached. Try again shortly.'
-  };
-  if (messages[error.code]) return messages[error.code];
-  if (error.status === 401) return 'Your session has ended. Sign in again to continue.';
-  return 'The request could not be completed.';
+  if (!(error instanceof ApiError)) return tGlobal('err.generic');
+  if (error.status === 403 && error.code === 'csrf_failed') return tGlobal('err.csrf_failed');
+  const key = ERROR_CODE_KEYS[error.code];
+  if (key) return tGlobal(key);
+  if (error.status === 401) return tGlobal('err.session_ended');
+  return tGlobal('err.request_failed');
 }

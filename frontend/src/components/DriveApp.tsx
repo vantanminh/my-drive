@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent } from 'react';
 import {
-  Activity, ArrowUpCircle, Check, ChevronDown, ChevronRight, CircleUserRound, ClipboardPaste, Cloud, CloudUpload, Copy, Download, Eye, File, FileImage, Film,
+  ArrowUpCircle, Check, ChevronDown, ChevronRight, CircleUserRound, ClipboardPaste, Cloud, CloudUpload, Copy, Download, Eye, File, FileImage, Film,
   FileSpreadsheet, FileText, Folder, FolderInput, FolderPlus, Gauge, HardDrive, Images, Info, LayoutGrid, List, LockKeyhole, LogOut, MoreHorizontal,
-  Pause, Play, Presentation, RotateCcw, ScanFace, Scissors, Search, Share2, ShieldCheck, SlidersHorizontal, Trash2, Upload, Users, X
+  Pause, Play, Presentation, RotateCcw, Scissors, Search, Settings, Share2, SlidersHorizontal, Trash2, Upload, Users, X
 } from 'lucide-react';
-import { ApiError, api, downloadUrl, thumbnailUrl, type MediaIndexJob, type MediaIndexStatus } from '../api';
+import { ApiError, api, downloadUrl, thumbnailUrl } from '../api';
 import { formatDate, formatSize, friendlyError } from '../format';
 import {
   ThroughputTracker,
@@ -13,22 +13,16 @@ import {
 } from '../uploadEngine';
 import { buildDrivePath, clearSearchParam, emptyFilters, hasActiveFilters, navigateTo, parseDriveRoute, useBrowserHref, type DriveFilters, type DriveOrder, type DrivePanel, type DriveSort } from '../route';
 import { nextSelection, selectionGesture } from '../selection';
+import { useI18n, type MessageKey } from '../i18n';
 import type { Entry, EntryDetails, EntryPage, ShareSummary, User } from '../types';
 import ShareDialog from './ShareDialog';
 import { AnchoredMenu, ContextMenu, type MenuItem } from './ContextMenu';
 import DestinationDialog from './DestinationDialog';
 import FilePreviewer from './FilePreviewer';
 import { isFilePreviewable, mediaKindFor } from './MediaViewer';
-import AccountManagementPanel from './AccountManagementPanel';
-import FaceManagementPanel from './FaceManagementPanel';
 import PhotosPage from './PhotosPage';
 import StoragePage, { QuotaCard } from './StoragePage';
-import GoogleDrivePanel from './GoogleDrivePanel';
-import DeveloperPanel from './DeveloperPanel';
-import AccountSecurityPanel from './AccountSecurityPanel';
-import SystemUpdatePanel from './SystemUpdatePanel';
-import NetworkDrivePanel from './NetworkDrivePanel';
-import TeamsPanel from './TeamsPanel';
+import SettingsPage from './SettingsPage';
 import { setActiveTeamWorkspace } from '../api';
 import type { TeamSummary } from '../types';
 
@@ -239,282 +233,17 @@ async function folderChain(leafId: string): Promise<Breadcrumb[]> {
   }
 }
 
-function displayShareStatus(share: ShareSummary): { label: string; className: string } {
-  if (share.revoked_at) return { label: 'Revoked', className: 'status-neutral' };
+function displayShareStatus(share: ShareSummary): { label: MessageKey; className: string } {
+  if (share.revoked_at) return { label: 'status.revoked', className: 'status-neutral' };
   if (share.expires_at && new Date(share.expires_at).getTime() <= Date.now()) {
-    return { label: 'Expired', className: 'status-neutral' };
+    return { label: 'status.expired', className: 'status-neutral' };
   }
   if (share.max_downloads != null && share.download_count >= share.max_downloads) {
-    return { label: 'Limit reached', className: 'status-warning' };
+    return { label: 'status.limit', className: 'status-warning' };
   }
-  return { label: 'Active', className: 'status-active' };
+  return { label: 'status.active', className: 'status-active' };
 }
 
-function mediaStageLabel(stage: string | null): string {
-  const labels: Record<string, string> = {
-    opening_source: 'Reading original media',
-    copying_source: 'Reading original media',
-    checking_dimensions: 'Checking media dimensions',
-    thumbnailing_viewer: 'Building image viewer preview',
-    thumbnailing_card: 'Building image card preview',
-    extracting_video_poster: 'Extracting video poster frame',
-    encoding_video_poster: 'Encoding video poster',
-    transcoding_video_preview: 'Building browser video preview',
-    extracting_face_frame: 'Extracting face index frame',
-    detecting_faces: 'Detecting faces',
-    publishing_viewer: 'Saving image viewer preview',
-    publishing_card: 'Saving image card preview',
-    publishing_video_poster: 'Saving video poster',
-    publishing_video_preview: 'Saving browser video preview'
-  };
-  return stage ? labels[stage] || 'Processing media' : 'Starting';
-}
-
-function mediaTaskLabel(task: string): string {
-  switch (task) {
-    case 'image_preview': return 'Image preview';
-    case 'video_thumbnail': return 'Video poster';
-    case 'video_preview': return 'Browser video preview';
-    case 'face_index': return 'Face index';
-    default: return 'Media job';
-  }
-}
-
-function mediaFailureLabel(code: string | null): string {
-  const labels: Record<string, string> = {
-    unsupported_format: 'This media format is not supported for previews.',
-    decode_failed: 'The media could not be decoded.',
-    input_missing: 'The original file is unavailable.',
-    resource_limit: 'The media exceeds preview processing limits.',
-    preview_storage_unavailable: 'Preview storage is unavailable.',
-    detector_unavailable: 'Face detector is unavailable on the indexer.',
-    processing_failed: 'Preview processing failed.'
-  };
-  return code ? labels[code] || labels.processing_failed : labels.processing_failed;
-}
-
-function MediaIndexPanel({ onClose }: { onClose: () => void }) {
-  const [status, setStatus] = useState<MediaIndexStatus | null>(null);
-  const [olderJobs, setOlderJobs] = useState<MediaIndexJob[]>([]);
-  const [olderCursor, setOlderCursor] = useState<number | null>(null);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const activeRequests = useRef<Set<AbortController>>(new Set());
-
-  useEffect(() => {
-    let closed = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      const controller = new AbortController();
-      activeRequests.current.add(controller);
-      try {
-        const result = await api.mediaIndexStatus(controller.signal);
-        if (!closed) {
-          setStatus(result);
-          setError('');
-          if (olderJobs.length === 0) setOlderCursor(result.nextBeforeId);
-        }
-      } catch (cause: unknown) {
-        if (!closed && !controller.signal.aborted) setError(friendlyError(cause));
-      } finally {
-        activeRequests.current.delete(controller);
-        if (!closed) timer = window.setTimeout(() => void poll(), 15000);
-      }
-    };
-    void poll();
-    return () => {
-      closed = true;
-      if (timer != null) window.clearTimeout(timer);
-      activeRequests.current.forEach((controller) => controller.abort());
-      activeRequests.current.clear();
-    };
-  }, [reloadKey, olderJobs.length]);
-
-  async function runAction(action: 'pause' | 'resume' | 'retry' | 'retry-all', jobId?: number) {
-    const key = jobId == null ? action : 'retry-' + jobId;
-    const controller = new AbortController();
-    activeRequests.current.add(controller);
-    setBusyAction(key);
-    setError('');
-    setNotice('');
-    try {
-      if (action === 'pause' || action === 'resume') {
-        const result = await api.setMediaIndexPaused(action === 'pause', controller.signal);
-        if (!controller.signal.aborted) {
-          setStatus((current) => current ? { ...current, paused: result.paused } : current);
-          setNotice(result.paused ? 'Media preview indexing paused.' : 'Media preview indexing resumed.');
-        }
-      } else {
-        const result = await api.retryMediaIndex(jobId, controller.signal);
-        if (!controller.signal.aborted) {
-          setOlderJobs((jobs) => jobs.filter((job) => jobId == null || job.id !== jobId));
-          setNotice(result.retried === 1 ? 'One failed job queued for retry.' : result.retried + ' failed jobs queued for retry.');
-        }
-      }
-      if (!controller.signal.aborted) setReloadKey((value) => value + 1);
-    } catch (cause: unknown) {
-      if (!controller.signal.aborted) setError(friendlyError(cause));
-    } finally {
-      activeRequests.current.delete(controller);
-      if (!controller.signal.aborted) setBusyAction(null);
-    }
-  }
-
-  async function loadOlderJobs() {
-    if (olderCursor == null || loadingOlder) return;
-    const controller = new AbortController();
-    activeRequests.current.add(controller);
-    setLoadingOlder(true);
-    try {
-      const page = await api.mediaIndexStatus(controller.signal, olderCursor);
-      if (!controller.signal.aborted) {
-        setOlderJobs((jobs) => {
-          const existing = new Set(jobs.map((job) => job.id));
-          return [...jobs, ...page.jobs.filter((job) => !existing.has(job.id))];
-        });
-        setOlderCursor(page.nextBeforeId);
-      }
-    } catch (cause: unknown) {
-      if (!controller.signal.aborted) setError(friendlyError(cause));
-    } finally {
-      activeRequests.current.delete(controller);
-      if (!controller.signal.aborted) setLoadingOlder(false);
-    }
-  }
-
-  const allJobs = status ? [...status.jobs, ...olderJobs] : olderJobs;
-  const failedJobs = allJobs.filter((job) => job.state === 'failed');
-  const visibleFailures = failedJobs.slice(0, 4);
-  const counts = status?.counts;
-  const activeJob = status?.jobs.find((job) => job.state === 'running');
-
-  return (
-    <section className="media-index-panel" id="media-index-panel" aria-labelledby="media-index-title">
-      <div className="media-index-header">
-        <div>
-          <span className="eyebrow">OWNER CONTROLS</span>
-          <h2 id="media-index-title">Media preview indexing</h2>
-          <p>Track preview processing and manage failed jobs.</p>
-        </div>
-        <button className="icon-button media-index-close" type="button" onClick={onClose} aria-label="Close media indexing panel"><X size={18} /></button>
-      </div>
-
-      {error ? <div className="media-index-message media-index-error" role="alert">{error}</div> : null}
-      {notice ? <div className="media-index-message media-index-notice" role="status">{notice}</div> : null}
-
-      {status ? (
-        <>
-          <div className="media-index-toolbar">
-            <span className={'media-index-health ' + (status.previewStorageAvailable ? 'is-healthy' : 'is-unhealthy')} role="status">
-              <i /> Preview SSD {status.previewStorageAvailable ? 'available' : 'unavailable'}
-            </span>
-            <div className="media-index-actions">
-              <button
-                className="button button-secondary"
-                type="button"
-                disabled={busyAction != null}
-                onClick={() => void runAction(status.paused ? 'resume' : 'pause')}
-              >
-                {status.paused ? <Play size={15} /> : <Pause size={15} />}
-                {status.paused ? 'Resume indexing' : 'Pause indexing'}
-              </button>
-              {status.counts.failed > 0 ? (
-                <button
-                  className="button button-secondary"
-                  type="button"
-                  disabled={busyAction != null}
-                  onClick={() => void runAction('retry-all')}
-                >
-                  <RotateCcw size={15} /> Retry all failed
-                </button>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="media-index-metrics" aria-label="Media preview indexing totals">
-            <div><span>Queued</span><strong>{counts?.queued ?? 0}</strong></div>
-            <div><span>Running</span><strong>{counts?.running ?? 0}</strong></div>
-            <div><span>Completed</span><strong>{counts?.completed ?? 0}</strong></div>
-            <div><span>Unsupported</span><strong>{counts?.unsupported ?? 0}</strong></div>
-            <div><span>Retry waiting</span><strong>{counts?.retryWait ?? 0}</strong></div>
-            <div><span>Failed</span><strong>{counts?.failed ?? 0}</strong></div>
-          </div>
-
-          <div className="media-index-byte-stats">
-            <div><span>Bytes pending</span><strong>{formatSize(status.pendingBytes)}</strong></div>
-            <div><span>Bytes processed in active jobs</span><strong>{formatSize(status.processedBytes)}</strong></div>
-          </div>
-
-          {status.taskMetrics?.length ? (
-            <div className="media-index-task-metrics" aria-label="Media preview indexing by task">
-              {status.taskMetrics.map((metric) => (
-                <article key={metric.task}>
-                  <div className="media-index-task-heading">
-                    <strong>{mediaTaskLabel(metric.task)}</strong>
-                    <span>{metric.counts.running > 0 ? `${metric.counts.running} running` : 'Idle'}</span>
-                  </div>
-                  <div className="media-index-task-counts">
-                    <span>{metric.counts.queued} queued</span>
-                    <span>{metric.counts.completed} done</span>
-                    <span>{metric.counts.failed} failed</span>
-                  </div>
-                  <div className="media-index-task-bytes">
-                    <span>{formatSize(metric.pendingBytes)} pending</span>
-                    <span>{formatSize(metric.processedBytes)} active</span>
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="media-index-active" aria-live="polite">
-            <Activity size={16} />
-            {activeJob ? (
-              <span><strong>{activeJob.fileName}</strong> · {mediaTaskLabel(activeJob.task)} · {mediaStageLabel(activeJob.currentStage)} · {formatSize(activeJob.processedBytes)} / {formatSize(activeJob.totalBytes)}</span>
-            ) : <span>No media preview job is running right now.</span>}
-          </div>
-
-          <div className="media-index-failures">
-            <div className="media-index-subhead"><strong>Recent failures</strong><span>{counts?.failed ?? 0} total</span></div>
-            {visibleFailures.length ? (
-              <ul>
-                {visibleFailures.map((job) => (
-                  <li key={job.id}>
-                    <div><strong title={job.fileName}>{job.fileName}</strong><span>{mediaTaskLabel(job.task)} · {mediaFailureLabel(job.errorCode)}</span></div>
-                    <button
-                      className="button button-secondary"
-                      type="button"
-                      disabled={busyAction != null}
-                      onClick={() => void runAction('retry', job.id)}
-                      aria-label={'Retry preview for ' + job.fileName}
-                    >
-                      <RotateCcw size={14} /> Retry
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : counts?.failed ? (
-              <p className="media-index-empty">Failed jobs are older than the latest 100 jobs. Load older jobs to review their sanitized errors.</p>
-            ) : (
-              <p className="media-index-empty">No failed media preview jobs.</p>
-            )}
-            {olderCursor != null && failedJobs.length < (counts?.failed ?? 0) ? (
-              <button className="load-more media-index-load-more" type="button" disabled={loadingOlder} onClick={() => void loadOlderJobs()}>
-                {loadingOlder ? 'Loading older jobs…' : 'Load older jobs'}
-              </button>
-            ) : null}
-            {failedJobs.length > visibleFailures.length ? <p className="media-index-empty">Showing the 4 most recent of {failedJobs.length} loaded failures.</p> : null}
-          </div>
-        </>
-      ) : (
-        <div className="media-index-loading" role="status">Loading indexing status…</div>
-      )}
-    </section>
-  );
-}
 
 function EntryMenu({ label, items }: { label: string; items: MenuItem[] }) {
   return (
@@ -542,6 +271,7 @@ function downloadFiles(ids: string[]) {
 }
 
 export default function DriveApp({ user, onLoggedOut }: Props) {
+  const { t } = useI18n();
   const href = useBrowserHref();
   const route = useMemo(() => {
     const search = href.includes('?') ? href.slice(href.indexOf('?')) : '';
@@ -549,11 +279,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     return parseDriveRoute(pathname, search);
   }, [href]);
   const section = route.section;
-  const panel: DrivePanel = section !== 'drive' || route.panel == null
-    ? null
-    : route.panel === 'google-drive' || route.panel === 'security' || route.panel === 'developer' || user.role === 'owner'
-      ? route.panel
-      : null;
+  const panel: DrivePanel = section === 'settings' ? route.panel : null;
   const query = section === 'drive' ? route.query : '';
   const [breadcrumbs, setBreadcrumbs] = useState<Breadcrumb[]>([]);
   const breadcrumbsRef = useRef<Breadcrumb[]>([]);
@@ -577,15 +303,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   const [modal, setModal] = useState<Modal>(null);
   const [shareTargets, setShareTargets] = useState<ShareSubject[] | null>(null);
   const [viewer, setViewer] = useState<Entry | null>(null);
-  const accountAdminOpen = panel === 'accounts';
-  const faceAdminOpen = panel === 'faces';
-  const mediaIndexOpen = panel === 'indexing';
-  const googleDriveOpen = panel === 'google-drive';
-  const developerOpen = panel === 'developer';
-  const securityOpen = panel === 'security';
-  const updatesOpen = panel === 'updates';
-  const networkDriveOpen = panel === 'network-drive';
-  const teamsOpen = panel === 'teams';
+  const teamsOpen = section === 'settings' && panel === 'teams';
   const [activeTeam, setActiveTeam] = useState<TeamSummary | null>(null);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [latestUpdateTag, setLatestUpdateTag] = useState<string | null>(null);
@@ -613,7 +331,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       progress: saved.size ? (Math.min(saved.size, Math.max(0, saved.uploadedBytes || 0)) / saved.size) * 100 : 100,
       speed: 0,
       status: 'paused',
-      detail: 'Choose this file again to resume.',
+      detail: t('upload.detail.resume'),
       saved
     }))
   );
@@ -657,11 +375,12 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   }, [jobs]);
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘ K' : 'Ctrl K';
   const activeSectionLabel = section === 'drive'
-    ? (!pathReady ? 'Opening folder…' : currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : (activeTeam ? activeTeam.name : 'My Drive'))
-    : section === 'shared' ? 'Shared links'
-      : section === 'photos' ? 'Photos'
-        : section === 'storage' ? 'Storage'
-          : 'Trash';
+    ? (!pathReady ? t('heading.opening') : currentFolderId ? breadcrumbs[breadcrumbs.length - 1].name : (activeTeam ? activeTeam.name : t('section.my_drive')))
+    : section === 'shared' ? t('section.shared')
+      : section === 'photos' ? t('section.photos')
+        : section === 'storage' ? t('section.storage')
+          : section === 'settings' ? t('section.settings')
+            : t('section.trash');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>(() => window.localStorage.getItem('my-drive-view') === 'grid' ? 'grid' : 'list');
   const [filtersOpen, setFiltersOpen] = useState(() => hasActiveFilters(route.filters));
   const [trashSelection, setTrashSelection] = useState<string[]>([]);
@@ -676,7 +395,6 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   function showDrive(
     overrides: {
       folders?: Breadcrumb[];
-      panel?: DrivePanel;
       query?: string;
       fileId?: string | null;
       filters?: DriveFilters;
@@ -692,7 +410,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       ...route,
       section: 'drive',
       folderIds: folders.map((folder) => folder.id),
-      panel: overrides.panel === undefined ? panel : overrides.panel,
+      panel: null,
       query: overrides.query === undefined ? query : overrides.query,
       fileId: overrides.fileId === undefined ? (section === 'drive' ? route.fileId : null) : overrides.fileId,
       filters: overrides.filters ?? route.filters,
@@ -704,22 +422,26 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     }, folders), mode);
   }
 
+  function openSettings(target: DrivePanel) {
+    navigateTo(buildDrivePath({ ...route, section: 'settings', panel: target, folderIds: [], query: '', fileId: null, filters: emptyFilters() }, []));
+  }
+
   useEffect(() => {
-    const title = (panel === 'accounts'
-      ? 'Accounts'
-      : panel === 'faces'
-        ? 'Face groups'
-          : panel === 'indexing'
-            ? 'Media indexing'
-            : panel === 'google-drive'
-              ? 'Google Drive'
-              : panel === 'security'
-                ? 'Account security'
-                : panel === 'teams'
-                  ? 'Teams'
-                  : activeSectionLabel) + ' · My Drive';
-    document.title = !panel && activeSectionLabel === 'My Drive' ? 'My Drive' : title;
-  }, [activeSectionLabel, panel]);
+    const SETTINGS_TITLE_KEYS: Record<Exclude<DrivePanel, null> | 'general', MessageKey> = {
+      general: 'settings.general',
+      accounts: 'menu.manage_accounts',
+      teams: 'menu.teams',
+      faces: 'drive.face_groups',
+      indexing: 'drive.media_indexing',
+      'google-drive': 'nav.google_drive',
+      security: 'menu.account_security',
+      developer: 'menu.developer',
+      updates: 'menu.system_updates',
+      'network-drive': 'menu.network_drive'
+    };
+    const label = section === 'settings' ? t(SETTINGS_TITLE_KEYS[panel ?? 'general']) : activeSectionLabel;
+    document.title = section === 'drive' && !currentFolderId && !activeTeam ? t('section.my_drive') : label + ' · ' + t('section.my_drive');
+  }, [activeSectionLabel, panel, section, currentFolderId, activeTeam, t]);
 
   useEffect(() => {
     if (section !== 'drive' || route.folderIds.length === 0) {
@@ -769,7 +491,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       ...route,
       section,
       folderIds: folders.map((folder) => folder.id),
-      panel: section === 'drive' ? panel : null,
+      panel: section === 'settings' ? panel : null,
       query,
       fileId: section === 'drive' || section === 'photos' ? route.fileId : null
     }, folders), 'replace');
@@ -830,16 +552,16 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       } else if (command && key === 'c' && selectedIds.length) {
         event.preventDefault();
         setClipboard({ mode: 'copy', ids: selectedIds });
-        setNotice(selectedIds.length === 1 ? 'Copied 1 item.' : `Copied ${selectedIds.length} items.`);
+        setNotice(t('notice.copied', { count: selectedIds.length }));
       } else if (command && key === 'x' && selectedIds.length) {
         event.preventDefault();
         const ids = operableIds(selectedIds);
         if (!ids.length) {
-          setError('The Photos folder cannot be moved.');
+          setError(t('error.photos_move'));
           return;
         }
         setClipboard({ mode: 'cut', ids });
-        setNotice(ids.length === 1 ? 'Ready to move 1 item.' : `Ready to move ${ids.length} items.`);
+        setNotice(t('notice.move_ready', { count: ids.length }));
       } else if (command && key === 'v' && clipboard) {
         event.preventDefault();
         void pasteClipboard();
@@ -853,7 +575,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   }, [clipboard, contextMenu, currentFolderId, entries, modal, route.fileId, section, selectedIds, shareTargets, viewer]);
 
   useEffect(() => {
-    if (section === 'photos' || section === 'storage') {
+    if (section === 'photos' || section === 'storage' || section === 'settings') {
       setLoading(false);
       setEntries([]);
       return;
@@ -948,7 +670,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     try {
       const report = await api.purgeTrash(payload);
       setTrashSelection([]);
-      setNotice(report.entries > 0 ? message : 'Nothing to delete');
+      setNotice(report.entries > 0 ? message : t('trash.nothing'));
       setRefresh((value) => value + 1);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -962,7 +684,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     setSelectedIds([]);
     setSelectionMode(false);
     setRefresh((current) => current + 1);
-    showDrive({ folders: [], panel: null, query: '', fileId: null, filters: emptyFilters() });
+    showDrive({ folders: [], query: '', fileId: null, filters: emptyFilters() });
   }
 
   function navigate(sectionValue: Section) {
@@ -1027,7 +749,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
   async function moveTo(entry: Entry, targetId: string | null) {
     if (isSystemFolder(entry)) {
-      setError('The Photos folder cannot be moved.');
+      setError(t('error.photos_move'));
       return false;
     }
     try {
@@ -1035,7 +757,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         let parent = await api.getEntry(targetId);
         while (true) {
           if (parent.id === entry.id) {
-            setError('A folder cannot be moved into itself or one of its own folders.');
+            setError(t('error.folder_into_itself'));
             return false;
           }
           if (!parent.parent_id) break;
@@ -1043,7 +765,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         }
       }
       await api.moveEntry(entry.id, targetId);
-      setNotice(targetId ? 'Item moved' : 'Item moved to My Drive');
+      setNotice(targetId ? t('notice.moved') : t('notice.moved_root'));
       setRefresh((value) => value + 1);
       return true;
     } catch (cause) {
@@ -1075,7 +797,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   async function runBatch(action: 'move' | 'copy' | 'trash', ids: string[], parentId?: string | null) {
     const allowed = action === 'trash' || action === 'move' || action === 'copy' ? operableIds(ids) : ids;
     if (allowed.length === 0) {
-      setError('The Photos folder cannot be renamed, moved, copied, or deleted.');
+      setError(t('error.photos_all'));
       return;
     }
     const skipped = ids.length - allowed.length;
@@ -1087,8 +809,8 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     setRefresh((value) => value + 1);
     setSelectedIds(action === 'copy' && (parentId ?? null) === currentFolderId ? result.entry_ids : []);
     if (action === 'move') setClipboard((current) => current?.mode === 'cut' ? null : current);
-    const verb = action === 'copy' ? 'Copied' : action === 'move' ? 'Moved' : 'Moved to trash';
-    setNotice(`${verb} ${result.count} item${result.count === 1 ? '' : 's'}.` + (skipped ? ' The Photos folder was left in place.' : ''));
+    const verbKey = action === 'copy' ? 'notice.batch_copied' : action === 'move' ? 'notice.batch_moved' : 'notice.batch_trashed';
+    setNotice(t(verbKey, { count: result.count }) + (skipped ? t('notice.photos_left') : ''));
     setModal(null);
     setContextMenu(null);
   }
@@ -1105,11 +827,11 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   async function trashEntries(ids: string[]) {
     const allowed = operableIds(ids);
     if (allowed.length === 0) {
-      setError('The Photos folder cannot be deleted.');
+      setError(t('error.photos_delete'));
       return;
     }
     const count = allowed.length;
-    if (!window.confirm(count === 1 ? 'Move this item to trash?' : `Move ${count} items to trash?`)) return;
+    if (!window.confirm(count === 1 ? t('confirm.trash_one') : t('confirm.trash_many', { count }))) return;
     try {
       await runBatch('trash', allowed);
     } catch (cause) {
@@ -1123,33 +845,33 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     const locked = chosen.length > 0 && chosen.every(isSystemFolder);
     const files = chosen.filter((entry) => entry.kind === 'file');
     return [
-      { id: 'open', label: single?.kind === 'folder' ? 'Open' : 'Open', hidden: !single, icon: single?.kind === 'folder' ? <Folder size={15} /> : <Eye size={15} />, onSelect: () => {
+      { id: 'open', label: single?.kind === 'folder' ? t('menu.open') : t('menu.open'), hidden: !single, icon: single?.kind === 'folder' ? <Folder size={15} /> : <Eye size={15} />, onSelect: () => {
         if (!single) return;
         if (single.kind === 'folder') void openFolder(single);
         else if (isFilePreviewable(single)) openPreview(single);
         else window.location.assign(downloadUrl(single.id));
       } },
-      { id: 'preview', label: 'Preview', hidden: !single || single.kind !== 'file' || !isFilePreviewable(single), icon: <Eye size={15} />, onSelect: () => single && openPreview(single) },
-      { id: 'download', label: files.length > 1 ? 'Download' : 'Download', hidden: files.length === 0, icon: <Download size={15} />, onSelect: () => downloadFiles(files.map((entry) => entry.id)) },
-      { id: 'share', label: 'Share', hidden: chosen.length === 0, icon: <Share2 size={15} />, onSelect: () => setShareTargets(shareSubjects(ids)) },
-      { id: 'details', label: 'Details', hidden: !single, icon: <Info size={15} />, onSelect: () => single && setDetailsId(single.id) },
-      { id: 'rename', label: 'Rename', hidden: !single, disabled: !single || isSystemFolder(single), onSelect: () => single && setModal({ kind: 'rename', entry: single }) },
-      { id: 'move', label: 'Move', disabled: locked, icon: <FolderInput size={15} />, onSelect: () => setModal({ kind: 'destination', action: 'move', ids: operableIds(ids) }) },
-      { id: 'copy-to', label: 'Copy to…', disabled: locked, icon: <Copy size={15} />, onSelect: () => setModal({ kind: 'destination', action: 'copy', ids: operableIds(ids) }) },
-      { id: 'cut', label: 'Cut', disabled: locked, icon: <Scissors size={15} />, onSelect: () => { const next = operableIds(ids); setClipboard({ mode: 'cut', ids: next }); setNotice(next.length === 1 ? 'Ready to move 1 item.' : `Ready to move ${next.length} items.`); } },
-      { id: 'copy', label: 'Copy', disabled: locked, icon: <Copy size={15} />, onSelect: () => { const next = operableIds(ids); setClipboard({ mode: 'copy', ids: next }); setNotice(next.length === 1 ? 'Copied 1 item.' : `Copied ${next.length} items.`); } },
-      { id: 'move-here', label: 'Move to this folder', hidden: !single || !currentFolderId || single.parent_id === currentFolderId, disabled: !single || isSystemFolder(single), onSelect: () => single && void moveTo(single, currentFolderId) },
-      { id: 'move-root', label: 'Move to My Drive', hidden: !single || single.parent_id === null, disabled: !single || isSystemFolder(single), onSelect: () => single && void moveTo(single, null) },
-      { id: 'trash', label: 'Move to trash', danger: true, disabled: locked, icon: <Trash2 size={15} />, onSelect: () => void trashEntries(ids) }
+      { id: 'preview', label: t('menu.preview'), hidden: !single || single.kind !== 'file' || !isFilePreviewable(single), icon: <Eye size={15} />, onSelect: () => single && openPreview(single) },
+      { id: 'download', label: t('menu.download'), hidden: files.length === 0, icon: <Download size={15} />, onSelect: () => downloadFiles(files.map((entry) => entry.id)) },
+      { id: 'share', label: t('menu.share'), hidden: chosen.length === 0, icon: <Share2 size={15} />, onSelect: () => setShareTargets(shareSubjects(ids)) },
+      { id: 'details', label: t('menu.details'), hidden: !single, icon: <Info size={15} />, onSelect: () => single && setDetailsId(single.id) },
+      { id: 'rename', label: t('menu.rename'), hidden: !single, disabled: !single || isSystemFolder(single), onSelect: () => single && setModal({ kind: 'rename', entry: single }) },
+      { id: 'move', label: t('menu.move'), disabled: locked, icon: <FolderInput size={15} />, onSelect: () => setModal({ kind: 'destination', action: 'move', ids: operableIds(ids) }) },
+      { id: 'copy-to', label: t('menu.copy_to'), disabled: locked, icon: <Copy size={15} />, onSelect: () => setModal({ kind: 'destination', action: 'copy', ids: operableIds(ids) }) },
+      { id: 'cut', label: t('menu.cut'), disabled: locked, icon: <Scissors size={15} />, onSelect: () => { const next = operableIds(ids); setClipboard({ mode: 'cut', ids: next }); setNotice(t('notice.move_ready', { count: next.length })); } },
+      { id: 'copy', label: t('menu.copy'), disabled: locked, icon: <Copy size={15} />, onSelect: () => { const next = operableIds(ids); setClipboard({ mode: 'copy', ids: next }); setNotice(t('notice.copied', { count: next.length })); } },
+      { id: 'move-here', label: t('menu.move_here'), hidden: !single || !currentFolderId || single.parent_id === currentFolderId, disabled: !single || isSystemFolder(single), onSelect: () => single && void moveTo(single, currentFolderId) },
+      { id: 'move-root', label: t('menu.move_root'), hidden: !single || single.parent_id === null, disabled: !single || isSystemFolder(single), onSelect: () => single && void moveTo(single, null) },
+      { id: 'trash', label: t('menu.trash'), danger: true, disabled: locked, icon: <Trash2 size={15} />, onSelect: () => void trashEntries(ids) }
     ];
   }
 
   function backgroundMenuItems(): MenuItem[] {
     return [
-      { id: 'upload', label: 'Upload files', icon: <Upload size={15} />, onSelect: pickFiles },
-      { id: 'folder', label: 'New folder', icon: <FolderPlus size={15} />, onSelect: () => setModal({ kind: 'new-folder' }) },
-      { id: 'paste', label: clipboard?.mode === 'cut' ? 'Paste move' : 'Paste', disabled: !clipboard, icon: <ClipboardPaste size={15} />, onSelect: () => void pasteClipboard() },
-      { id: 'select-all', label: 'Select all', disabled: entries.length === 0, onSelect: () => { setSelectedIds(entries.map((entry) => entry.id)); setSelectionMode(true); } }
+      { id: 'upload', label: t('drive.upload_files'), icon: <Upload size={15} />, onSelect: pickFiles },
+      { id: 'folder', label: t('drive.new_folder'), icon: <FolderPlus size={15} />, onSelect: () => setModal({ kind: 'new-folder' }) },
+      { id: 'paste', label: clipboard?.mode === 'cut' ? t('menu.paste_move') : t('menu.paste'), disabled: !clipboard, icon: <ClipboardPaste size={15} />, onSelect: () => void pasteClipboard() },
+      { id: 'select-all', label: t('menu.select_all'), disabled: entries.length === 0, onSelect: () => { setSelectedIds(entries.map((entry) => entry.id)); setSelectionMode(true); } }
     ];
   }
 
@@ -1215,7 +937,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         saved: session || undefined,
         status: 'paused',
         speed: 0,
-        detail: `Paused at ${formatSize(task.uploadedBytes)}.`
+        detail: t('upload.detail.paused_at', { size: formatSize(task.uploadedBytes) })
       });
       return true;
     }
@@ -1244,7 +966,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     let session = task.session;
     let offset = task.uploadedBytes;
     if (!file) {
-      updateJob(task.key, { status: 'paused', detail: 'Choose this file again to resume.' });
+      updateJob(task.key, { status: 'paused', detail: t('upload.detail.resume') });
       return;
     }
     try {
@@ -1267,7 +989,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       }
       if (task.action && await handleUploadAction(task, session, offset)) return;
 
-      updateJob(task.key, { detail: 'Preparing transfer…' });
+      updateJob(task.key, { detail: t('upload.detail.preparing') });
       let server = await api.uploadHead(session.id);
       offset = Math.min(server.offset, file.size);
       persistUploadOffset(session, offset);
@@ -1303,7 +1025,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       if (task.action && await handleUploadAction(task, session, offset)) return;
       task.finalizing = true;
       task.speed = 0;
-      updateJob(task.key, { status: 'uploading', detail: 'Finalizing & verifying file…', speed: 0 });
+      updateJob(task.key, { status: 'uploading', detail: t('upload.detail.finalizing'), speed: 0 });
       await finalizeUploadWithRetry(
         () => api.finalizeUpload(session!.id),
         controller.signal,
@@ -1311,7 +1033,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           updateJob(task.key, {
             status: 'retrying',
             speed: 0,
-            detail: `Finishing upload (${attempt}/${max}) in ${(waitMs / 1000).toFixed(1)}s…`,
+            detail: t('upload.detail.retry_finish', { attempt, max, secs: (waitMs / 1000).toFixed(1) }),
           });
         },
       );
@@ -1320,8 +1042,8 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       task.speed = 0;
       removeSavedUpload(session.id);
       uploadTasksRef.current.delete(task.key);
-      updateJob(task.key, { status: 'done', uploadedBytes: file.size, progress: 100, speed: 0, detail: 'Uploaded' });
-      setNotice(file.name + ' uploaded');
+      updateJob(task.key, { status: 'done', uploadedBytes: file.size, progress: 100, speed: 0, detail: t('upload.detail.uploaded') });
+      setNotice(t('notice.uploaded', { name: file.name }));
       setRefresh((value) => value + 1);
     } catch (cause) {
       task.controller = null;
@@ -1365,13 +1087,13 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       if (task.action === 'cancel') continue;
       if (task.action === 'pause') {
         task.action = null;
-        updateJob(task.key, { status: 'paused', speed: 0, detail: 'Paused in queue.' });
+        updateJob(task.key, { status: 'paused', speed: 0, detail: t('upload.detail.paused_queue') });
         continue;
       }
       activeUploadsRef.current.set(task.key, task);
       task.finalizing = false;
       task.tracker.reset(task.uploadedBytes, Date.now());
-      updateJob(task.key, { status: 'uploading', speed: 0, detail: 'Preparing transfer…' });
+      updateJob(task.key, { status: 'uploading', speed: 0, detail: t('upload.detail.preparing') });
       void runUpload(task).finally(() => {
         activeUploadsRef.current.delete(task.key);
         task.controller = null;
@@ -1394,7 +1116,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       progress: fileSize ? (task.uploadedBytes / fileSize) * 100 : 100,
       speed: 0,
       status: 'queued',
-      detail: 'Waiting in queue…'
+      detail: t('upload.detail.waiting')
     });
     pumpUploadQueue();
   }
@@ -1434,7 +1156,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       setResumeTargetId(null);
       const file = saved && files.find((candidate) => fileMatches(candidate, saved, saved.parentId));
       if (!saved || !file) {
-        setError('Choose the same file that was selected for this upload to resume it.');
+        setError(t('error.resume_same_file'));
         return;
       }
       enqueueUpload(file, saved.parentId, saved, saved.id);
@@ -1466,7 +1188,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     const task = uploadTasksRef.current.get(job.key);
     if (!task || task.finalizing || task.action) return;
     task.action = 'pause';
-    updateJob(job.key, { speed: 0, detail: 'Pausing…' });
+    updateJob(job.key, { speed: 0, detail: t('upload.detail.pausing') });
     task.controller?.abort();
   }
 
@@ -1511,7 +1233,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     if (task && activeUploadsRef.current.has(job.key)) {
       if (task.finalizing || task.action) return;
       task.action = 'cancel';
-      updateJob(job.key, { speed: 0, detail: 'Cancelling…' });
+      updateJob(job.key, { speed: 0, detail: t('upload.detail.cancelling') });
       task.controller?.abort();
       return;
     }
@@ -1543,7 +1265,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     try {
       await api.createFolder(name, currentFolderId);
       setModal(null);
-      setNotice('Folder created');
+      setNotice(t('notice.folder_created'));
       setRefresh((value) => value + 1);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -1556,13 +1278,13 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
     const name = String(data.get('name') || '').trim();
     if (!name) return;
     if (isSystemFolder(entry)) {
-      setError('The Photos folder cannot be renamed.');
+      setError(t('error.photos_rename'));
       return;
     }
     try {
       await api.renameEntry(entry.id, name);
       setModal(null);
-      setNotice('Name updated');
+      setNotice(t('notice.renamed'));
       const renamed = breadcrumbsRef.current.map((crumb) => crumb.id === entry.id ? { ...crumb, name } : crumb);
       if (renamed.some((crumb, index) => crumb.name !== breadcrumbsRef.current[index]?.name)) {
         showDrive({ folders: renamed }, 'replace');
@@ -1576,7 +1298,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   async function restoreEntry(entry: Entry) {
     try {
       await api.restoreEntry(entry.id);
-      setNotice('Item restored');
+      setNotice(t('trash.restored'));
       setRefresh((value) => value + 1);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -1584,10 +1306,10 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
   }
 
   async function revokeShare(share: ShareSummary) {
-    if (!window.confirm('Revoke the public link for “' + share.resource_name + '”?')) return;
+    if (!window.confirm(t('confirm.revoke_share', { name: share.resource_name }))) return;
     try {
       await api.revokeShare(share.id);
-      setNotice('Share link revoked');
+      setNotice(t('notice.share_revoked'));
       setShareRefresh((value) => value + 1);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -1659,7 +1381,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       <header className="app-topbar">
         <a className="brand-wordmark" href="/drive" aria-label="My Drive" onClick={(event) => {
           event.preventDefault();
-          showDrive({ folders: [], panel: null, query: '', fileId: null });
+          showDrive({ folders: [], query: '', fileId: null });
         }}>
           <span className="brand-mark"><Folder size={18} fill="currentColor" strokeWidth={1.6} /></span>
           <span>MY DRIVE</span>
@@ -1669,17 +1391,17 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           <input
             ref={searchInputRef}
             type="search"
-            placeholder={section === 'drive' ? 'Search files and folders' : 'Search from My Drive'}
+            placeholder={section === 'drive' ? t('app.search_placeholder') : t('app.search_placeholder_disabled')}
             value={query}
             disabled={section !== 'drive'}
             onChange={(event) => showDrive({ query: event.target.value, fileId: null }, 'replace')}
-            aria-label="Search files and folders"
+            aria-label={t('app.search_placeholder')}
           />
-          {query && section === 'drive' && <button className="clear-search" onClick={() => showDrive({ query: '', fileId: null }, 'replace')} aria-label="Clear search"><X size={15} /></button>}
+          {query && section === 'drive' && <button className="clear-search" onClick={() => showDrive({ query: '', fileId: null }, 'replace')} aria-label={t('app.search_clear')}><X size={15} /></button>}
           <kbd className="search-shortcut">{shortcutLabel}</kbd>
         </label>
         <details className="account-menu">
-          <summary className="account-button" aria-label="Account menu">
+          <summary className="account-button" aria-label={t('app.account_menu')}>
             <span className="avatar"><CircleUserRound size={21} /></span>
             <span className="account-email">{user.email}</span>
             <ChevronDown size={15} />
@@ -1687,46 +1409,26 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           <div className="menu-popover account-popover">
             <span className="account-menu-email">{user.email}</span>
             <div className="menu-divider" />
-            {user.role === 'owner' && (
-              <>
-                <button onClick={(event) => {
-                  event.currentTarget.closest('details')?.removeAttribute('open');
-                  showDrive({ folders: [], panel: 'accounts', query: '', fileId: null });
-                }}><Users size={15} /> Manage accounts</button>
-                <button onClick={(event) => {
-                  event.currentTarget.closest('details')?.removeAttribute('open');
-                  showDrive({ folders: [], panel: 'updates', query: '', fileId: null });
-                }}>
-                  <ArrowUpCircle size={15} /> System updates
-                  {updateAvailable ? <span className="update-menu-badge">{latestUpdateTag || 'New'}</span> : null}
-                </button>
-                <div className="menu-divider" />
-              </>
-            )}
             <button onClick={(event) => {
               event.currentTarget.closest('details')?.removeAttribute('open');
-              showDrive({ folders: [], panel: 'teams', query: '', fileId: null });
-            }}><Users size={15} /> Teams &amp; workspaces</button>
-            <button onClick={(event) => {
-              event.currentTarget.closest('details')?.removeAttribute('open');
-              showDrive({ folders: [], panel: 'security', query: '', fileId: null });
-            }}><ShieldCheck size={15} /> Account security</button>
-            <button onClick={(event) => { event.currentTarget.closest('details')?.removeAttribute('open'); showDrive({ folders: [], panel: 'network-drive', query: '', fileId: null }); }}><HardDrive size={15} /> Network drive</button>
-            <button onClick={(event) => { event.currentTarget.closest('details')?.removeAttribute('open'); showDrive({ folders: [], panel: 'developer', query: '', fileId: null }); }}><FileText size={15} /> Settings · Developer</button>
-            <div className="menu-divider" />
+              openSettings(null);
+            }}>
+              <Settings size={15} /> {t('menu.settings')}
+              {updateAvailable ? <span className="update-menu-badge">{latestUpdateTag || t('menu.update_new')}</span> : null}
+            </button>
             <button onClick={(event) => {
               event.currentTarget.closest('details')?.removeAttribute('open');
               navigate('storage');
-            }}><Gauge size={15} /> Storage</button>
+            }}><Gauge size={15} /> {t('menu.storage')}</button>
             <div className="menu-divider" />
-            <button onClick={logout}><LogOut size={15} /> Sign out</button>
+            <button onClick={logout}><LogOut size={15} /> {t('menu.sign_out')}</button>
           </div>
         </details>
       </header>
 
       <div className="app-body">
         <aside className="side-nav" aria-label="Main navigation">
-          <div className="nav-section-label">WORKSPACE</div>
+          <div className="nav-section-label">{t('nav.workspace')}</div>
           <button
             className={'nav-item' + (section === 'drive' && !activeTeam && !teamsOpen ? ' active' : '')}
             onClick={() => {
@@ -1734,34 +1436,37 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               else navigate('drive');
             }}
           >
-            <HardDrive size={18} /><span>My Drive</span>
+            <HardDrive size={18} /><span>{t('nav.my_drive')}</span>
           </button>
           <button
             className={'nav-item' + (teamsOpen || Boolean(activeTeam) ? ' active' : '')}
-            onClick={() => showDrive({ panel: teamsOpen ? null : 'teams' })}
+            onClick={() => openSettings('teams')}
           >
-            <Users size={18} /><span>Teams</span>
+            <Users size={18} /><span>{t('nav.teams')}</span>
           </button>
           <button className={'nav-item' + (section === 'photos' ? ' active' : '')} onClick={() => navigate('photos')}>
-            <Images size={18} /><span>Photos</span>
+            <Images size={18} /><span>{t('nav.photos')}</span>
           </button>
           <button className={'nav-item' + (section === 'shared' ? ' active' : '')} onClick={() => navigate('shared')}>
-            <Users size={18} /><span>Shared links</span>
+            <Users size={18} /><span>{t('nav.shared')}</span>
           </button>
           <button className={'nav-item' + (section === 'trash' ? ' active' : '')} onClick={() => navigate('trash')}>
-            <Trash2 size={18} /><span>Trash</span>
+            <Trash2 size={18} /><span>{t('nav.trash')}</span>
           </button>
           <button className={'nav-item' + (section === 'storage' ? ' active' : '')} onClick={() => navigate('storage')}>
-            <Gauge size={18} /><span>Storage</span>
+            <Gauge size={18} /><span>{t('nav.storage')}</span>
           </button>
-          <button className={'nav-item' + (googleDriveOpen ? ' active' : '')} onClick={() => showDrive({ panel: googleDriveOpen ? null : 'google-drive' })}>
-            <Cloud size={18} /><span>Google Drive</span>
+          <button className={'nav-item' + (section === 'settings' && panel === 'google-drive' ? ' active' : '')} onClick={() => openSettings('google-drive')}>
+            <Cloud size={18} /><span>{t('nav.google_drive')}</span>
+          </button>
+          <button className={'nav-item' + (section === 'settings' && panel !== 'google-drive' && !teamsOpen ? ' active' : '')} onClick={() => openSettings(null)}>
+            <Settings size={18} /><span>{t('nav.settings')}</span>
           </button>
           <div className="sidebar-bottom">
             <QuotaCard teamName={activeTeam?.name} />
             <div className="privacy-card">
               <span className="privacy-icon"><LockKeyhole size={16} /></span>
-              <span><strong>Your drive is private</strong><small>Only you can access your files.</small></span>
+              <span><strong>{t('nav.privacy_title')}</strong><small>{t('nav.privacy_body')}</small></span>
             </div>
           </div>
         </aside>
@@ -1770,14 +1475,16 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           {section !== 'photos' && section !== 'storage' && (
           <section className="page-heading">
             <div className="heading-copy">
-              <span className="eyebrow">{section === 'drive' ? 'YOUR FILES' : section === 'shared' ? 'LINK SETTINGS' : 'RECENTLY REMOVED'}</span>
+              <span className="eyebrow">{section === 'drive' ? t('heading.your_files') : section === 'shared' ? t('heading.link_settings') : section === 'settings' ? t('settings.title').toUpperCase() : t('heading.recently_removed')}</span>
               <h1>{activeSectionLabel}</h1>
               <p>
                 {section === 'drive'
-                  ? searchActive ? 'Results that match the current search and filters.' : 'Your files, organized in one place.'
+                  ? searchActive ? t('subtitle.drive_search') : t('subtitle.drive')
                   : section === 'shared'
-                    ? 'Create, review, and revoke the links you have shared.'
-                    : 'Restore an item, or delete it permanently.'}
+                    ? t('subtitle.shared')
+                    : section === 'settings'
+                      ? t('subtitle.settings')
+                      : t('subtitle.trash')}
               </p>
             </div>
             {section === 'drive' && (
@@ -1786,42 +1493,16 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                   <button
                     className="button button-secondary update-available-trigger"
                     type="button"
-                    aria-expanded={updatesOpen}
-                    aria-controls={updatesOpen ? 'system-update-panel' : undefined}
-                    onClick={() => showDrive({ panel: updatesOpen ? null : 'updates' })}
+                    onClick={() => openSettings('updates')}
                   >
-                    <ArrowUpCircle size={16} /> <span>{latestUpdateTag ? `Update ${latestUpdateTag}` : 'Update available'}</span>
-                  </button>
-                ) : null}
-                {user.role === 'owner' ? (
-                  <button
-                    className="button button-secondary media-index-trigger"
-                    type="button"
-                    aria-expanded={mediaIndexOpen}
-                    aria-controls={mediaIndexOpen ? 'media-index-panel' : undefined}
-                    aria-label={mediaIndexOpen ? 'Hide media indexing controls' : 'Show media indexing controls'}
-                    onClick={() => showDrive({ panel: mediaIndexOpen ? null : 'indexing' })}
-                  >
-                    <Activity size={16} /> <span>{mediaIndexOpen ? 'Hide indexing' : 'Media indexing'}</span>
-                  </button>
-                ) : null}
-                {user.role === 'owner' ? (
-                  <button
-                    className="button button-secondary face-admin-trigger"
-                    type="button"
-                    aria-expanded={faceAdminOpen}
-                    aria-controls={faceAdminOpen ? 'face-admin-panel' : undefined}
-                    aria-label={faceAdminOpen ? 'Hide face group controls' : 'Show face group controls'}
-                    onClick={() => showDrive({ panel: faceAdminOpen ? null : 'faces' })}
-                  >
-                    <ScanFace size={16} /> <span>{faceAdminOpen ? 'Hide faces' : 'Face groups'}</span>
+                    <ArrowUpCircle size={16} /> <span>{latestUpdateTag ? t('drive.update_tag', { tag: latestUpdateTag }) : t('drive.update_available')}</span>
                   </button>
                 ) : null}
                 <button className="button button-secondary" onClick={() => setModal({ kind: 'new-folder' })}>
-                  <FolderPlus size={17} /> <span>New folder</span>
+                  <FolderPlus size={17} /> <span>{t('drive.new_folder')}</span>
                 </button>
                 <button className="button button-primary" onClick={pickFiles}>
-                  <Upload size={17} /> <span>Upload files</span>
+                  <Upload size={17} /> <span>{t('drive.upload_files')}</span>
                 </button>
                 <input ref={fileInputRef} className="visually-hidden" type="file" multiple onChange={(event) => void chooseFiles(event)} />
               </div>
@@ -1833,23 +1514,23 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                   disabled={trashSelection.length === 0}
                   onClick={() => {
                     const count = trashSelection.length;
-                    if (window.confirm(`Permanently delete ${count} item${count === 1 ? '' : 's'}? This cannot be undone.`)) {
-                      void purgeTrash({ ids: trashSelection }, 'Selected items deleted permanently');
+                    if (window.confirm(t('trash.confirm_delete', { count }))) {
+                      void purgeTrash({ ids: trashSelection }, t('trash.deleted'));
                     }
                   }}
                 >
-                  <Trash2 size={16} /> <span>Delete permanently</span>
+                  <Trash2 size={16} /> <span>{t('trash.delete_permanently')}</span>
                 </button>
                 <button
                   className="button button-quiet-danger"
                   disabled={loading || entries.length === 0}
                   onClick={() => {
-                    if (window.confirm('Empty trash? Every item in trash will be deleted permanently. This cannot be undone.')) {
-                      void purgeTrash({ all: true }, 'Trash emptied');
+                    if (window.confirm(t('trash.confirm_empty'))) {
+                      void purgeTrash({ all: true }, t('trash.emptied'));
                     }
                   }}
                 >
-                  Empty trash
+                  {t('trash.empty')}
                 </button>
               </div>
             )}
@@ -1857,8 +1538,8 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           )}
 
           {section === 'drive' && breadcrumbs.length > 0 && !searchActive && (
-            <nav className="breadcrumb-nav" aria-label="Folder path">
-              <button onClick={() => goToBreadcrumb(-1)}>{activeTeam ? activeTeam.name : 'My Drive'}</button>
+            <nav className="breadcrumb-nav" aria-label={t('breadcrumb.label')}>
+              <button onClick={() => goToBreadcrumb(-1)}>{activeTeam ? activeTeam.name : t('section.my_drive')}</button>
               {breadcrumbs.map((crumb, index) => (
                 <span className="breadcrumb-item" key={crumb.id}>
                   <ChevronRight size={14} className="breadcrumb-slash" />
@@ -1871,59 +1552,29 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           {section === 'drive' && activeTeam ? (
             <div className="team-workspace-banner" role="status">
               <span>
-                Viewing shared team workspace <strong>{activeTeam.name}</strong> ({activeTeam.myRole})
+                {t('team.viewing')} <strong>{activeTeam.name}</strong> ({activeTeam.myRole})
               </span>
               <div className="account-access-actions">
                 <button
                   className="button button-secondary"
                   type="button"
-                  onClick={() => showDrive({ panel: teamsOpen ? null : 'teams' })}
+                  onClick={() => openSettings('teams')}
                 >
-                  Team settings
+                  {t('team.settings')}
                 </button>
                 <button
                   className="button button-secondary"
                   type="button"
                   onClick={() => selectTeamWorkspace(null)}
                 >
-                  Return to My Drive
+                  {t('team.return')}
                 </button>
               </div>
             </div>
           ) : null}
 
-          {section === 'drive' && teamsOpen ? (
-            <TeamsPanel
-              user={user}
-              activeTeamId={activeTeam?.id ?? null}
-              onSelectWorkspace={selectTeamWorkspace}
-              onClose={() => showDrive({ panel: null })}
-            />
-          ) : null}
-          {section === 'drive' && developerOpen ? <DeveloperPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
-          {section === 'drive' && networkDriveOpen ? <NetworkDrivePanel email={user.email} onClose={() => showDrive({ panel: null })} onOpenDeveloper={() => showDrive({ panel: 'developer' })} /> : null}
-          {section === 'drive' && securityOpen ? <AccountSecurityPanel user={user} onClose={() => showDrive({ panel: null })} /> : null}
-          {section === 'drive' && googleDriveOpen ? <GoogleDrivePanel isOwner={user.role === 'owner'} onClose={() => showDrive({ panel: null })} /> : null}
-          {section === 'drive' ? (
-            user.role === 'owner' ? (
-              updatesOpen ? (
-                <SystemUpdatePanel
-                  onClose={() => showDrive({ panel: null })}
-                  onStatusChange={(snapshot) => {
-                    setUpdateAvailable(snapshot.latest.updateAvailable);
-                    setLatestUpdateTag(snapshot.latest.tag);
-                  }}
-                />
-              ) : accountAdminOpen ? (
-                <AccountManagementPanel user={user} onClose={() => showDrive({ panel: null })} />
-              ) : faceAdminOpen ? (
-                <FaceManagementPanel onClose={() => showDrive({ panel: null })} />
-              ) : mediaIndexOpen ? <MediaIndexPanel onClose={() => showDrive({ panel: null })} /> : null
-            ) : null
-          ) : null}
-
-          {error && <div className="notice notice-error" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss"><X size={16} /></button></div>}
-          {notice && !error && <div className="notice notice-success" role="status"><Check size={16} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss"><X size={16} /></button></div>}
+          {error && <div className="notice notice-error" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label={t('app.dismiss')}><X size={16} /></button></div>}
+          {notice && !error && <div className="notice notice-success" role="status"><Check size={16} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label={t('app.dismiss')}><X size={16} /></button></div>}
 
           {section === 'photos' ? (
             <PhotosPage
@@ -1946,13 +1597,28 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             />
           ) : section === 'storage' ? (
             <StoragePage user={user} />
+          ) : section === 'settings' ? (
+            <SettingsPage
+              user={user}
+              panel={panel}
+              activeTeam={activeTeam}
+              updateAvailable={updateAvailable}
+              latestUpdateTag={latestUpdateTag}
+              onNavigate={openSettings}
+              onBack={() => showDrive({ folders: [], query: '', fileId: null })}
+              onSelectWorkspace={selectTeamWorkspace}
+              onUpdateStatusChange={(snapshot) => {
+                setUpdateAvailable(snapshot.latest.updateAvailable);
+                setLatestUpdateTag(snapshot.latest.tag);
+              }}
+            />
           ) : section === 'shared' ? (
             <section className="share-manager">
               {loading ? (
                 <div className="table-card"><div className="loading-rows"><span /><span /><span /></div></div>
               ) : shares.length ? (
                 <div className="table-card share-table">
-                  <div className="table-head share-grid"><span>Shared item</span><span>Access</span><span>Created</span><span>Expires</span><span>Status</span><span /></div>
+                  <div className="table-head share-grid"><span>{t('shared.item')}</span><span>{t('shared.access')}</span><span>{t('shared.created')}</span><span>{t('shared.expires')}</span><span>{t('shared.status')}</span><span /></div>
                   {shares.map((share) => {
                     const status = displayShareStatus(share);
                     return (
@@ -1963,27 +1629,27 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                           <span className="resource-type">{share.resource_type}</span>
                         </div>
                         <div className="share-access">
-                          <span>{share.password_protected ? <><LockKeyhole size={13} /> Password</> : 'Anyone with link'}</span>
-                          <small>{share.allow_download ? 'Downloads on' : 'View only'}</small>
-                          {share.max_downloads != null && <small>{share.download_count} / {share.max_downloads} downloads</small>}
+                          <span>{share.password_protected ? <><LockKeyhole size={13} /> {t('shared.password')}</> : t('shared.anyone')}</span>
+                          <small>{share.allow_download ? t('shared.downloads_on') : t('shared.view_only')}</small>
+                          {share.max_downloads != null && <small>{t('shared.downloads_count', { count: share.download_count, max: share.max_downloads })}</small>}
                         </div>
                         <span className="entry-modified">{formatDate(share.created_at)}</span>
                         <span className="entry-modified">{formatDate(share.expires_at)}</span>
-                        <span><span className={'status-pill ' + status.className}><i />{status.label}</span></span>
+                        <span><span className={'status-pill ' + status.className}><i />{t(status.label)}</span></span>
                         <span className="share-row-action">
-                          {status.label === 'Active' && <button className="button button-quiet-danger" onClick={() => void revokeShare(share)}>Revoke</button>}
+                          {status.label === 'status.active' && <button className="button button-quiet-danger" onClick={() => void revokeShare(share)}>{t('shared.revoke')}</button>}
                         </span>
                       </div>
                     );
                   })}
-                  {nextOffset != null && <button className="load-more" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading…' : 'Load more links'}</button>}
+                  {nextOffset != null && <button className="load-more" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? t('misc.loading') : t('shared.load_more')}</button>}
                 </div>
               ) : (
                 <div className="empty-state share-empty">
                   <span className="empty-icon"><Share2 size={22} /></span>
-                  <h2>No shared links yet</h2>
-                  <p>Use the actions menu on a file or folder to create a private link.</p>
-                  <button className="button button-secondary" onClick={() => navigate('drive')}>Go to My Drive</button>
+                  <h2>{t('shared.empty_title')}</h2>
+                  <p>{t('shared.empty_hint')}</p>
+                  <button className="button button-secondary" onClick={() => navigate('drive')}>{t('shared.goto_drive')}</button>
                 </div>
               )}
             </section>
@@ -2006,24 +1672,24 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                         type="checkbox"
                         checked={allTrashSelected}
                         onChange={() => setTrashSelection(allTrashSelected ? [] : visibleRows.map((entry) => entry.id))}
-                        aria-label="Select all items in trash"
+                        aria-label={t('trash.select_all')}
                       />
-                      <span>{trashSelection.length ? `${trashSelection.length} selected` : 'Select'}</span>
+                      <span>{trashSelection.length ? t('toolbar.selected', { count: trashSelection.length }) : t('toolbar.select')}</span>
                     </label>
                   )}
-                  <span>{searchActive ? 'Search results' : section === 'trash' ? 'Items in trash' : selectedIds.length ? `${selectedIds.length} selected` : 'Files'}</span>
+                  <span>{searchActive ? t('toolbar.search_results') : section === 'trash' ? t('toolbar.trash_items') : selectedIds.length ? t('toolbar.selected', { count: selectedIds.length }) : t('toolbar.files')}</span>
                 </div>
                 <div className="explorer-toolbar-actions">
                   {section === 'drive' && (
                     <label className="sort-control">
-                      <span className="visually-hidden">Sort</span>
+                      <span className="visually-hidden">{t('sort.label')}</span>
                       <select value={sortValue} onChange={(event) => changeSort(event.target.value)}>
-                        <option value="name:asc">Name</option>
-                        <option value="name:desc">Name, Z–A</option>
-                        <option value="updated_at:desc">Last modified</option>
-                        <option value="created_at:desc">Date created</option>
-                        <option value="size:desc">Largest first</option>
-                        <option value="size:asc">Smallest first</option>
+                        <option value="name:asc">{t('sort.name')}</option>
+                        <option value="name:desc">{t('sort.name_desc')}</option>
+                        <option value="updated_at:desc">{t('sort.updated')}</option>
+                        <option value="created_at:desc">{t('sort.created')}</option>
+                        <option value="size:desc">{t('sort.size_desc')}</option>
+                        <option value="size:asc">{t('sort.size_asc')}</option>
                       </select>
                     </label>
                   )}
@@ -2037,7 +1703,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                         if (selectionMode) setSelectedIds([]);
                       }}
                     >
-                      Select
+                      {t('toolbar.select')}
                     </button>
                   )}
                   {section === 'drive' && (
@@ -2047,65 +1713,65 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                       aria-expanded={filtersOpen}
                       onClick={() => setFiltersOpen((open) => !open)}
                     >
-                      <SlidersHorizontal size={15} /> <span>Filters</span>
+                      <SlidersHorizontal size={15} /> <span>{t('filters.button')}</span>
                     </button>
                   )}
-                  <div className="view-toggle" role="group" aria-label="View">
-                    <button className={viewMode === 'list' ? 'active' : ''} type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')} aria-label="List view"><List size={16} /></button>
-                    <button className={viewMode === 'grid' ? 'active' : ''} type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')} aria-label="Grid view"><LayoutGrid size={16} /></button>
+                  <div className="view-toggle" role="group" aria-label={t('view.label')}>
+                    <button className={viewMode === 'list' ? 'active' : ''} type="button" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')} aria-label={t('view.list')}><List size={16} /></button>
+                    <button className={viewMode === 'grid' ? 'active' : ''} type="button" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')} aria-label={t('view.grid')}><LayoutGrid size={16} /></button>
                   </div>
                 </div>
               </div>
               {section === 'drive' && filtersOpen && (
                 <form className="filter-panel" onSubmit={(event) => event.preventDefault()}>
-                  <label>Type
+                  <label>{t('filters.type')}
                     <select value={route.filters.category} onChange={(event) => patchFilters({ category: event.target.value })}>
-                      <option value="">Any</option>
-                      <option value="folder">Folders</option>
-                      <option value="image">Images</option>
-                      <option value="video">Videos</option>
-                      <option value="audio">Audio</option>
-                      <option value="document">Documents</option>
-                      <option value="archive">Archives</option>
-                      <option value="other">Other</option>
+                      <option value="">{t('filters.any')}</option>
+                      <option value="folder">{t('filters.folders')}</option>
+                      <option value="image">{t('filters.images')}</option>
+                      <option value="video">{t('filters.videos')}</option>
+                      <option value="audio">{t('filters.audio')}</option>
+                      <option value="document">{t('filters.documents')}</option>
+                      <option value="archive">{t('filters.archives')}</option>
+                      <option value="other">{t('filters.other')}</option>
                     </select>
                   </label>
                   <label>MIME
                     <input value={route.filters.mime} placeholder="image/jpeg" onChange={(event) => patchFilters({ mime: event.target.value.trim() })} />
                   </label>
-                  <label>Min MB
+                  <label>{t('filters.min_mb')}
                     <input inputMode="decimal" value={route.filters.minSize} placeholder="0" onChange={(event) => patchFilters({ minSize: event.target.value })} />
                   </label>
-                  <label>Max MB
-                    <input inputMode="decimal" value={route.filters.maxSize} placeholder="Any" onChange={(event) => patchFilters({ maxSize: event.target.value })} />
+                  <label>{t('filters.max_mb')}
+                    <input inputMode="decimal" value={route.filters.maxSize} placeholder={t('filters.any')} onChange={(event) => patchFilters({ maxSize: event.target.value })} />
                   </label>
-                  <label>Created from
+                  <label>{t('filters.created_from')}
                     <input type="date" value={route.filters.createdFrom} onChange={(event) => patchFilters({ createdFrom: event.target.value })} />
                   </label>
-                  <label>Created to
+                  <label>{t('filters.created_to')}
                     <input type="date" value={route.filters.createdTo} onChange={(event) => patchFilters({ createdTo: event.target.value })} />
                   </label>
-                  <label>Modified from
+                  <label>{t('filters.modified_from')}
                     <input type="date" value={route.filters.modifiedFrom} onChange={(event) => patchFilters({ modifiedFrom: event.target.value })} />
                   </label>
-                  <label>Modified to
+                  <label>{t('filters.modified_to')}
                     <input type="date" value={route.filters.modifiedTo} onChange={(event) => patchFilters({ modifiedTo: event.target.value })} />
                   </label>
                   {currentFolderId && (
                     <label className="filter-check">
                       <input type="checkbox" checked={route.filters.inFolder} onChange={(event) => patchFilters({ inFolder: event.target.checked })} />
-                      Only this folder
+                      {t('filters.in_folder')}
                     </label>
                   )}
-                  <button className="button button-secondary" type="button" onClick={() => showDrive({ filters: emptyFilters(), fileId: null }, 'replace')}>Clear</button>
+                  <button className="button button-secondary" type="button" onClick={() => showDrive({ filters: emptyFilters(), fileId: null }, 'replace')}>{t('filters.clear')}</button>
                 </form>
               )}
               <div className={viewMode === 'grid' && !loading && visibleRows.length ? 'entry-grid' : 'table-card drive-table'}>
                 {viewMode === 'list' && (
                   <div className="list-toolbar">
-                    <div className="list-toolbar-title"><span>Name</span></div>
-                    <span className="list-toolbar-date">{section === 'trash' ? 'Removed' : 'Last modified'}</span>
-                    <span className="list-toolbar-size">Size</span>
+                    <div className="list-toolbar-title"><span>{t('col.name')}</span></div>
+                    <span className="list-toolbar-date">{section === 'trash' ? t('col.removed') : t('col.modified')}</span>
+                    <span className="list-toolbar-size">{t('col.size')}</span>
                     <span className="list-toolbar-menu" />
                   </div>
                 )}
@@ -2146,11 +1812,11 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                   const selected = section === 'trash' ? trashSelection.includes(entry.id) : selectedIds.includes(entry.id);
                   const cut = clipboard?.mode === 'cut' && clipboard.ids.includes(entry.id);
                   const actions = section === 'trash' ? (
-                    <button className="icon-button restore-button" onClick={() => void restoreEntry(entry)} aria-label={'Restore ' + entry.name} title="Restore"><RotateCcw size={17} /></button>
+                    <button className="icon-button restore-button" onClick={() => void restoreEntry(entry)} aria-label={t('a11y.restore', { name: entry.name })} title={t('trash.restore')}><RotateCcw size={17} /></button>
                   ) : (
                     <>
-                      <button className="icon-button" onClick={() => setDetailsId(entry.id)} aria-label={'Details for ' + entry.name} title="Details"><Info size={16} /></button>
-                      <EntryMenu label={'Actions for ' + entry.name} items={entryMenuItems(menuIds)} />
+                      <button className="icon-button" onClick={() => setDetailsId(entry.id)} aria-label={t('a11y.details_for', { name: entry.name })} title={t('menu.details')}><Info size={16} /></button>
+                      <EntryMenu label={t('a11y.actions_for', { name: entry.name })} items={entryMenuItems(menuIds)} />
                     </>
                   );
                   const checkbox = (
@@ -2165,7 +1831,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                             chooseEntries(entry.id, 'toggle');
                           }
                         }}
-                        aria-label={'Select ' + entry.name}
+                        aria-label={t('a11y.select', { name: entry.name })}
                       />
                     </label>
                   );
@@ -2179,15 +1845,15 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                       >
                         <button className="entry-card-preview" onClick={activate} disabled={section === 'trash'}>
                           <EntryVisual entry={entry} showThumbnail={section !== 'trash'} />
-                          {entry.kind === 'file' && mediaKindFor(entry) === 'video' && <span className="photo-badge">Video</span>}
+                          {entry.kind === 'file' && mediaKindFor(entry) === 'video' && <span className="photo-badge">{t('entry.video')}</span>}
                           {checkbox}
                         </button>
                         <div className="entry-card-meta">
                           <button className="entry-name" onClick={activate} disabled={section === 'trash'}>
                             {entry.name}
-                            {isSystemFolder(entry) && <span className="system-badge">Photos</span>}
+                            {isSystemFolder(entry) && <span className="system-badge">{t('entry.photos_badge')}</span>}
                           </button>
-                          <span>{entrySize(entry)}{entry.kind === 'folder' && entry.folder_file_count != null ? ` · ${entry.folder_file_count} files` : ''}</span>
+                          <span>{entrySize(entry)}{entry.kind === 'folder' && entry.folder_file_count != null ? ' · ' + t('entry.files_count', { count: entry.folder_file_count }) : ''}</span>
                           <div className="entry-card-actions">{actions}</div>
                         </div>
                       </article>
@@ -2200,7 +1866,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                       <EntryVisual entry={entry} showThumbnail={section !== 'trash'} />
                       <div className="entry-name-wrap">
                         {entry.kind === 'folder' && section !== 'trash' ? (
-                          <button className="entry-name" onClick={activate}>{entry.name}{isSystemFolder(entry) && <span className="system-badge">Photos</span>}</button>
+                          <button className="entry-name" onClick={activate}>{entry.name}{isSystemFolder(entry) && <span className="system-badge">{t('entry.photos_badge')}</span>}</button>
                         ) : entry.kind === 'file' && section !== 'trash' ? (
                           isFilePreviewable(entry) ? (
                             <button className="entry-name" onClick={activate}>{entry.name}</button>
@@ -2209,7 +1875,7 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                           <span className="entry-name">{entry.name}</span>
                         )}
                         <span className="entry-mobile-meta">
-                          {entry.kind === 'folder' ? (entry.folder_file_count != null ? `${entry.folder_file_count} files` : 'Folder') : formatSize(entry.size_bytes)}
+                          {entry.kind === 'folder' ? (entry.folder_file_count != null ? t('entry.files_count', { count: entry.folder_file_count }) : t('entry.folder')) : formatSize(entry.size_bytes)}
                           <span>·</span>{formatDate(section === 'trash' ? entry.deleted_at : entry.updated_at)}
                         </span>
                       </div>
@@ -2224,19 +1890,19 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                     <span className="empty-icon">
                       {section === 'trash' ? <Trash2 size={22} /> : searchActive ? <Search size={22} /> : <Folder size={22} />}
                     </span>
-                    <h2>{searchActive ? 'No matching files' : section === 'trash' ? 'Trash is empty' : 'This folder is empty'}</h2>
-                    <p>{searchActive ? 'Try another search term.' : section === 'trash' ? 'Items you remove will appear here.' : 'Upload files or create a folder to get started.'}</p>
+                    <h2>{searchActive ? t('empty.no_match') : section === 'trash' ? t('empty.trash') : t('empty.folder')}</h2>
+                    <p>{searchActive ? t('empty.no_match_hint') : section === 'trash' ? t('empty.trash_hint') : t('empty.folder_hint')}</p>
                     {!searchActive && section === 'drive' && (
                       <div className="empty-actions">
-                        <button className="button button-secondary" onClick={() => setModal({ kind: 'new-folder' })}><FolderPlus size={16} /> New folder</button>
-                        <button className="button button-primary" onClick={pickFiles}><Upload size={16} /> Upload files</button>
+                        <button className="button button-secondary" onClick={() => setModal({ kind: 'new-folder' })}><FolderPlus size={16} /> {t('drive.new_folder')}</button>
+                        <button className="button button-primary" onClick={pickFiles}><Upload size={16} /> {t('drive.upload_files')}</button>
                       </div>
                     )}
                   </div>
                 )}
                 {!loading && visibleRows.length > 0 && nextOffset != null && (
                   <button className="load-more" disabled={loadingMore} onClick={() => void loadMore()}>
-                    {loadingMore ? 'Loading…' : 'Load more'}
+                    {loadingMore ? t('misc.loading') : t('misc.load_more')}
                   </button>
                 )}
               </div>
@@ -2252,33 +1918,34 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
             if (activeTeam) selectTeamWorkspace(null);
             else navigate('drive');
           }}
-        ><HardDrive size={19} /><span>Drive</span></button>
-        <button className={section === 'photos' ? 'active' : ''} onClick={() => navigate('photos')}><Images size={19} /><span>Photos</span></button>
-        <button className={section === 'shared' ? 'active' : ''} onClick={() => navigate('shared')}><Users size={19} /><span>Shared</span></button>
-        <button className={section === 'trash' ? 'active' : ''} onClick={() => navigate('trash')}><Trash2 size={19} /><span>Trash</span></button>
+        ><HardDrive size={19} /><span>{t('nav.drive_short')}</span></button>
+        <button className={section === 'photos' ? 'active' : ''} onClick={() => navigate('photos')}><Images size={19} /><span>{t('nav.photos')}</span></button>
+        <button className={section === 'shared' ? 'active' : ''} onClick={() => navigate('shared')}><Users size={19} /><span>{t('nav.shared_short')}</span></button>
+        <button className={section === 'settings' ? 'active' : ''} onClick={() => openSettings(null)}><Settings size={19} /><span>{t('nav.settings')}</span></button>
+        <button className={section === 'trash' ? 'active' : ''} onClick={() => navigate('trash')}><Trash2 size={19} /><span>{t('nav.trash')}</span></button>
       </nav>
 
       {jobs.length > 0 && (
-        <aside className="upload-queue" aria-label="Upload queue">
+        <aside className="upload-queue" aria-label={t('upload.queue_label')}>
           <div className="upload-queue-head">
             <button className="upload-queue-open" onClick={() => setUploadManagerOpen(true)} aria-haspopup="dialog">
               <span className="upload-queue-mark"><CloudUpload size={17} /></span>
               <span className="upload-queue-summary">
-                <strong>{retryingUploadJobs.length > 0 ? `Uploads · Retrying ${retryingUploadJobs.length}` : 'Uploads'}</strong>
+                <strong>{retryingUploadJobs.length > 0 ? t('upload.retrying_n', { count: retryingUploadJobs.length }) : t('upload.title')}</strong>
                 <small>
-                  {activeUploadJobs.length} active · {queuedUploadJobs.length} queued
-                  {totalUploadEta !== null ? ` · ETA ${formatUploadEta(totalUploadEta)}` : ''}
+                  {t('upload.active_queued', { active: activeUploadJobs.length, queued: queuedUploadJobs.length })}
+                  {totalUploadEta !== null ? ' · ' + t('upload.eta', { time: formatUploadEta(totalUploadEta) }) : ''}
                 </small>
               </span>
               <span className="upload-queue-speed">{formatSize(totalUploadSpeed)}/s</span>
               <ChevronDown size={16} />
             </button>
             <details className="queue-menu">
-              <summary className="icon-button" aria-label="Upload queue actions"><MoreHorizontal size={17} /></summary>
+              <summary className="icon-button" aria-label={t('upload.queue_actions')}><MoreHorizontal size={17} /></summary>
               <div className="menu-popover">
-                {activeUploadJobs.length > 0 && <button onClick={pauseAllActive}>Pause active</button>}
-                {pausedUploadJobs.length > 0 && <button onClick={resumeAllPaused}>Resume paused / failed</button>}
-                <button onClick={() => setJobs((items) => items.filter((job) => job.status !== 'done'))}>Clear completed</button>
+                {activeUploadJobs.length > 0 && <button onClick={pauseAllActive}>{t('upload.pause_active')}</button>}
+                {pausedUploadJobs.length > 0 && <button onClick={resumeAllPaused}>{t('upload.resume_failed')}</button>}
+                <button onClick={() => setJobs((items) => items.filter((job) => job.status !== 'done'))}>{t('upload.clear_done')}</button>
               </div>
             </details>
           </div>
@@ -2295,12 +1962,12 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
               const badgeLabel = job.status === 'uploading'
                 ? Math.round(job.progress) + '%'
                 : job.status === 'retrying'
-                  ? 'Retrying'
+                  ? t('upload.status.retrying')
                   : job.status === 'queued'
-                    ? 'Waiting'
+                    ? t('upload.status.waiting')
                     : job.status === 'paused'
-                      ? 'Paused'
-                      : 'Failed';
+                      ? t('upload.status.paused')
+                      : t('upload.status.failed');
               return (
                 <div className="upload-job" key={job.key}>
                   <span className="upload-job-icon"><Upload size={15} /></span>
@@ -2324,59 +1991,59 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           <section className="upload-manager" role="dialog" aria-modal="true" aria-labelledby="upload-manager-title">
             <header className="upload-manager-header">
               <div>
-                <span className="eyebrow">TRANSFER ACTIVITY</span>
-                <h2 id="upload-manager-title">Upload manager</h2>
+                <span className="eyebrow">{t('upload.manager_eyebrow')}</span>
+                <h2 id="upload-manager-title">{t('upload.manager_title')}</h2>
                 <p>
-                  {activeUploadJobs.length} active{retryingUploadJobs.length > 0 ? ` (${retryingUploadJobs.length} retrying)` : ''} · {queuedUploadJobs.length} queued · {formatSize(totalUploadSpeed)}/s total
-                  {totalUploadEta !== null ? ` · ETA ${formatUploadEta(totalUploadEta)}` : ''}
+                  {t('upload.manager_counts', { active: activeUploadJobs.length, retrying: retryingUploadJobs.length > 0 ? t('upload.retrying_suffix', { count: retryingUploadJobs.length }) : '', queued: queuedUploadJobs.length, speed: formatSize(totalUploadSpeed) })}
+                  {totalUploadEta !== null ? ' · ' + t('upload.eta', { time: formatUploadEta(totalUploadEta) }) : ''}
                 </p>
               </div>
               <div className="upload-manager-header-actions">
-                {activeUploadJobs.length > 0 && <button className="upload-manager-clear" onClick={pauseAllActive}>Pause active</button>}
-                {pausedUploadJobs.length > 0 && <button className="upload-manager-clear" onClick={resumeAllPaused}>Resume all</button>}
-                <button className="upload-manager-clear" disabled={!completedUploadCount} onClick={() => setJobs((items) => items.filter((job) => job.status !== 'done'))}>Clear completed</button>
-                <button className="icon-button" onClick={() => setUploadManagerOpen(false)} aria-label="Close upload manager"><X size={18} /></button>
+                {activeUploadJobs.length > 0 && <button className="upload-manager-clear" onClick={pauseAllActive}>{t('upload.pause_active')}</button>}
+                {pausedUploadJobs.length > 0 && <button className="upload-manager-clear" onClick={resumeAllPaused}>{t('upload.resume_all')}</button>}
+                <button className="upload-manager-clear" disabled={!completedUploadCount} onClick={() => setJobs((items) => items.filter((job) => job.status !== 'done'))}>{t('upload.clear_done')}</button>
+                <button className="icon-button" onClick={() => setUploadManagerOpen(false)} aria-label={t('upload.manager_close')}><X size={18} /></button>
               </div>
             </header>
 
             <div className="upload-manager-summary">
-              <div><span>Files</span><strong>{jobs.length}</strong></div>
-              <div><span>Active</span><strong>{activeUploadJobs.length} / {MAX_CONCURRENT_UPLOADS}</strong></div>
-              <div><span>Waiting</span><strong>{queuedUploadJobs.length}</strong></div>
-              <div><span>Paused / failed</span><strong>{pausedUploadJobs.length}</strong></div>
-              <div><span>Completed</span><strong>{completedUploadCount}</strong></div>
+              <div><span>{t('upload.summary_files')}</span><strong>{jobs.length}</strong></div>
+              <div><span>{t('upload.summary_active')}</span><strong>{activeUploadJobs.length} / {MAX_CONCURRENT_UPLOADS}</strong></div>
+              <div><span>{t('upload.summary_waiting')}</span><strong>{queuedUploadJobs.length}</strong></div>
+              <div><span>{t('upload.summary_paused')}</span><strong>{pausedUploadJobs.length}</strong></div>
+              <div><span>{t('upload.summary_done')}</span><strong>{completedUploadCount}</strong></div>
             </div>
 
             {unfinishedUploadJobs.length > 0 && (
               <div className="upload-manager-overall">
                 <div className="upload-manager-overall-meta">
-                  <span>Overall queue ({Math.round(overallBatchProgress)}%)</span>
-                  <span>{formatSize(uploadedBatchBytes)} / {formatSize(totalBatchBytes)} · ETA {formatUploadEta(totalUploadEta)}</span>
+                  <span>{t('upload.overall', { pct: Math.round(overallBatchProgress) })}</span>
+                  <span>{formatSize(uploadedBatchBytes)} / {formatSize(totalBatchBytes)} · {t('upload.eta', { time: formatUploadEta(totalUploadEta) })}</span>
                 </div>
                 <div className="upload-progress"><i style={{ width: overallBatchProgress + '%' }} /></div>
               </div>
             )}
 
             <div className="upload-manager-list">
-              {jobs.length === 0 && <p className="upload-manager-empty">No upload tasks.</p>}
+              {jobs.length === 0 && <p className="upload-manager-empty">{t('upload.no_tasks')}</p>}
               {jobs.map((job) => {
                 const task = uploadTasksRef.current.get(job.key);
                 const isFinishing = !!task?.finalizing;
                 const isControlling = !!task?.action;
                 const isActiveStatus = job.status === 'uploading' || job.status === 'retrying';
                 const statusLabel = isFinishing
-                  ? 'Finishing'
+                  ? t('upload.status.finishing')
                   : job.status === 'uploading'
-                    ? 'Uploading'
+                    ? t('upload.status.uploading')
                     : job.status === 'retrying'
-                      ? 'Retrying'
+                      ? t('upload.status.retrying')
                       : job.status === 'queued'
-                        ? 'Waiting'
+                        ? t('upload.status.waiting')
                         : job.status === 'paused'
-                          ? 'Paused'
+                          ? t('upload.status.paused')
                           : job.status === 'error'
-                            ? 'Failed'
-                            : 'Complete';
+                            ? t('upload.status.failed')
+                            : t('upload.status.complete');
                 const eta = job.status === 'uploading' && job.speed > 0 ? (job.size - job.uploadedBytes) / job.speed : null;
                 return (
                   <article className="upload-manager-job" key={job.key}>
@@ -2384,21 +2051,21 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
                       <span className={'upload-job-icon' + (job.status === 'done' ? ' upload-complete-icon' : '')}>{job.status === 'done' ? <Check size={16} /> : <Upload size={15} />}</span>
                       <div className="upload-job-content">
                         <div className="upload-job-title"><strong title={job.name}>{job.name}</strong><span className={'upload-job-state upload-state-' + job.status}>{statusLabel}</span></div>
-                        <div className="upload-progress" role="progressbar" aria-label={'Upload progress for ' + job.name} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress)}><i style={{ width: job.progress + '%' }} /></div>
+                        <div className="upload-progress" role="progressbar" aria-label={t('upload.progress_label', { name: job.name })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress)}><i style={{ width: job.progress + '%' }} /></div>
                         <div className="upload-manager-job-stats">
                           <span>{formatSize(job.uploadedBytes)} / {formatSize(job.size)} ({Math.round(job.progress)}%)</span>
-                          <span>{job.status === 'uploading' ? formatSize(job.speed) + '/s' : job.status === 'retrying' ? 'Recovering…' : '—'}</span>
-                          <span>ETA {formatUploadEta(eta)}</span>
+                          <span>{job.status === 'uploading' ? formatSize(job.speed) + '/s' : job.status === 'retrying' ? t('upload.recovering') : '—'}</span>
+                          <span>{t('upload.eta', { time: formatUploadEta(eta) })}</span>
                         </div>
                         <small className="upload-manager-detail">{job.detail}</small>
                       </div>
                     </div>
                     <div className="upload-manager-job-actions">
-                      {isActiveStatus && !isFinishing && !isControlling && <button className="queue-action" onClick={() => pauseUpload(job)} aria-label={'Pause ' + job.name} title="Pause upload"><Pause size={16} /></button>}
-                      {job.status === 'queued' && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={'Cancel ' + job.name} title="Cancel upload"><X size={16} /></button>}
-                      {job.status === 'paused' && <button className="queue-action" onClick={() => resumeUpload(job)} aria-label={'Resume ' + job.name} title="Resume upload"><Play size={16} /></button>}
-                      {job.status === 'error' && <button className="queue-action" onClick={() => retryUpload(job)} aria-label={'Retry ' + job.name} title="Retry upload"><RotateCcw size={16} /></button>}
-                      {(isActiveStatus || job.status === 'paused' || job.status === 'error') && !isFinishing && !isControlling && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={'Cancel ' + job.name} title="Cancel upload"><X size={16} /></button>}
+                      {isActiveStatus && !isFinishing && !isControlling && <button className="queue-action" onClick={() => pauseUpload(job)} aria-label={t('a11y.pause', { name: job.name })} title={t('upload.pause_title')}><Pause size={16} /></button>}
+                      {job.status === 'queued' && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={t('a11y.cancel', { name: job.name })} title={t('upload.cancel_title')}><X size={16} /></button>}
+                      {job.status === 'paused' && <button className="queue-action" onClick={() => resumeUpload(job)} aria-label={t('a11y.resume', { name: job.name })} title={t('upload.resume_title')}><Play size={16} /></button>}
+                      {job.status === 'error' && <button className="queue-action" onClick={() => retryUpload(job)} aria-label={t('a11y.retry', { name: job.name })} title={t('upload.retry_title')}><RotateCcw size={16} /></button>}
+                      {(isActiveStatus || job.status === 'paused' || job.status === 'error') && !isFinishing && !isControlling && <button className="queue-action" onClick={() => void cancelUpload(job)} aria-label={t('a11y.cancel', { name: job.name })} title={t('upload.cancel_title')}><X size={16} /></button>}
                     </div>
                   </article>
                 );
@@ -2410,9 +2077,9 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
 
       {modal?.kind === 'destination' && (
         <DestinationDialog
-          title={modal.action === 'copy' ? 'Copy items' : 'Move items'}
-          description={modal.ids.length === 1 ? 'Choose where this item should go.' : `Choose where these ${modal.ids.length} items should go.`}
-          confirmLabel={modal.action === 'copy' ? 'Copy here' : 'Move here'}
+          title={modal.action === 'copy' ? t('dialog.copy_items') : t('dialog.move_items')}
+          description={modal.ids.length === 1 ? t('dialog.dest_one') : t('dialog.dest_many', { count: modal.ids.length })}
+          confirmLabel={modal.action === 'copy' ? t('dialog.copy_here') : t('dialog.move_here')}
           startId={currentFolderId}
           excludeIds={modal.ids}
           onCancel={() => setModal(null)}
@@ -2425,30 +2092,30 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
       {modal && modal.kind !== 'destination' && (
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null); }}>
           <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-            <button className="modal-close icon-button" onClick={() => setModal(null)} aria-label="Close dialog"><X size={18} /></button>
+            <button className="modal-close icon-button" onClick={() => setModal(null)} aria-label={t('dialog.close')}><X size={18} /></button>
             {modal.kind === 'new-folder' && (
               <>
                 <span className="modal-icon"><FolderPlus size={19} /></span>
-                <span className="eyebrow">ORGANIZE FILES</span>
-                <h2 id="modal-title">Create a new folder</h2>
-                <p className="modal-description">Choose a name for the folder in {activeSectionLabel}.</p>
+                <span className="eyebrow">{t('dialog.organize')}</span>
+                <h2 id="modal-title">{t('dialog.new_folder_title')}</h2>
+                <p className="modal-description">{t('dialog.new_folder_desc', { location: activeSectionLabel })}</p>
                 <form className="form-stack" onSubmit={(event) => void createFolder(event)}>
-                  <label className="field-label" htmlFor="folder-name">Folder name</label>
-                  <input autoFocus id="folder-name" name="name" className="text-input" maxLength={255} required placeholder="e.g. Project files" />
-                  <div className="modal-actions"><button type="button" className="button button-secondary" onClick={() => setModal(null)}>Cancel</button><button type="submit" className="button button-primary">Create folder</button></div>
+                  <label className="field-label" htmlFor="folder-name">{t('dialog.folder_name')}</label>
+                  <input autoFocus id="folder-name" name="name" className="text-input" maxLength={255} required placeholder={t('dialog.folder_placeholder')} />
+                  <div className="modal-actions"><button type="button" className="button button-secondary" onClick={() => setModal(null)}>{t('dialog.cancel')}</button><button type="submit" className="button button-primary">{t('dialog.create_folder')}</button></div>
                 </form>
               </>
             )}
             {modal.kind === 'rename' && (
               <>
                 <span className="modal-icon">{extensionIcon(modal.entry)}</span>
-                <span className="eyebrow">UPDATE ITEM</span>
-                <h2 id="modal-title">Rename {modal.entry.kind}</h2>
-                <p className="modal-description">The new name will be visible anywhere this item appears.</p>
+                <span className="eyebrow">{t('dialog.rename_eyebrow')}</span>
+                <h2 id="modal-title">{t('dialog.rename_title', { kind: modal.entry.kind === 'folder' ? t('entry.kind_folder') : t('entry.kind_file') })}</h2>
+                <p className="modal-description">{t('dialog.rename_desc')}</p>
                 <form className="form-stack" onSubmit={(event) => void renameEntry(event, modal.entry)}>
-                  <label className="field-label" htmlFor="rename-name">Name</label>
+                  <label className="field-label" htmlFor="rename-name">{t('dialog.name')}</label>
                   <input autoFocus id="rename-name" name="name" className="text-input" maxLength={255} required defaultValue={modal.entry.name} />
-                  <div className="modal-actions"><button type="button" className="button button-secondary" onClick={() => setModal(null)}>Cancel</button><button type="submit" className="button button-primary">Save name</button></div>
+                  <div className="modal-actions"><button type="button" className="button button-secondary" onClick={() => setModal(null)}>{t('dialog.cancel')}</button><button type="submit" className="button button-primary">{t('dialog.save_name')}</button></div>
                 </form>
               </>
             )}
@@ -2462,21 +2129,21 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
           onClose={() => setShareTargets(null)}
           onCreated={() => {
             setShareRefresh((value) => value + 1);
-            setNotice(shareTargets.length > 1 ? 'Share links created' : 'Share link created');
+            setNotice(shareTargets.length > 1 ? t('notice.shares_created') : t('notice.share_created'));
           }}
         />
       )}
 
       {section === 'drive' && selectedIds.length > 0 && (
-        <div className="batch-bar" role="toolbar" aria-label="Selected items">
-          <strong>{selectedIds.length} selected</strong>
-          <button className="batch-action" type="button" onClick={() => downloadFiles(entries.filter((entry) => selectedIds.includes(entry.id) && entry.kind === 'file').map((entry) => entry.id))}><Download size={15} /> Download</button>
-          <button className="batch-action" type="button" onClick={() => setShareTargets(shareSubjects(selectedIds))}><Share2 size={15} /> Share</button>
-          <button className="batch-action" type="button" onClick={() => setModal({ kind: 'destination', action: 'move', ids: operableIds(selectedIds) })}><FolderInput size={15} /> Move</button>
-          <button className="batch-action" type="button" onClick={() => setModal({ kind: 'destination', action: 'copy', ids: operableIds(selectedIds) })}><Copy size={15} /> Copy</button>
-          <button className="batch-action" type="button" onClick={() => { const ids = operableIds(selectedIds); setClipboard({ mode: 'cut', ids }); setNotice(ids.length === 1 ? 'Ready to move 1 item.' : `Ready to move ${ids.length} items.`); }}><Scissors size={15} /> Cut</button>
-          <button className="batch-action batch-danger" type="button" onClick={() => void trashEntries(selectedIds)}><Trash2 size={15} /> Trash</button>
-          <button className="batch-action" type="button" onClick={() => { setSelectedIds([]); setSelectionMode(false); }}>Clear</button>
+        <div className="batch-bar" role="toolbar" aria-label={t('batch.label')}>
+          <strong>{t('toolbar.selected', { count: selectedIds.length })}</strong>
+          <button className="batch-action" type="button" onClick={() => downloadFiles(entries.filter((entry) => selectedIds.includes(entry.id) && entry.kind === 'file').map((entry) => entry.id))}><Download size={15} /> {t('menu.download')}</button>
+          <button className="batch-action" type="button" onClick={() => setShareTargets(shareSubjects(selectedIds))}><Share2 size={15} /> {t('menu.share')}</button>
+          <button className="batch-action" type="button" onClick={() => setModal({ kind: 'destination', action: 'move', ids: operableIds(selectedIds) })}><FolderInput size={15} /> {t('menu.move')}</button>
+          <button className="batch-action" type="button" onClick={() => setModal({ kind: 'destination', action: 'copy', ids: operableIds(selectedIds) })}><Copy size={15} /> {t('menu.copy')}</button>
+          <button className="batch-action" type="button" onClick={() => { const ids = operableIds(selectedIds); setClipboard({ mode: 'cut', ids }); setNotice(t('notice.move_ready', { count: ids.length })); }}><Scissors size={15} /> {t('menu.cut')}</button>
+          <button className="batch-action batch-danger" type="button" onClick={() => void trashEntries(selectedIds)}><Trash2 size={15} /> {t('nav.trash')}</button>
+          <button className="batch-action" type="button" onClick={() => { setSelectedIds([]); setSelectionMode(false); }}>{t('filters.clear')}</button>
         </div>
       )}
 
@@ -2484,34 +2151,34 @@ export default function DriveApp({ user, onLoggedOut }: Props) {
         <ContextMenu
           point={{ x: contextMenu.x, y: contextMenu.y }}
           items={contextMenu.ids.length ? entryMenuItems(contextMenu.ids) : backgroundMenuItems()}
-          label="Item actions"
+          label={t('menu.item_actions')}
           onClose={() => setContextMenu(null)}
         />
       )}
 
       {detailsId && (
-        <aside className="details-drawer" aria-label="Item details">
+        <aside className="details-drawer" aria-label={t('details.label')}>
           <header>
-            <strong>Details</strong>
-            <button className="icon-button" onClick={() => setDetailsId(null)} aria-label="Close details"><X size={16} /></button>
+            <strong>{t('menu.details')}</strong>
+            <button className="icon-button" onClick={() => setDetailsId(null)} aria-label={t('details.close')}><X size={16} /></button>
           </header>
           {!details ? (
-            <p className="details-loading">Loading details…</p>
+            <p className="details-loading">{t('details.loading')}</p>
           ) : (
             <dl>
-              <div><dt>Name</dt><dd>{details.name}</dd></div>
-              <div><dt>Type</dt><dd>{details.mime_type || details.category}</dd></div>
-              <div><dt>Size</dt><dd>{formatSize(details.size_bytes)}</dd></div>
-              <div><dt>Created</dt><dd>{formatDate(details.created_at)}</dd></div>
-              <div><dt>Modified</dt><dd>{formatDate(details.updated_at)}</dd></div>
-              <div><dt>Location</dt><dd>{details.location}</dd></div>
-              <div><dt>Index</dt><dd>{details.category}</dd></div>
-              {details.media.width && details.media.height ? <div><dt>Dimensions</dt><dd>{details.media.width} × {details.media.height}</dd></div> : null}
+              <div><dt>{t('details.name')}</dt><dd>{details.name}</dd></div>
+              <div><dt>{t('details.type')}</dt><dd>{details.mime_type || details.category}</dd></div>
+              <div><dt>{t('details.size')}</dt><dd>{formatSize(details.size_bytes)}</dd></div>
+              <div><dt>{t('details.created')}</dt><dd>{formatDate(details.created_at)}</dd></div>
+              <div><dt>{t('details.modified')}</dt><dd>{formatDate(details.updated_at)}</dd></div>
+              <div><dt>{t('details.location')}</dt><dd>{details.location}</dd></div>
+              <div><dt>{t('details.index')}</dt><dd>{details.category}</dd></div>
+              {details.media.width && details.media.height ? <div><dt>{t('details.dimensions')}</dt><dd>{details.media.width} × {details.media.height}</dd></div> : null}
               {details.folder && (
                 <>
-                  <div><dt>Folder size</dt><dd>{formatSize(details.folder.total_bytes)}</dd></div>
-                  <div><dt>Files</dt><dd>{details.folder.file_count}</dd></div>
-                  <div><dt>Subfolders</dt><dd>{details.folder.subfolder_count}</dd></div>
+                  <div><dt>{t('details.folder_size')}</dt><dd>{formatSize(details.folder.total_bytes)}</dd></div>
+                  <div><dt>{t('details.files')}</dt><dd>{details.folder.file_count}</dd></div>
+                  <div><dt>{t('details.subfolders')}</dt><dd>{details.folder.subfolder_count}</dd></div>
                   {Object.entries(details.folder.by_category).map(([category, bytes]) => (
                     <div key={category}><dt>{category}</dt><dd>{formatSize(bytes)}</dd></div>
                   ))}

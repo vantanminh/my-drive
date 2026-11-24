@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 
-export type WorkspaceSection = 'drive' | 'shared' | 'trash' | 'photos' | 'storage';
+export type WorkspaceSection = 'drive' | 'shared' | 'trash' | 'photos' | 'storage' | 'settings';
 export type DrivePanel = 'accounts' | 'teams' | 'faces' | 'indexing' | 'google-drive' | 'security' | 'developer' | 'updates' | 'network-drive' | null;
+export const SETTINGS_PANELS = ['accounts', 'teams', 'faces', 'indexing', 'google-drive', 'security', 'developer', 'updates', 'network-drive'] as const;
+export type SettingsPanel = (typeof SETTINGS_PANELS)[number];
 export type PhotosTab = 'timeline' | 'people' | 'albums';
 export type DriveSort = 'name' | 'updated_at' | 'created_at' | 'size';
 export type DriveOrder = 'asc' | 'desc';
@@ -184,8 +186,16 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
     return photos;
   }
   if (parts[0] === 'storage' && parts.length === 1) return blankRoute({ section: 'storage' });
-  if (parts[0] === 'settings' && parts[1] === 'developer') return blankRoute({ panel: 'developer' });
-  if (parts[0] === 'security' && parts.length === 1) return blankRoute({ panel: 'security' });
+
+  // Unified settings hub: /settings and /settings/<panel>. Legacy single-segment
+  // panel URLs (/accounts, /security, …) map here so old links keep working.
+  if (parts[0] === 'settings' || (parts.length === 1 && (SETTINGS_PANELS as readonly string[]).includes(parts[0]))) {
+    const slug = parts[0] === 'settings' ? parts[1] : parts[0];
+    const panel = slug && (SETTINGS_PANELS as readonly string[]).includes(slug)
+      ? (slug as SettingsPanel)
+      : null;
+    return blankRoute({ section: 'settings', panel });
+  }
 
   if (parts.length === 0 || parts[0] === 'drive') {
     const folderIds: string[] = [];
@@ -199,10 +209,11 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
       folderIds.push(id);
     }
     if (!valid) return drive;
+    const panel = panelFromSearch(params);
+    if (panel) return blankRoute({ section: 'settings', panel });
     return blankRoute({
       section: 'drive',
       folderIds,
-      panel: panelFromSearch(params),
       query: params.get('q') ?? '',
       fileId: fileIdFromSearch(params),
       sort: sortFromSearch(params),
@@ -213,13 +224,6 @@ export function parseDriveRoute(pathname: string, search = ''): DriveRoute {
 
   if (parts[0] === 'shared' && parts.length === 1) return blankRoute({ section: 'shared' });
   if (parts[0] === 'trash' && parts.length === 1) return blankRoute({ section: 'trash' });
-  if (parts[0] === 'accounts' && parts.length === 1) return blankRoute({ panel: 'accounts' });
-  if (parts[0] === 'teams' && parts.length === 1) return blankRoute({ panel: 'teams' });
-  if (parts[0] === 'faces' && parts.length === 1) return blankRoute({ panel: 'faces' });
-  if (parts[0] === 'indexing' && parts.length === 1) return blankRoute({ panel: 'indexing' });
-  if (parts[0] === 'google-drive' && parts.length === 1) return blankRoute({ panel: 'google-drive' });
-  if (parts[0] === 'updates' && parts.length === 1) return blankRoute({ panel: 'updates' });
-  if (parts[0] === 'network-drive' && parts.length === 1) return blankRoute({ panel: 'network-drive' });
   return drive;
 }
 
@@ -227,6 +231,7 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
   if (route.section === 'shared') return '/shared';
   if (route.section === 'trash') return '/trash';
   if (route.section === 'storage') return '/storage';
+  if (route.section === 'settings') return route.panel ? '/settings/' + route.panel : '/settings';
   if (route.section === 'photos') {
     const parts = ['photos'];
     if (route.photosTab === 'people') {
@@ -244,9 +249,6 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
 
   const folderPath = folders.map((folder) => segmentFor(folder.name, folder.id));
   const params = new URLSearchParams();
-  if (route.panel && (folderPath.length > 0 || route.query || route.fileId || hasActiveFilters(route.filters))) {
-    params.set('panel', route.panel);
-  }
   if (route.query) params.set('q', route.query);
   if (route.fileId) params.set('file', route.fileId.toLowerCase());
   if (route.sort !== 'name') params.set('sort', route.sort);
@@ -255,18 +257,7 @@ export function buildDrivePath(route: DriveRoute, folders: NamedEntry[]): string
   const query = params.toString();
   const suffix = query ? '?' + query : '';
 
-  if (folderPath.length === 0 && !query) {
-    if (route.panel === 'accounts') return '/accounts';
-    if (route.panel === 'teams') return '/teams';
-    if (route.panel === 'faces') return '/faces';
-    if (route.panel === 'indexing') return '/indexing';
-    if (route.panel === 'google-drive') return '/google-drive';
-    if (route.panel === 'developer') return '/settings/developer';
-    if (route.panel === 'security') return '/security';
-    if (route.panel === 'updates') return '/updates';
-    if (route.panel === 'network-drive') return '/network-drive';
-    return '/drive';
-  }
+  if (folderPath.length === 0 && !query) return '/drive';
 
   return '/' + ['drive', ...folderPath].map((part) => encodeURIComponent(part)).join('/') + suffix;
 }

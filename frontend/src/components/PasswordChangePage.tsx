@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { KeyRound, LogOut, ShieldCheck } from 'lucide-react';
 import { api } from '../api';
+import { useI18n } from '../i18n';
 import type { User } from '../types';
 import PasswordChangeForm from './PasswordChangeForm';
 
@@ -11,6 +12,7 @@ type Props = {
 };
 
 export default function PasswordChangePage({ user, onPasswordChanged, onLoggedOut }: Props) {
+  const { t } = useI18n();
   const [loggingOut, setLoggingOut] = useState(false);
 
   async function logout() {
@@ -27,18 +29,18 @@ export default function PasswordChangePage({ user, onPasswordChanged, onLoggedOu
     <main className="login-page password-change-page">
       <section className="password-card" aria-labelledby="password-change-title">
         <div className="password-mark"><KeyRound size={23} /></div>
-        <span className="eyebrow">SECURE YOUR ACCOUNT</span>
-        <h1 id="password-change-title">Choose a new password</h1>
-        <p>Your administrator gave you a temporary password. Change it to continue to your private drive.</p>
+        <span className="eyebrow">{t('password.eyebrow')}</span>
+        <h1 id="password-change-title">{t('password.title')}</h1>
+        <p>{t('password.subtitle')}</p>
         <PasswordChangeForm
-          currentPasswordLabel="Temporary password"
-          submitLabel="Update password"
+          currentPasswordLabel={t('password.current_temp')}
+          submitLabel={t('password.update')}
           autoFocus
           onChanged={onPasswordChanged}
         />
-        <div className="login-secure"><ShieldCheck size={16} /> Signed in as {user.email}</div>
+        <div className="login-secure"><ShieldCheck size={16} /> {t('password.signed_in_as', { email: user.email })}</div>
         <button className="password-logout" type="button" disabled={loggingOut} onClick={() => void logout()}>
-          <LogOut size={14} /> {loggingOut ? 'Signing out…' : 'Sign out'}
+          <LogOut size={14} /> {loggingOut ? t('password.signing_out') : t('password.sign_out')}
         </button>
       </section>
     </main>

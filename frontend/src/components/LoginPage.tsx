@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { ArrowRight, LockKeyhole, ShieldCheck } from 'lucide-react';
 import { api } from '../api';
 import { friendlyError } from '../format';
+import { useI18n } from '../i18n';
 import type { User } from '../types';
 
 type Props = {
@@ -9,6 +10,7 @@ type Props = {
 };
 
 export default function LoginPage({ onLoggedIn }: Props) {
+  const { t } = useI18n();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -36,12 +38,12 @@ export default function LoginPage({ onLoggedIn }: Props) {
           <span>MY DRIVE</span>
         </div>
         <div className="login-intro">
-          <span className="eyebrow">YOUR PRIVATE CLOUD</span>
-          <h1 id="login-title">Welcome back</h1>
-          <p>Sign in to pick up where you left off.</p>
+          <span className="eyebrow">{t('login.eyebrow')}</span>
+          <h1 id="login-title">{t('login.title')}</h1>
+          <p>{t('login.subtitle')}</p>
         </div>
         <form className="form-stack" onSubmit={submit}>
-          <label className="field-label" htmlFor="owner-email">Email address</label>
+          <label className="field-label" htmlFor="owner-email">{t('login.email')}</label>
           <input
             id="owner-email"
             className="text-input"
@@ -53,7 +55,7 @@ export default function LoginPage({ onLoggedIn }: Props) {
             onChange={(event) => setEmail(event.target.value)}
             placeholder="you@example.com"
           />
-          <label className="field-label" htmlFor="owner-password">Password</label>
+          <label className="field-label" htmlFor="owner-password">{t('login.password')}</label>
           <input
             id="owner-password"
             className="text-input"
@@ -62,17 +64,17 @@ export default function LoginPage({ onLoggedIn }: Props) {
             required
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            placeholder="Enter your password"
+            placeholder={t('login.password_placeholder')}
           />
           {error && <div className="inline-alert" role="alert">{error}</div>}
           <button className="button button-primary login-submit" type="submit" disabled={busy}>
-            {busy ? 'Signing in…' : 'Sign in'}
+            {busy ? t('login.submitting') : t('login.submit')}
             {!busy && <ArrowRight size={17} />}
           </button>
         </form>
-        <div className="login-secure"><ShieldCheck size={16} /> Private, encrypted session</div>
+        <div className="login-secure"><ShieldCheck size={16} /> {t('login.secure')}</div>
       </section>
-      <p className="login-footer">A quiet place for your files.</p>
+      <p className="login-footer">{t('login.footer')}</p>
     </main>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ChevronRight, Folder, X } from 'lucide-react';
 import { api } from '../api';
 import { friendlyError } from '../format';
+import { useI18n } from '../i18n';
 import type { Entry } from '../types';
 
 type Crumb = { id: string | null; name: string };
@@ -23,7 +24,8 @@ export default function DestinationDialog({
   onCancel: () => void;
   onConfirm: (parentId: string | null) => Promise<void>;
 }) {
-  const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, name: 'My Drive' }]);
+  const { t } = useI18n();
+  const [crumbs, setCrumbs] = useState<Crumb[]>(() => [{ id: null, name: t('nav.my_drive') }]);
   const [folders, setFolders] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -57,7 +59,7 @@ export default function DestinationDialog({
     api.getEntry(startId)
       .then(async (entry) => {
         if (cancelled || entry.kind !== 'folder' || entry.deleted_at) return;
-        const chain: Crumb[] = [{ id: null, name: 'My Drive' }];
+        const chain: Crumb[] = [{ id: null, name: t('nav.my_drive') }];
         const stack: Entry[] = [entry];
         let parentId = entry.parent_id;
         const seen = new Set<string>([entry.id]);
@@ -75,7 +77,7 @@ export default function DestinationDialog({
     return () => {
       cancelled = true;
     };
-  }, [startId]);
+  }, [startId, t]);
 
   async function confirm() {
     if (blocked || busy) return;
@@ -92,12 +94,12 @@ export default function DestinationDialog({
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
       <section className="modal-card destination-dialog" role="dialog" aria-modal="true" aria-labelledby="destination-title">
-        <button className="modal-close icon-button" type="button" onClick={onCancel} aria-label="Close dialog"><X size={18} /></button>
+        <button className="modal-close icon-button" type="button" onClick={onCancel} aria-label={t('dialog.close')}><X size={18} /></button>
         <span className="modal-icon"><Folder size={19} /></span>
-        <span className="eyebrow">CHOOSE A FOLDER</span>
+        <span className="eyebrow">{t('dialog.choose_folder')}</span>
         <h2 id="destination-title">{title}</h2>
         <p className="modal-description">{description}</p>
-        <nav className="destination-crumbs" aria-label="Destination">
+        <nav className="destination-crumbs" aria-label={t('dialog.destination')}>
           {crumbs.map((crumb, index) => (
             <span key={crumb.id ?? 'root'}>
               {index > 0 && <ChevronRight size={14} />}
@@ -107,9 +109,9 @@ export default function DestinationDialog({
             </span>
           ))}
         </nav>
-        <div className="destination-list" role="listbox" aria-label="Folders">
-          {loading && <p className="destination-status">Loading folders…</p>}
-          {!loading && folders.length === 0 && <p className="destination-status">No folders here. You can still place the selection in this folder.</p>}
+        <div className="destination-list" role="listbox" aria-label={t('dialog.folders')}>
+          {loading && <p className="destination-status">{t('dialog.loading_folders')}</p>}
+          {!loading && folders.length === 0 && <p className="destination-status">{t('dialog.no_folders')}</p>}
           {folders.map((folder) => {
             const excluded = excludeIds.includes(folder.id);
             return (
@@ -122,17 +124,17 @@ export default function DestinationDialog({
               >
                 <Folder size={16} />
                 <span>{folder.name}</span>
-                {folder.system_role === 'photos' && <em>Photos</em>}
+                {folder.system_role === 'photos' && <em>{t('entry.photos_badge')}</em>}
               </button>
             );
           })}
         </div>
-        {blocked && <p className="inline-alert" role="alert">Choose a folder outside the selection.</p>}
+        {blocked && <p className="inline-alert" role="alert">{t('dialog.outside_selection')}</p>}
         {error && <div className="inline-alert" role="alert">{error}</div>}
         <div className="modal-actions">
-          <button type="button" className="button button-secondary" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className="button button-secondary" onClick={onCancel} disabled={busy}>{t('dialog.cancel')}</button>
           <button type="button" className="button button-primary" onClick={() => void confirm()} disabled={busy || blocked || loading}>
-            {busy ? 'Working…' : confirmLabel}
+            {busy ? t('dialog.working') : confirmLabel}
           </button>
         </div>
       </section>

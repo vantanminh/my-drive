@@ -15,19 +15,24 @@ async function loadTsModule(relativePath) {
   return import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'));
 }
 
-test('route parser and builder support the owner updates and teams panels', async () => {
+test('route parser and builder support the settings hub panels', async () => {
   const { parseDriveRoute, buildDrivePath } = await loadTsModule('../src/route.ts');
   const parsed = parseDriveRoute('/updates');
   assert.equal(parsed.panel, 'updates');
-  assert.equal(parsed.section, 'drive');
-  assert.equal(buildDrivePath(parsed, []), '/updates');
+  assert.equal(parsed.section, 'settings');
+  assert.equal(buildDrivePath(parsed, []), '/settings/updates');
+  assert.equal(parseDriveRoute('/settings/updates').panel, 'updates');
   assert.equal(parseDriveRoute('/drive', '?panel=updates').panel, 'updates');
+  assert.equal(parseDriveRoute('/drive', '?panel=updates').section, 'settings');
 
   const teamsParsed = parseDriveRoute('/teams');
   assert.equal(teamsParsed.panel, 'teams');
-  assert.equal(teamsParsed.section, 'drive');
-  assert.equal(buildDrivePath(teamsParsed, []), '/teams');
+  assert.equal(teamsParsed.section, 'settings');
+  assert.equal(buildDrivePath(teamsParsed, []), '/settings/teams');
   assert.equal(parseDriveRoute('/drive', '?panel=teams').panel, 'teams');
+  assert.equal(parseDriveRoute('/settings').section, 'settings');
+  assert.equal(parseDriveRoute('/settings').panel, null);
+  assert.equal(buildDrivePath(parseDriveRoute('/settings'), []), '/settings');
 });
 
 test('teams API client scopes workspace requests and URL builders cleanly', async () => {

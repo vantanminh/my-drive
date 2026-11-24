@@ -2,15 +2,17 @@ import { useEffect, useState } from 'react';
 import { Clock3, KeyRound, Laptop, LogOut, Monitor, RefreshCw, ShieldCheck, Smartphone, X } from 'lucide-react';
 import { api } from '../api';
 import { friendlyError } from '../format';
+import { useI18n } from '../i18n';
 import type { BackupDevice, BrowserSession, User } from '../types';
 import PasswordChangeForm from './PasswordChangeForm';
 
-function formatSessionDate(value: string | null): string {
-  if (!value) return 'Not recorded';
+function formatSessionDate(value: string | null, fallback: string): string {
+  if (!value) return fallback;
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 
 export default function AccountSecurityPanel({ user, onClose }: { user: User; onClose: () => void }) {
+  const { t } = useI18n();
   const [sessions, setSessions] = useState<BrowserSession[] | null>(null);
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
@@ -21,6 +23,8 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
   const [devices, setDevices] = useState<BackupDevice[] | null>(null);
   const [deviceError, setDeviceError] = useState('');
   const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
+
+  const notRecorded = t('security.not_recorded');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -49,14 +53,14 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
   }, [reloadKey]);
 
   async function revokeDevice(device: BackupDevice) {
-    const label = device.name || 'this device';
-    if (!window.confirm(`Revoke ${label}? It will stop backing up until you authorize it again. Files already backed up stay on the server.`)) return;
+    const label = device.name || t('security.this_device');
+    if (!window.confirm(t('security.revoke_device_confirm', { name: label }))) return;
     setBusyDeviceId(device.id);
     setDeviceError('');
     try {
       await api.revokeDevice(device.id);
       setDevices((current) => current?.filter((item) => item.id !== device.id) ?? current);
-      setSessionNotice('The backup client was revoked.');
+      setSessionNotice(t('security.device_revoked'));
     } catch (cause: unknown) {
       setDeviceError(friendlyError(cause));
     } finally {
@@ -71,7 +75,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
     try {
       await api.revokeSession(session.id);
       setSessions((current) => current?.filter((item) => item.id !== session.id) ?? current);
-      setSessionNotice('That session has been signed out.');
+      setSessionNotice(t('security.session_revoked'));
     } catch (cause: unknown) {
       setSessionError(friendlyError(cause));
     } finally {
@@ -81,7 +85,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
 
   async function revokeOtherSessions() {
     const otherCount = sessions?.filter((session) => !session.is_current).length ?? 0;
-    if (!otherCount || !window.confirm(`Sign out of ${otherCount} other session${otherCount === 1 ? '' : 's'}?`)) return;
+    if (!otherCount || !window.confirm(t('security.sign_out_others_confirm', { count: otherCount }))) return;
 
     setBusySessionId('others');
     setSessionError('');
@@ -89,7 +93,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
     try {
       await api.revokeOtherSessions();
       setSessions((current) => current?.filter((session) => session.is_current) ?? current);
-      setSessionNotice('All other sessions have been signed out.');
+      setSessionNotice(t('security.others_revoked'));
     } catch (cause: unknown) {
       setSessionError(friendlyError(cause));
     } finally {
@@ -103,11 +107,11 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
     <section className="account-security-panel" id="account-security-panel" aria-labelledby="account-security-title">
       <div className="account-security-header">
         <div>
-          <span className="eyebrow">ACCOUNT</span>
-          <h2 id="account-security-title">Security</h2>
-          <p>Change your password and manage where your account is signed in.</p>
+          <span className="eyebrow">{t('security.eyebrow')}</span>
+          <h2 id="account-security-title">{t('security.title')}</h2>
+          <p>{t('security.subtitle')}</p>
         </div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="Close account security">
+        <button className="icon-button" type="button" onClick={onClose} aria-label={t('security.close')}>
           <X size={18} />
         </button>
       </div>
@@ -117,16 +121,16 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
           <div className="security-card-heading">
             <span className="security-card-icon"><KeyRound size={16} /></span>
             <div>
-              <h3 id="security-password-title">Change password</h3>
-              <p>Signed in as {user.email}</p>
+              <h3 id="security-password-title">{t('password.change')}</h3>
+              <p>{t('password.signed_in_as', { email: user.email })}</p>
             </div>
           </div>
           {passwordNotice ? <div className="security-message security-message-success" role="status">{passwordNotice}</div> : null}
           <PasswordChangeForm
-            currentPasswordLabel="Current password"
-            submitLabel="Change password"
+            currentPasswordLabel={t('password.current')}
+            submitLabel={t('password.change')}
             onChanged={() => {
-              setPasswordNotice('Password updated. Other signed-in sessions have been signed out.');
+              setPasswordNotice(t('password.updated'));
               setReloadKey((current) => current + 1);
             }}
           />
@@ -136,13 +140,13 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
           <div className="security-card-heading security-sessions-heading">
             <span className="security-card-icon"><ShieldCheck size={16} /></span>
             <div>
-              <h3 id="security-sessions-title">Signed-in sessions</h3>
-              <p>Review active sessions and sign out any you do not recognize.</p>
+              <h3 id="security-sessions-title">{t('security.sessions_title')}</h3>
+              <p>{t('security.sessions_subtitle')}</p>
             </div>
           </div>
 
           <div className="security-session-toolbar">
-            <span>{sessions ? `${sessions.length} active session${sessions.length === 1 ? '' : 's'}` : 'Active sessions'}</span>
+            <span>{sessions ? t('security.sessions_count', { count: sessions.length }) : t('security.sessions_loading')}</span>
             <div>
               <button
                 className="button button-secondary security-refresh"
@@ -150,7 +154,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
                 disabled={loadingSessions || busySessionId !== null}
                 onClick={() => setReloadKey((current) => current + 1)}
               >
-                <RefreshCw size={14} /> Refresh
+                <RefreshCw size={14} /> {t('security.refresh')}
               </button>
               {otherSessionCount > 0 ? (
                 <button
@@ -159,7 +163,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
                   disabled={busySessionId !== null}
                   onClick={() => void revokeOtherSessions()}
                 >
-                  <LogOut size={14} /> Sign out others
+                  <LogOut size={14} /> {t('security.sign_out_others')}
                 </button>
               ) : null}
             </div>
@@ -168,19 +172,19 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
           {sessionError ? <div className="security-message security-message-error" role="alert">{sessionError}</div> : null}
           {sessionNotice ? <div className="security-message security-message-success" role="status">{sessionNotice}</div> : null}
           {loadingSessions ? (
-            <div className="security-session-empty"><span className="spinner" /> Loading sessions…</div>
+            <div className="security-session-empty"><span className="spinner" /> {t('security.loading_sessions')}</div>
           ) : sessions === null ? (
-            <div className="security-session-empty">Sessions could not be loaded. Try refreshing the list.</div>
+            <div className="security-session-empty">{t('security.sessions_error')}</div>
           ) : sessions?.length ? (
             <div className="security-session-list">
               {sessions.map((session) => {
                 const isMobile = session.client_type === 'mobile';
                 const label = session.device_label?.trim()
                   || (isMobile
-                    ? 'MyDrive Mobile App'
+                    ? t('security.mobile_app')
                     : session.is_current
-                      ? 'This browser'
-                      : 'Web Browser');
+                      ? t('security.this_browser')
+                      : t('security.web_browser'));
                 return (
                   <article className="security-session" key={session.id}>
                     <div className="security-session-main">
@@ -189,14 +193,14 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
                           {isMobile ? <Smartphone size={16} /> : <Monitor size={16} />}
                         </span>
                         <strong title={session.user_agent ?? label}>{label}</strong>
-                        {session.is_current ? <span className="security-current-badge">Current</span> : null}
-                        <span className="security-client-badge">{isMobile ? 'Mobile App' : 'Web'}</span>
+                        {session.is_current ? <span className="security-current-badge">{t('security.current_badge')}</span> : null}
+                        <span className="security-client-badge">{isMobile ? t('security.mobile_badge') : t('security.web_badge')}</span>
                       </div>
                       <div className="security-session-details">
-                        <span><Clock3 size={13} /> Last active {formatSessionDate(session.last_seen_at ?? session.created_at)}</span>
+                        <span><Clock3 size={13} /> {t('security.last_active', { time: formatSessionDate(session.last_seen_at ?? session.created_at, notRecorded) })}</span>
                         {session.ip_address ? <span>IP {session.ip_address}</span> : null}
-                        <span>Signed in {formatSessionDate(session.created_at)}</span>
-                        <span>Expires {formatSessionDate(session.expires_at)}</span>
+                        <span>{t('security.signed_in', { time: formatSessionDate(session.created_at, notRecorded) })}</span>
+                        <span>{t('security.expires', { time: formatSessionDate(session.expires_at, notRecorded) })}</span>
                       </div>
                     </div>
                     {!session.is_current ? (
@@ -206,7 +210,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
                         disabled={busySessionId !== null}
                         onClick={() => void revokeSession(session)}
                       >
-                        <LogOut size={14} /> {busySessionId === session.id ? 'Signing out…' : 'Sign out'}
+                        <LogOut size={14} /> {busySessionId === session.id ? t('password.signing_out') : t('security.sign_out_session')}
                       </button>
                     ) : null}
                   </article>
@@ -214,7 +218,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
               })}
             </div>
           ) : (
-            <div className="security-session-empty">No active sessions were found.</div>
+            <div className="security-session-empty">{t('security.no_sessions')}</div>
           )}
         </section>
       </div>
@@ -223,15 +227,15 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
         <div className="security-card-heading">
           <span className="security-card-icon"><Laptop size={16} /></span>
           <div>
-            <h3 id="backup-devices-title">Backup devices</h3>
-            <p>Windows clients authorized to back up this account. Revoking a device does not delete backed-up files.</p>
+            <h3 id="backup-devices-title">{t('security.devices_title')}</h3>
+            <p>{t('security.devices_subtitle')}</p>
           </div>
         </div>
         {deviceError ? <div className="security-message security-message-error" role="alert">{deviceError}</div> : null}
         {devices === null ? (
-          <div className="security-session-empty"><span className="spinner" /> Loading devices…</div>
+          <div className="security-session-empty"><span className="spinner" /> {t('security.loading_devices')}</div>
         ) : devices.length === 0 ? (
-          <div className="security-session-empty">No backup clients are connected.</div>
+          <div className="security-session-empty">{t('security.no_devices')}</div>
         ) : (
           <div className="security-session-list">
             {devices.map((device) => (
@@ -243,10 +247,10 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
                   </div>
                   <div className="security-session-details">
                     <span>{device.operating_system} · {device.client_name} {device.client_version}</span>
-                    <span><Clock3 size={13} /> Last active {formatSessionDate(device.last_active_at)}</span>
-                    <span>Added {formatSessionDate(device.created_at)}</span>
+                    <span><Clock3 size={13} /> {t('security.last_active', { time: formatSessionDate(device.last_active_at, notRecorded) })}</span>
+                    <span>{t('security.added', { time: formatSessionDate(device.created_at, notRecorded) })}</span>
                     {device.last_ip ? <span>IP {device.last_ip}</span> : null}
-                    <span>Permissions {device.permissions.join(', ') || 'backup'}</span>
+                    <span>{t('security.permissions', { list: device.permissions.join(', ') || t('security.permissions_default') })}</span>
                   </div>
                 </div>
                 <button
@@ -255,7 +259,7 @@ export default function AccountSecurityPanel({ user, onClose }: { user: User; on
                   disabled={busyDeviceId !== null}
                   onClick={() => void revokeDevice(device)}
                 >
-                  {busyDeviceId === device.id ? 'Revoking…' : 'Revoke'}
+                  {busyDeviceId === device.id ? t('security.revoking') : t('security.revoke')}
                 </button>
               </article>
             ))}

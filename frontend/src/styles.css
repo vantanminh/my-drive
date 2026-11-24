@@ -218,6 +218,67 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .privacy-card strong { padding-top: 1px; color: #31433c; font-size: 11px; font-weight: 600; }
 .privacy-card small { margin-top: 4px; color: #829089; font-size: 10px; line-height: 1.4; }
 
+.settings-page {
+  display: grid;
+  grid-template-columns: 255px minmax(0, 1fr);
+  gap: 34px;
+  align-items: start;
+}
+.settings-nav {
+  position: sticky;
+  top: 108px;
+  display: flex;
+  max-height: calc(100vh - 130px);
+  flex-direction: column;
+  overflow-y: auto;
+}
+.settings-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 15px 13px;
+  padding: 0;
+  color: #60707c;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.settings-back:hover { color: var(--ink); }
+.settings-nav-group { margin-bottom: 16px; }
+.settings-nav-item { min-height: 52px; align-items: flex-start; padding: 10px 13px; }
+.settings-nav-item > svg { margin-top: 2px; flex: 0 0 auto; }
+.settings-nav-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.settings-nav-copy small { color: #93a1a8; font-size: 9.5px; line-height: 1.35; }
+.settings-nav-item.active .settings-nav-copy small { color: #4f7a66; }
+.settings-update-badge { align-self: center; margin-left: auto; }
+.settings-content { min-width: 0; }
+.settings-content .account-admin-panel,
+.settings-content .account-security-panel,
+.settings-content .media-index-panel { margin-top: 0; }
+.settings-general { display: grid; max-width: 660px; gap: 14px; }
+.settings-language-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 15px; }
+.settings-language-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 13px;
+  background: #fbfcfc;
+  border: 1px solid #e7ecea;
+  border-radius: 9px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .15s ease, background .15s ease;
+}
+.settings-language-option:hover { border-color: #c8d6d0; }
+.settings-language-option strong { color: #30413f; font-size: 12.5px; }
+.settings-language-option small { color: #84908e; font-size: 9.5px; }
+.settings-language-option.is-active { background: #f0f7f3; border-color: #1f8f68; }
+.settings-language-option.is-active strong { color: #135d47; }
+.settings-account-row { display: flex; align-items: center; gap: 10px; margin-top: 15px; }
+.settings-role-badge { padding: 4px 9px; color: #347250; background: #e8f3eb; border-radius: 20px; font-size: 10px; font-weight: 650; }
+
 .main-content {
   width: min(100%, 1600px);
   min-width: 0;
@@ -1197,6 +1258,21 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .account-access-actions { justify-content: stretch; }
   .account-access-actions .button { flex: 1; justify-content: center; }
   .account-load-more { margin-top: 8px; }
+  .settings-page { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .settings-nav {
+    position: static;
+    max-height: none;
+    flex-direction: row;
+    gap: 6px;
+    margin: 0 -15px;
+    padding: 0 15px 6px;
+    overflow-x: auto;
+  }
+  .settings-back { flex: 0 0 auto; margin: 0 6px 0 0; align-self: center; }
+  .settings-nav-group { display: contents; margin-bottom: 0; }
+  .settings-nav-group .nav-section-label { display: none; }
+  .settings-nav-item { flex: 0 0 auto; min-height: 40px; align-items: center; padding: 0 12px; }
+  .settings-nav-copy small { display: none; }
   .face-card { gap: 9px; padding: 10px; }
   .face-merge-actions { display: grid; grid-template-columns: auto minmax(0, 1fr); }
   .face-merge-actions .button { grid-column: 1 / -1; }
