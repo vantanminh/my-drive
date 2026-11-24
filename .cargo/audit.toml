@@ -1,0 +1,10 @@
+[advisories]
+ignore = [
+    # libsqlite3-sys is only reachable through sqlx's optional `sqlite` feature,
+    # which this workspace never enables (postgres-only build). The crate is
+    # resolved into Cargo.lock but is not compiled or shipped.
+    "RUSTSEC-2026-0459",
+    # rsa is only reachable through sqlx-mysql (optional `mysql` feature), which
+    # is likewise disabled. It is never compiled into the binaries.
+    "RUSTSEC-2023-0071",
+]
