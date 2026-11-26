@@ -391,6 +391,18 @@ def legacy_smb_view_volume_name(model):
     return None
 
 
+def smb_service_running():
+    result = subprocess.run(
+        [
+            'docker', 'ps', '--quiet',
+            '--filter', 'label=com.docker.compose.project=my-drive',
+            '--filter', 'label=com.docker.compose.service=smb',
+        ],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    return bool(result.stdout.strip())
+
+
 def migrate_legacy_smb_view_volume(model, config):
     """Copy pending files out of the legacy SSD-backed Docker volume before switching mounts."""
     volume_name = legacy_smb_view_volume_name(model)
@@ -412,13 +424,19 @@ def migrate_legacy_smb_view_volume(model, config):
     # the web app remains available. Removing its container prevents new writes while
     # copying and releases the legacy volume so it can be deleted after rollout.
     try:
-        compose('rm', '-f', '-s', 'smb')
+        compose('--profile', 'smb', 'rm', '-f', '-s', 'smb')
     except subprocess.CalledProcessError:
         pass
     if os.path.realpath(source) != os.path.realpath(destination):
         run('cp', '-a', mountpoint.rstrip('/') + '/.', str(destination))
         run('chown', '-R', '--no-dereference', '10001:10001', str(destination))
     return volume_name
+
+
+def restart_smb_after_update(was_running):
+    if not was_running:
+        return
+    compose('--profile', 'smb', 'up', '-d', 'smb')
 
 
 def cleanup_legacy_smb_view_volume(volume_name):
@@ -2300,6 +2318,7 @@ def main():
             compose_path = INSTALL / 'compose.yaml'
             before_compose = compose_path.read_text()
             model = json.loads(before_compose)
+            smb_was_running = smb_service_running()
             legacy_smb_volume = migrate_legacy_smb_view_volume(model, candidate)
             ensure_updater_compose(model)
             ensure_lan_compose(model, candidate)
@@ -2331,7 +2350,10 @@ def main():
             if all(state['env'].get(image_env[service]) == image for service, image in images.items() if service in image_env):
                 if compose_changed or caddy_changed:
                     print('phase: restarting Applying updated Compose and proxy configuration', flush=True)
-                    zero_downtime_rollout(state)
+                    try:
+                        zero_downtime_rollout(state)
+                    finally:
+                        restart_smb_after_update(smb_was_running)
                     cleanup_legacy_smb_view_volume(legacy_smb_volume)
                     print('Configuration updated and verified without downtime.')
                 else:
@@ -2345,7 +2367,10 @@ def main():
                     state['env'][image_env[service]] = image
             save(state)
             print('phase: rollout Rolling out My Drive update with zero downtime', flush=True)
-            zero_downtime_rollout(state, previous_state=previous_state)
+            try:
+                zero_downtime_rollout(state, previous_state=previous_state)
+            finally:
+                restart_smb_after_update(smb_was_running)
             cleanup_legacy_smb_view_volume(legacy_smb_volume)
             print('Updated and verified without downtime. Previous image references: /opt/my-drive/state.previous.json.')
 

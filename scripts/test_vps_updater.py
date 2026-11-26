@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import vps  # noqa: E402
@@ -153,6 +154,14 @@ class VpsUpdaterTests(unittest.TestCase):
         self.assertNotIn('smb-view', model['volumes'])
         self.assertIsNone(vps.legacy_smb_view_volume_name(model))
         self.assertFalse(vps.ensure_smb_view_compose(model))
+
+
+    def test_smb_restart_uses_profile_only_when_it_was_running(self):
+        with mock.patch.object(vps, 'compose') as compose:
+            vps.restart_smb_after_update(False)
+            compose.assert_not_called()
+            vps.restart_smb_after_update(True)
+            compose.assert_called_once_with('--profile', 'smb', 'up', '-d', 'smb')
 
     def test_build_rollout_docker_args_clones_network_alias_env_and_mounts(self):
         inspect = {
