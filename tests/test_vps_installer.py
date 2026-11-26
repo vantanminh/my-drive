@@ -197,7 +197,7 @@ class InstallerTests(unittest.TestCase):
                             'previews': {'uuid': 'disk2', 'mount': '/'}}, 'env': {}}
         with patch.object(Path, 'is_dir', return_value=True), patch.object(vps, 'filesystem', side_effect=[
             {'uuid': 'disk1', 'mount': '/srv', 'device': '8:32'},
-            {'uuid': 'disk2', 'mount': '/', 'device': '8:0'}]), patch.object(vps, 'write_env'):
+            {'uuid': 'disk2', 'mount': '/', 'device': '8:0'}]), patch.object(vps, 'write_env'), patch.object(vps, 'ensure_smb_view_directory'):
             vps.check(state)
         self.assertEqual(state['env']['STORAGE_EXPECTED_DEVICE'], '8:32')
 
@@ -217,6 +217,12 @@ class InstallerTests(unittest.TestCase):
                     'type': 'bind',
                     'source': '/run/my-drive-updater',
                     'target': '/run/my-drive-updater',
+                    'bind': {'create_host_path': False},
+                },
+                {
+                    'type': 'bind',
+                    'source': '${STORAGE_DATA_HDD}/.smb-view',
+                    'target': '/srv/my-drive/smb-view',
                     'bind': {'create_host_path': False},
                 },
             ],
@@ -255,7 +261,7 @@ class InstallerTests(unittest.TestCase):
                 return 'ghcr.io/example/artifact@sha256:' + 'a' * 64 if kwargs.get('capture') else None
             with patch.object(vps, 'run', side_effect=command):
                 images = vps.build_images(config, Path('/no-source-required'))
-            self.assertEqual(len(images), 3 if indexing else 2)
+            self.assertEqual(len(images), 4 if indexing else 3)
             self.assertTrue(all('@sha256:' in image for image in images.values()))
             self.assertFalse(any('build' in args for args in calls))
             self.assertEqual(sum(args[:2] == ('docker', 'pull') for args in calls), len(images))
