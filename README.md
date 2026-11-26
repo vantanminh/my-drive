@@ -365,9 +365,9 @@ The deployment configuration below requires a Linux host because it checks the
 physical HDD and SSD mounts and device IDs. Keep `compose.yaml`,
 `docker/setup-indexer-role.sh`, and a protected `.env` file on that host.
 
-1. Mount the HDD by filesystem UUID at `/srv/my-drive/data` and ensure the
-   directory is writable by UID 10001. Keep PostgreSQL and generated preview
-   cache on the SSD, for example `/var/lib/my-drive/postgres` and
+1. Mount the HDD by filesystem UUID at `/srv/my-drive/data` and ensure both it
+   and `/srv/my-drive/data/.smb-view` are writable by UID 10001. Keep PostgreSQL
+   and generated preview cache on the SSD, for example `/var/lib/my-drive/postgres` and
    `/var/lib/my-drive/previews`. The SSD preview directory must be on a
    different filesystem from the HDD storage.
 2. Set the restricted deployment environment values shown in `.env.example`.
@@ -420,15 +420,15 @@ native systemd installation, configure separate `STORAGE_*` and
 `MEDIA_PREVIEW_*` roots, mount points, and expected device IDs in the restricted
 environment file. Keep device matching enabled for both mounts.
 
-### Optional SMB network drive (LAN-only, read-only)
+### Optional SMB network drive (LAN-only, read-write)
 
-Users on the local network can mount their drive as a real SMB share (`\\<host>\drive`, e.g., mapped to `Z:` in Windows File Explorer) in addition to the built-in `/webdav/` endpoint. Because the folder hierarchy lives in PostgreSQL while files are stored by content key on the HDD, `app` materialises a read-only symlink view inside the shared `smb-view` volume when enabled by the owner.
+Users on the local network can mount their drive as a real SMB share (`\\<host>\drive`, e.g., mapped to `Z:` in Windows File Explorer) in addition to the built-in `/webdav/` endpoint. Because the folder hierarchy lives in PostgreSQL while files are stored by content key on the HDD, `app` materialises a symlink view when enabled by the owner. The shared view is bind-mounted at `.smb-view` inside `STORAGE_DATA_HDD`, so bytes written through SMB land on the HDD from the first write instead of accumulating in a Docker volume on the OS disk. The app then ingests stable files into the content-addressed object tree and replaces them with symlinks.
 
 1. Enable the optional `smb` Compose profile by adding `COMPOSE_PROFILES=smb` (and optionally `MY_DRIVE_SMB_IMAGE=ghcr.io/vantanminh/my-drive-smb:latest` / `SMB_PORT=445`) to `.env`, then run `docker compose pull smb` and `docker compose up -d`.
 2. Allow TCP port `445` (or `SMB_PORT`) in the host firewall **only for your private LAN**, never the public Internet (for example, `sudo ufw allow from 192.168.0.0/16 to any port 445 proto tcp`). Samba also enforces `hosts allow` for RFC 1918 / loopback / link-local / ULA ranges and `hosts deny = ALL`.
 3. In the web UI (**Network drive**), the owner turns on **Enable SMB network drive** and each user sets a dedicated **SMB password** (at least 12 characters).
 
-> **Security note (NT hash):** Samba authenticates SMB clients using an NT hash (MD4 over UTF-16LE), which is password-equivalent for SMB authentication and cannot be derived from the account's Argon2id password hash. Always use a dedicated SMB password different from your web account password. The `app` container writes `users.list` atomically with mode `0600` on the shared `smb-view` volume (clears it when SMB is disabled), and the SMB container restricts access to private LAN ranges with `smb encrypt = desired`.
+> **Security note (NT hash):** Samba authenticates SMB clients using an NT hash (MD4 over UTF-16LE), which is password-equivalent for SMB authentication and cannot be derived from the account's Argon2id password hash. Always use a dedicated SMB password different from your web account password. The `app` container writes `users.list` atomically with mode `0600` in the HDD-backed shared SMB view (clears it when SMB is disabled), and the SMB container restricts access to private LAN ranges with `smb encrypt = desired`.
 
 ## Google Drive import
 

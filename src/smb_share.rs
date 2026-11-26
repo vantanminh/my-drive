@@ -507,8 +507,23 @@ async fn sync_account(
         account.quota_bytes,
         transfer_settings.owner_quota_bytes,
     );
-    let committed = used_bytes.max(0).saturating_add(reserved_bytes.max(0));
-    let disk_usage = storage.filesystem_usage().ok();
+    let pending_view_bytes = scan
+        .regular_files
+        .iter()
+        .filter(|file| !path_has_ignored_component(&file.rel_path))
+        .fold(0_u64, |sum, file| sum.saturating_add(file.size));
+    let pending_view_bytes = i64::try_from(pending_view_bytes).unwrap_or(i64::MAX);
+    let committed = used_bytes
+        .max(0)
+        .saturating_add(reserved_bytes.max(0))
+        .saturating_add(pending_view_bytes.max(0));
+    let disk_usage = storage.filesystem_usage().ok().map(|disk| {
+        let reserve = storage.required_free_bytes(disk.total_bytes);
+        FilesystemUsage {
+            total_bytes: disk.total_bytes,
+            free_bytes: disk.free_bytes.saturating_sub(reserve),
+        }
+    });
     let (total_bytes, free_bytes) =
         compute_mapped_drive_space(effective_quota, committed, disk_usage);
     let view_for_quota = view.to_path_buf();
@@ -762,6 +777,8 @@ async fn ingest_regular_file(
         .map_err(|_| anyhow::anyhow!("invalid file name: {raw_name}"))?;
     let size_i64 = i64::try_from(reg.size)?;
 
+    storage.check_write_capacity(reg.size)?;
+
     let staging_key = Uuid::new_v4();
     let staging_path = storage.staging_path(staging_key);
     let src_path = reg.abs_path.clone();
@@ -930,7 +947,7 @@ fn copy_and_hash_to_staging(
         .create_new(true)
         .open(dst)?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 1024 * 1024];
     let mut header = Vec::with_capacity(8192);
     let mut total = 0u64;
     loop {

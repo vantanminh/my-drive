@@ -190,8 +190,9 @@ def validate(config):
         result[field] = value
     images = config.get('images', {})
     needed = {'app', 'document-preview'} | ({'media-indexer'} if result['media_indexing'] else set())
-    if not isinstance(images, dict) or (images and set(images) != needed):
-        raise ValueError(f'images must be empty (local build), or define exactly {sorted(needed)}')
+    valid_image_sets = {frozenset(needed), frozenset(needed | {'smb'})}
+    if not isinstance(images, dict) or (images and frozenset(images) not in valid_image_sets):
+        raise ValueError(f'images must be empty (local build), or define exactly {sorted(needed)} plus optional smb')
     if any(not isinstance(image, str) or not IMAGE_RE.fullmatch(image) for image in images.values()):
         raise ValueError('invalid image reference')
     result['images'] = images
@@ -221,10 +222,20 @@ def ask(prebuilt=False):
     return validate(config)
 
 
+def infer_smb_image(app_image):
+    if '@' in app_image:
+        return None
+    repository, separator, tag = app_image.rpartition(':')
+    if not separator or '/' in tag:
+        repository, tag = app_image, 'latest'
+    return f'{repository}-smb:{tag}'
+
+
 def prebuilt_images(config, prefix, tag):
     if '://' in prefix or not re.fullmatch(r'[a-z0-9][a-z0-9._:/-]+', prefix) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', tag):
         raise ValueError('invalid prebuilt image prefix or tag')
-    images = {'app': f'{prefix}:{tag}', 'document-preview': f'{prefix}-document-preview:{tag}'}
+    images = {'app': f'{prefix}:{tag}', 'document-preview': f'{prefix}-document-preview:{tag}',
+              'smb': f'{prefix}-smb:{tag}'}
     if config['media_indexing']:
         images['media-indexer'] = f'{prefix}-indexer:{tag}'
     return images
@@ -282,6 +293,7 @@ def prepare(config):
         os.chmod(path, 0o700)
         if field != 'database':
             os.chown(path, 10001, 10001)
+    ensure_smb_view_directory(config)
     return mounts
 
 
@@ -300,6 +312,122 @@ def compose_environment():
     for key in ('COMPOSE_FILE', 'COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'COMPOSE_ENV_FILES'):
         env.pop(key, None)
     return env
+
+
+SMB_VIEW_DIRNAME = '.smb-view'
+SMB_VIEW_APP_TARGET = '/srv/my-drive/smb-view'
+SMB_VIEW_SERVICE_TARGET = '/srv/view'
+SMB_VIEW_COMPOSE_SOURCE = '${STORAGE_DATA_HDD}/.smb-view'
+
+
+def smb_view_path(config):
+    return valid_path(str(Path(config['storage']) / SMB_VIEW_DIRNAME))
+
+
+def ensure_smb_view_directory(config):
+    path = smb_view_path(config)
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise ValueError(f'unsafe SMB view directory: {path}')
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path, 0o700)
+    os.chown(path, 10001, 10001)
+    return path
+
+
+def ensure_smb_view_compose(model):
+    """Put SMB's temporary write view on the same HDD filesystem as object storage."""
+    changed = False
+    services = model.get('services') or {}
+    for service_name, target in (
+        ('app', SMB_VIEW_APP_TARGET),
+        ('smb', SMB_VIEW_SERVICE_TARGET),
+    ):
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            continue
+        desired = {
+            'type': 'bind',
+            'source': SMB_VIEW_COMPOSE_SOURCE,
+            'target': target,
+            'bind': {'create_host_path': False},
+        }
+        volumes = service.setdefault('volumes', [])
+        rewritten = []
+        found = False
+        for volume in volumes:
+            if isinstance(volume, dict) and volume.get('target') == target:
+                if not found:
+                    rewritten.append(desired)
+                    found = True
+                if volume != desired:
+                    changed = True
+            else:
+                rewritten.append(volume)
+        if not found:
+            rewritten.append(desired)
+            changed = True
+        if rewritten != volumes:
+            service['volumes'] = rewritten
+            changed = True
+    volumes = model.get('volumes')
+    if isinstance(volumes, dict) and 'smb-view' in volumes:
+        del volumes['smb-view']
+        changed = True
+    return changed
+
+
+def legacy_smb_view_volume_name(model):
+    app = (model.get('services') or {}).get('app') or {}
+    for volume in app.get('volumes') or []:
+        if not isinstance(volume, dict) or volume.get('target') != SMB_VIEW_APP_TARGET:
+            continue
+        if volume.get('type') != 'volume':
+            return None
+        key = str(volume.get('source') or 'smb-view')
+        volume_def = ((model.get('volumes') or {}).get(key) or {})
+        if isinstance(volume_def, dict) and volume_def.get('name'):
+            return str(volume_def['name'])
+        return key if key.startswith('my-drive_') else f'my-drive_{key}'
+    return None
+
+
+def migrate_legacy_smb_view_volume(model, config):
+    """Copy pending files out of the legacy SSD-backed Docker volume before switching mounts."""
+    volume_name = legacy_smb_view_volume_name(model)
+    if not volume_name:
+        return None
+    destination = ensure_smb_view_directory(config)
+    inspected = subprocess.run(
+        ['docker', 'volume', 'inspect', '--format', '{{ .Mountpoint }}', volume_name],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    if inspected.returncode != 0:
+        return None
+    mountpoint = inspected.stdout.strip()
+    source = Path(mountpoint)
+    if not mountpoint or not source.is_dir():
+        return None
+
+    # SMB is optional and can be briefly interrupted during this one-time migration;
+    # the web app remains available. Removing its container prevents new writes while
+    # copying and releases the legacy volume so it can be deleted after rollout.
+    try:
+        compose('rm', '-f', '-s', 'smb')
+    except subprocess.CalledProcessError:
+        pass
+    if os.path.realpath(source) != os.path.realpath(destination):
+        run('cp', '-a', mountpoint.rstrip('/') + '/.', str(destination))
+        run('chown', '-R', '--no-dereference', '10001:10001', str(destination))
+    return volume_name
+
+
+def cleanup_legacy_smb_view_volume(volume_name):
+    if not volume_name:
+        return
+    subprocess.run(
+        ['docker', 'volume', 'rm', volume_name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    )
 
 
 def make_compose(model, config):
@@ -338,6 +466,7 @@ def make_compose(model, config):
         services['cloudflared'] = cloudflared_service(config.get('cf_replicas', 2))
     ensure_lan_tls_compose(model, config)
     ensure_updater_compose(model)
+    ensure_smb_view_compose(model)
     return model
 
 
@@ -509,7 +638,7 @@ def build_images(config, source):
                 raise ValueError('pulled image has no usable registry digest')
         return images
     tag = secrets.token_hex(6)
-    targets = {'app': 'runtime', 'document-preview': 'document-preview-runtime'}
+    targets = {'app': 'runtime', 'document-preview': 'document-preview-runtime', 'smb': 'smb-runtime'}
     if config['media_indexing']:
         targets['media-indexer'] = 'media-indexer-runtime'
     images = {}
@@ -530,6 +659,7 @@ def check(state):
         if actual['uuid'] != expected['uuid'] or actual['mount'] != expected['mount']:
             raise ValueError(f'{path}: configured filesystem is missing or replaced; refusing startup')
         mounts[field] = actual
+    ensure_smb_view_directory(state['config'])
     # Linux major:minor numbers may change after reboot; UUID remains authoritative.
     values = state['env']
     values['STORAGE_EXPECTED_DEVICE'] = mounts['storage']['device']
@@ -612,8 +742,8 @@ def _wait_container_ready(container_name, timeout_seconds=180):
     return False
 
 
-def build_rollout_docker_args(inspect_info, new_image, container_name='my-drive-app-rollout'):
-    """Build `docker run` arguments for a standby green app container matching the running app."""
+def build_rollout_docker_args(inspect_info, new_image, container_name='my-drive-app-rollout', bind_overrides=None):
+    """Build `docker run` arguments for a standby green app container matching the desired app mounts."""
     cfg = inspect_info.get('Config') or {}
     host_cfg = inspect_info.get('HostConfig') or {}
     net_settings = (inspect_info.get('NetworkSettings') or {}).get('Networks') or {}
@@ -627,10 +757,15 @@ def build_rollout_docker_args(inspect_info, new_image, container_name='my-drive-
         if env_item.startswith(('BOOTSTRAP_OWNER_EMAIL=', 'BOOTSTRAP_OWNER_PASSWORD=')):
             continue
         cmd += ['-e', env_item]
+    bind_overrides = bind_overrides or {}
     for mount in inspect_info.get('Mounts') or []:
         mtype = mount.get('Type')
-        source = mount.get('Source') if mtype == 'bind' else mount.get('Name')
         target = mount.get('Destination')
+        if target in bind_overrides:
+            mtype = 'bind'
+            source = bind_overrides[target]
+        else:
+            source = mount.get('Source') if mtype == 'bind' else mount.get('Name')
         if not source or not target:
             continue
         ro = ',readonly' if not mount.get('RW', True) else ''
@@ -674,7 +809,12 @@ def zero_downtime_rollout(state, previous_state=None):
     subprocess.run(['docker', 'rm', '-f', rollout_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
     print('phase: rollout Starting standby container and verifying health before switching traffic', flush=True)
-    run_cmd, extra_nets = build_rollout_docker_args(inspect_info, new_app_image, rollout_name)
+    run_cmd, extra_nets = build_rollout_docker_args(
+        inspect_info,
+        new_app_image,
+        rollout_name,
+        {SMB_VIEW_APP_TARGET: str(smb_view_path(state['config']))},
+    )
     started = subprocess.run(run_cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if started.returncode != 0:
         # Fall back to standard start if standby container cannot be created.
@@ -816,7 +956,7 @@ def install(args):
         save(state)
     progress('Generating service and reverse-proxy configuration')
     if not (INSTALL / 'compose.yaml').exists():
-        model = json.loads(run('docker', 'compose', '--env-file', INSTALL / '.env', '-f', SOURCE / 'compose.yaml',
+        model = json.loads(run('docker', 'compose', '--profile', 'smb', '--env-file', INSTALL / '.env', '-f', SOURCE / 'compose.yaml',
                                'config', '--no-interpolate', '--no-path-resolution', '--format', 'json', capture=True))
         model = make_compose(model, state['config'])
         atomic(INSTALL / 'compose.yaml', json.dumps(model, indent=2) + '\n')
@@ -2143,6 +2283,10 @@ def main():
                 candidate['images'] = prebuilt_images(candidate, 'ghcr.io/vantanminh/my-drive', args.tag)
             else:
                 raise ValueError('this installation has no registry update track; use --source, --images, or --tag')
+            if candidate['images'] and 'smb' not in candidate['images']:
+                inferred_smb = infer_smb_image(candidate['images'].get('app', ''))
+                if inferred_smb:
+                    candidate['images']['smb'] = inferred_smb
             candidate = validate(candidate)
             print('phase: pulling Downloading and verifying container images', flush=True)
             images = build_images(candidate, source)  # Build/pull while old app remains available.
@@ -2156,9 +2300,11 @@ def main():
             compose_path = INSTALL / 'compose.yaml'
             before_compose = compose_path.read_text()
             model = json.loads(before_compose)
+            legacy_smb_volume = migrate_legacy_smb_view_volume(model, candidate)
             ensure_updater_compose(model)
             ensure_lan_compose(model, candidate)
             ensure_lan_tls_compose(model, candidate)
+            ensure_smb_view_compose(model)
             after_compose = json.dumps(model, indent=2) + '\n'
             compose_changed = after_compose != before_compose
             if compose_changed:
@@ -2186,6 +2332,7 @@ def main():
                 if compose_changed or caddy_changed:
                     print('phase: restarting Applying updated Compose and proxy configuration', flush=True)
                     zero_downtime_rollout(state)
+                    cleanup_legacy_smb_view_volume(legacy_smb_volume)
                     print('Configuration updated and verified without downtime.')
                 else:
                     print('Already up to date; no services were restarted.')
@@ -2199,6 +2346,7 @@ def main():
             save(state)
             print('phase: rollout Rolling out My Drive update with zero downtime', flush=True)
             zero_downtime_rollout(state, previous_state=previous_state)
+            cleanup_legacy_smb_view_volume(legacy_smb_volume)
             print('Updated and verified without downtime. Previous image references: /opt/my-drive/state.previous.json.')
 
 

@@ -448,7 +448,7 @@ impl LocalStorage {
         Ok((free_bytes, total_bytes))
     }
 
-    fn required_free_bytes(&self, total_bytes: u64) -> u64 {
+    pub(crate) fn required_free_bytes(&self, total_bytes: u64) -> u64 {
         let percent_floor =
             ((total_bytes as f64 * self.min_free_percent / 100.0).ceil() as u64).min(total_bytes);
         self.min_free_bytes.max(percent_floor)

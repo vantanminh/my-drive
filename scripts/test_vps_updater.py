@@ -133,6 +133,27 @@ class VpsUpdaterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 vps.build_netplan_yaml(*bad_args)
 
+    def test_ensure_smb_view_compose_moves_view_to_hdd_bind_idempotently(self):
+        model = {
+            'services': {
+                'app': {'volumes': [{'type': 'volume', 'source': 'smb-view', 'target': '/srv/my-drive/smb-view'}]},
+                'smb': {'volumes': [{'type': 'volume', 'source': 'smb-view', 'target': '/srv/view'}]},
+            },
+            'volumes': {'smb-view': {'name': 'my-drive_smb-view'}},
+        }
+        self.assertEqual(vps.legacy_smb_view_volume_name(model), 'my-drive_smb-view')
+        self.assertTrue(vps.ensure_smb_view_compose(model))
+        app_volume = model['services']['app']['volumes'][0]
+        smb_volume = model['services']['smb']['volumes'][0]
+        self.assertEqual(app_volume['type'], 'bind')
+        self.assertEqual(app_volume['source'], '${STORAGE_DATA_HDD}/.smb-view')
+        self.assertEqual(app_volume['target'], '/srv/my-drive/smb-view')
+        self.assertEqual(smb_volume['source'], '${STORAGE_DATA_HDD}/.smb-view')
+        self.assertEqual(smb_volume['target'], '/srv/view')
+        self.assertNotIn('smb-view', model['volumes'])
+        self.assertIsNone(vps.legacy_smb_view_volume_name(model))
+        self.assertFalse(vps.ensure_smb_view_compose(model))
+
     def test_build_rollout_docker_args_clones_network_alias_env_and_mounts(self):
         inspect = {
             'Config': {
@@ -155,7 +176,11 @@ class VpsUpdaterTests(unittest.TestCase):
                 }
             },
         }
-        cmd, extra_nets = vps.build_rollout_docker_args(inspect, 'ghcr.io/vantanminh/my-drive:v0.1.11')
+        cmd, extra_nets = vps.build_rollout_docker_args(
+            inspect,
+            'ghcr.io/vantanminh/my-drive:v0.1.11',
+            bind_overrides={'/srv/my-drive/smb-view': '/mnt/hdd/.smb-view'},
+        )
         self.assertIn('--network-alias', cmd)
         self.assertIn('app', cmd)
         self.assertIn('my-drive_default', cmd)
@@ -163,6 +188,7 @@ class VpsUpdaterTests(unittest.TestCase):
         self.assertIn('DATABASE_URL=postgres://x', cmd)
         self.assertNotIn('BOOTSTRAP_OWNER_PASSWORD=secret', cmd)
         self.assertIn('type=bind,source=/mnt/ssd,target=/srv/my-drive/previews,readonly', cmd)
+        self.assertIn('type=bind,source=/mnt/hdd/.smb-view,target=/srv/my-drive/smb-view', cmd)
         self.assertEqual(cmd[-1], 'ghcr.io/vantanminh/my-drive:v0.1.11')
 
 
