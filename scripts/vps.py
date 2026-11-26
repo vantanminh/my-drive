@@ -345,6 +345,11 @@ def ensure_smb_view_compose(model):
         service = services.get(service_name)
         if not isinstance(service, dict):
             continue
+        if service_name == 'smb':
+            desired_image = '${MY_DRIVE_SMB_IMAGE:-ghcr.io/vantanminh/my-drive-smb:latest}'
+            if service.get('image') != desired_image:
+                service['image'] = desired_image
+                changed = True
         desired = {
             'type': 'bind',
             'source': SMB_VIEW_COMPOSE_SOURCE,

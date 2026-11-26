@@ -151,6 +151,7 @@ class VpsUpdaterTests(unittest.TestCase):
         self.assertEqual(app_volume['target'], '/srv/my-drive/smb-view')
         self.assertEqual(smb_volume['source'], '${STORAGE_DATA_HDD}/.smb-view')
         self.assertEqual(smb_volume['target'], '/srv/view')
+        self.assertEqual(model['services']['smb']['image'], '${MY_DRIVE_SMB_IMAGE:-ghcr.io/vantanminh/my-drive-smb:latest}')
         self.assertNotIn('smb-view', model['volumes'])
         self.assertIsNone(vps.legacy_smb_view_volume_name(model))
         self.assertFalse(vps.ensure_smb_view_compose(model))
