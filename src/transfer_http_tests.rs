@@ -47,7 +47,8 @@ async fn streamed_upload_resumes_finalizes_and_supports_private_byte_ranges() {
 
     let owner_id = insert_owner(&pool).await;
     let session = insert_session(&pool, owner_id).await;
-    let parent_id = insert_folder(&pool, owner_id, "uploads").await;
+    let photos_root = insert_photos_root(&pool, owner_id).await;
+    let parent_id = insert_folder_in(&pool, owner_id, "uploads", Some(photos_root)).await;
     let other_owner = insert_owner(&pool).await;
     let other_session = insert_session(&pool, other_owner).await;
     let temporary_storage = tempfile::tempdir().expect("create temporary HDD storage");
@@ -1395,13 +1396,19 @@ fn random_token() -> (Vec<u8>, String) {
     (raw.clone(), URL_SAFE_NO_PAD.encode(raw))
 }
 
-async fn insert_folder(pool: &PgPool, owner_id: Uuid, name: &str) -> Uuid {
+async fn insert_folder_in(
+    pool: &PgPool,
+    owner_id: Uuid,
+    name: &str,
+    parent_id: Option<Uuid>,
+) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO drive_entries (id, owner_id, kind, name) VALUES ($1, $2, 'folder', $3)",
+        "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) VALUES ($1, $2, $3, 'folder', $4)",
     )
     .bind(id)
     .bind(owner_id)
+    .bind(parent_id)
     .bind(name)
     .execute(pool)
     .await
@@ -1411,6 +1418,24 @@ async fn insert_folder(pool: &PgPool, owner_id: Uuid, name: &str) -> Uuid {
         .execute(pool)
         .await
         .expect("insert test folder projection");
+    id
+}
+
+async fn insert_photos_root(pool: &PgPool, owner_id: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO drive_entries (id, owner_id, kind, name, system_role) VALUES ($1, $2, 'folder', 'Photos', 'photos')",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .execute(pool)
+    .await
+    .expect("insert test Photos system folder");
+    sqlx::query("INSERT INTO folders (id) VALUES ($1)")
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("insert Photos folder projection");
     id
 }
 
