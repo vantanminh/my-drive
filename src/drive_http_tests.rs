@@ -839,6 +839,82 @@ async fn developer_api_keys_scope_upload_logs_and_independent_share_lifecycle() 
         StatusCode::OK
     );
 
+    let photo_uuid = photo_file["file_id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let photo_version: Uuid =
+        sqlx::query_scalar("SELECT current_version_id FROM files WHERE id = $1")
+            .bind(photo_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut ada_embedding = [0.0_f32; crate::face_indexer::EMBEDDING_DIM];
+    ada_embedding[0] = 1.0;
+    let mut other_embedding = [0.0_f32; crate::face_indexer::EMBEDDING_DIM];
+    other_embedding[1] = 1.0;
+    let ada_cluster = Uuid::new_v4();
+    let wrong_cluster = Uuid::new_v4();
+    sqlx::query("INSERT INTO face_clusters (id, owner_id, label, anchor_embedding) VALUES ($1, $2, 'Ada', $3)")
+        .bind(ada_cluster)
+        .bind(owner)
+        .bind(crate::face_indexer::encode_embedding(&ada_embedding))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO face_clusters (id, owner_id) VALUES ($1, $2)")
+        .bind(wrong_cluster)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (face_index, cluster, embedding) in [
+        (0_i16, wrong_cluster, ada_embedding),
+        (1_i16, wrong_cluster, other_embedding),
+    ] {
+        sqlx::query(
+            "INSERT INTO face_observations              (file_version_id, cluster_id, recipe_version, face_index, confidence,               box_left, box_top, box_width, box_height, descriptor)              VALUES ($1, $2, $3, $4, 0.95, 0.1, 0.1, 0.2, 0.2, $5)",
+        )
+        .bind(photo_version)
+        .bind(cluster)
+        .bind(crate::face_indexer::FACE_INDEX_RECIPE_VERSION)
+        .bind(face_index)
+        .bind(crate::face_indexer::encode_embedding(&embedding))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let reclustered = send(
+        &app,
+        Method::POST,
+        "/api/faces/recluster",
+        Some(&session),
+        Some(&session.csrf_token),
+        None,
+    )
+    .await;
+    assert_eq!(reclustered.status(), StatusCode::OK);
+    let recluster_body = response_json(reclustered).await;
+    assert_eq!(recluster_body["facesReclustered"], 2);
+    let ada_faces: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM face_observations WHERE cluster_id = $1")
+            .bind(ada_cluster)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ada_faces, 1, "the Ada anchor must keep the matching face");
+    let wrong_faces: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM face_observations WHERE cluster_id = $1")
+            .bind(wrong_cluster)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        wrong_faces, 0,
+        "the prior misassignment must not survive reclustering"
+    );
+
     let album_response = api_send(
         &app,
         Method::POST,

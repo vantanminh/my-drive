@@ -23,3 +23,9 @@ All paths are relative to `/api/v1`.
 Use the normal `/uploads/{id}` PATCH / HEAD / finalize / DELETE protocol after creating a Photos session. That protocol requires `drive:write` (and `drive:read` for HEAD). Supported upload filename extensions include JPEG, PNG, GIF, WebP, AVIF, BMP, TIFF, HEIC, HEIF, MP4, MOV, WebM, MKV, AVI, M4V, MPEG, 3GP, MTS and M2TS. Actual media recognition uses detected file content during finalization/indexing; a filename alone does not guarantee Photos inclusion.
 
 Follow `next_cursor` as an opaque value until null. Album links can be created using the [Shares API](/docs/shares.md) with `resource_type:"album"`.
+
+## People and browsing
+
+Photos scans indexed media for faces and groups similar faces into people. Use **People** to name a person, merge duplicate groups, or open a group and use **Not this person** on photos that belong somewhere else. If early automatic grouping created mistakes, use **Regroup people** to run a fresh centroid-based grouping pass while preserving named people and manual corrections. The Library tab also shows a horizontal people rail for quick access.
+
+The Library tab has **Comfortable** and **Compact** density controls. Compact mode uses tighter justified rows for large libraries; the choice is remembered in the browser. Day labels remain visible while scrolling so long timelines keep their date context.

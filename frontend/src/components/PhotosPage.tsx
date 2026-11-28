@@ -130,6 +130,8 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
   const [libraryCursor, setLibraryCursor] = useState<string | null>(null);
   const [librarySelected, setLibrarySelected] = useState<string[]>([]);
   const [uploading, setUploading] = useState('');
+  const [compactDensity, setCompactDensity] = useState(() => window.localStorage.getItem('photos-density') === 'compact');
+  const [railFaces, setRailFaces] = useState<FaceCluster[]>([]);
   const [destination, setDestination] = useState<Destination>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; ids: string[] } | null>(null);
   const anchor = useRef<string | null>(null);
@@ -303,6 +305,21 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
     return () => observer.disconnect();
   }, [albumId, cursor, faceOffset, loading, offset, personId, tab, debouncedPeopleQuery, peopleFilter]);
 
+  useEffect(() => {
+    window.localStorage.setItem('photos-density', compactDensity ? 'compact' : 'comfortable');
+  }, [compactDensity]);
+
+  useEffect(() => {
+    if (tab !== 'timeline') return;
+    const controller = new AbortController();
+    api.faceClusters(0, controller.signal)
+      .then((page) => {
+        if (!controller.signal.aborted) setRailFaces(page.clusters.slice(0, 18));
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [tab]);
+
   const groups = useMemo(() => groupByDay(items), [items]);
   const viewerItems = useMemo(() => items.map(toViewerItem), [items]);
   const viewerIndex = fileId ? viewerItems.findIndex((item) => item.id === fileId) : -1;
@@ -421,6 +438,25 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
       setFaceOffset(page.nextOffset);
       setLabelDrafts(Object.fromEntries(page.clusters.map((cluster) => [cluster.id, cluster.label || ''])));
       setNotice(`Merged into “${name}”.`);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function reclusterPeople() {
+    if (busy) return;
+    if (!window.confirm('Re-run people grouping using current face data? Names you already saved are kept.')) return;
+    setBusy('recluster');
+    setError('');
+    try {
+      const result = await api.reclusterFaces();
+      const page = await api.faceClusters(0, undefined, faceListFilter());
+      setFaces(page.clusters);
+      setFaceOffset(page.nextOffset);
+      setLabelDrafts(Object.fromEntries(page.clusters.map((cluster) => [cluster.id, cluster.label || ''])));
+      setNotice(`Reclustered ${result.facesReclustered} faces into ${result.clusters} people.`);
     } catch (cause) {
       setError(friendlyError(cause));
     } finally {
@@ -669,9 +705,26 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
               <h1>Library</h1>
               <p>Images and videos inside your Photos folder, newest first. Originals uploaded from an album live there too.</p>
             </div>
-            <button className={'button button-secondary' + (selectionMode ? ' is-active' : '')} type="button" aria-pressed={selectionMode} onClick={() => { setSelectionMode((value) => !value); if (selectionMode) setSelected([]); }}>Select</button>
+            <div className="heading-actions">
+              <div className="density-toggle" role="group" aria-label="Photo density">
+                <button type="button" className={compactDensity ? '' : 'active'} onClick={() => setCompactDensity(false)}>Comfortable</button>
+                <button type="button" className={compactDensity ? 'active' : ''} onClick={() => setCompactDensity(true)}>Compact</button>
+              </div>
+              <button className={'button button-secondary' + (selectionMode ? ' is-active' : '')} type="button" aria-pressed={selectionMode} onClick={() => { setSelectionMode((value) => !value); if (selectionMode) setSelected([]); }}>Select</button>
+            </div>
           </header>
-          <MediaGroups groups={groups} loading={loading} selected={selected} selectionMode={selectionMode} onSelect={selectMedia} onOpen={(id) => onNavigate({ fileId: id })} onContextMenu={openMenu} />
+          {railFaces.length > 0 && (
+            <nav className="people-rail" aria-label="People in your library">
+              {railFaces.map((cluster) => (
+                <button key={cluster.id} type="button" className="people-rail-person" onClick={() => onNavigate({ tab: 'people', personId: cluster.id, fileId: null })}>
+                  <FacePortrait cluster={cluster} />
+                  <span>{cluster.label || 'Unnamed'}</span>
+                  <small>{cluster.assetCount}</small>
+                </button>
+              ))}
+            </nav>
+          )}
+          <MediaGroups groups={groups} loading={loading} selected={selected} selectionMode={selectionMode} onSelect={selectMedia} onOpen={(id) => onNavigate({ fileId: id })} onContextMenu={openMenu} compact={compactDensity} />
         </>
       )}
 
@@ -697,6 +750,9 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
                 </button>
               ))}
             </div>
+            <button className="batch-action people-recluster" type="button" disabled={busy === 'recluster'} onClick={() => void reclusterPeople()}>
+              {busy === 'recluster' ? 'Regrouping…' : 'Regroup people'}
+            </button>
           </div>
           {faceSelection.length > 0 && (
             <div className="batch-bar" role="toolbar" aria-label="People actions">
@@ -1038,6 +1094,7 @@ function MediaGroups({
   selectionMode,
   onSelect,
   onContextMenu,
+  compact = false,
   emptyTitle = 'No photos or videos yet',
   emptyBody = 'Upload into an album, or add images and videos from Drive.'
 }: {
@@ -1048,6 +1105,7 @@ function MediaGroups({
   selectionMode?: boolean;
   onSelect?: (id: string, mode: 'toggle' | 'range') => void;
   onContextMenu?: (event: ReactMouseEvent, id: string) => void;
+  compact?: boolean;
   emptyTitle?: string;
   emptyBody?: string;
 }) {
@@ -1072,6 +1130,7 @@ function MediaGroups({
             onOpen={onOpen}
             onSelect={onSelect}
             onContextMenu={onContextMenu}
+            compact={compact}
           />
           <p className="visually-hidden">{group.items.map((item) => `${item.name}, ${formatSize(item.size_bytes)}, ${formatDate(item.created_at)}`).join('. ')}</p>
         </section>

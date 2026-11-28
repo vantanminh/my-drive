@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
@@ -25,6 +27,7 @@ const MAX_LABEL_CHARS: usize = 80;
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/faces", get(list_faces))
+        .route("/api/faces/recluster", post(recluster_faces))
         .route("/api/faces/{cluster_id}", get(get_face).patch(rename_face))
         .route("/api/faces/{cluster_id}/separate", post(separate_faces))
         .route("/api/faces/merge", post(merge_faces))
@@ -158,6 +161,22 @@ struct MergeResponse {
     target_id: Uuid,
     merged_clusters: u64,
     moved_faces: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReclusterResponse {
+    faces_reclustered: usize,
+    clusters: usize,
+    preserved_clusters: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ReclusterCentroid {
+    cluster_id: Uuid,
+    centroid: [f32; crate::face_indexer::EMBEDDING_DIM],
+    weight: usize,
+    existing: bool,
 }
 
 #[derive(FromRow)]
@@ -350,6 +369,251 @@ async fn fetch_clusters(
     .fetch_all(pool)
     .await
     .map_err(FaceError::Database)
+}
+
+fn mean_embedding<'a>(
+    embeddings: impl Iterator<Item = &'a [f32; crate::face_indexer::EMBEDDING_DIM]>,
+) -> Option<[f32; crate::face_indexer::EMBEDDING_DIM]> {
+    let mut sum = [0.0_f32; crate::face_indexer::EMBEDDING_DIM];
+    let mut count = 0usize;
+    for embedding in embeddings {
+        for (acc, value) in sum.iter_mut().zip(embedding.iter()) {
+            *acc += *value;
+        }
+        count += 1;
+    }
+    (count > 0 && crate::face_indexer::l2_normalize(&mut sum)).then_some(sum)
+}
+
+fn recluster_plan(
+    faces: &[(i64, [f32; crate::face_indexer::EMBEDDING_DIM])],
+    seeds: Vec<ReclusterCentroid>,
+) -> (Vec<(i64, Uuid)>, Vec<ReclusterCentroid>) {
+    let mut centroids = seeds;
+    let mut assignments = Vec::with_capacity(faces.len());
+    for (face_id, embedding) in faces {
+        let mut best: Option<(f32, usize)> = None;
+        for (index, candidate) in centroids.iter().enumerate() {
+            let similarity = crate::face_indexer::cosine_similarity(embedding, &candidate.centroid);
+            if similarity < crate::face_indexer::FACE_MATCH_THRESHOLD {
+                continue;
+            }
+            if best.is_none_or(|(best_similarity, _)| similarity > best_similarity) {
+                best = Some((similarity, index));
+            }
+        }
+        let index = if let Some((_, index)) = best {
+            let candidate = &mut centroids[index];
+            candidate.centroid = crate::face_indexer::blend_centroid(
+                &candidate.centroid,
+                candidate.weight,
+                embedding,
+                1,
+            );
+            candidate.weight = candidate.weight.saturating_add(1);
+            index
+        } else {
+            centroids.push(ReclusterCentroid {
+                cluster_id: Uuid::new_v4(),
+                centroid: *embedding,
+                weight: 1,
+                existing: false,
+            });
+            centroids.len() - 1
+        };
+        assignments.push((*face_id, centroids[index].cluster_id));
+    }
+    (assignments, centroids)
+}
+
+async fn recluster_faces(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+) -> Result<Response, FaceError> {
+    if !require_csrf(&headers, &user, state.auth_settings) {
+        return Err(FaceError::Csrf);
+    }
+    let mut transaction = state.pool.begin().await.map_err(FaceError::Database)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(user.id.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(FaceError::Database)?;
+
+    #[derive(FromRow)]
+    struct ObservationRow {
+        id: i64,
+        cluster_id: Option<Uuid>,
+        descriptor: Vec<u8>,
+    }
+    #[derive(FromRow)]
+    struct ClusterSeedRow {
+        id: Uuid,
+        label: Option<String>,
+        anchor_embedding: Option<Vec<u8>>,
+        auto_merge: bool,
+    }
+
+    let observation_rows = sqlx::query_as::<_, ObservationRow>(
+        "SELECT observation.id, observation.cluster_id, observation.descriptor \
+           FROM face_observations AS observation \
+           JOIN file_versions AS version ON version.id = observation.file_version_id \
+           JOIN drive_entries AS entry ON entry.id = version.file_id \
+          WHERE entry.owner_id = $1 \
+            AND entry.deleted_at IS NULL \
+            AND observation.recipe_version = $2 \
+            AND observation.descriptor IS NOT NULL \
+          ORDER BY observation.created_at ASC, observation.id ASC",
+    )
+    .bind(user.id)
+    .bind(crate::face_indexer::FACE_INDEX_RECIPE_VERSION)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+    let cluster_rows = sqlx::query_as::<_, ClusterSeedRow>(
+        "SELECT id, label, anchor_embedding, auto_merge \
+           FROM face_clusters WHERE owner_id = $1 \
+          ORDER BY created_at ASC, id ASC",
+    )
+    .bind(user.id)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+
+    let mut faces = Vec::with_capacity(observation_rows.len());
+    let mut decoded_by_cluster: Vec<(Option<Uuid>, [f32; crate::face_indexer::EMBEDDING_DIM])> =
+        Vec::with_capacity(observation_rows.len());
+    for row in &observation_rows {
+        if let Some(embedding) = crate::face_indexer::decode_embedding(&row.descriptor) {
+            faces.push((row.id, embedding));
+            decoded_by_cluster.push((row.cluster_id, embedding));
+        }
+    }
+    let mut seeds = Vec::new();
+    for cluster in &cluster_rows {
+        if cluster.label.is_none() && cluster.auto_merge {
+            continue;
+        }
+        let centroid =
+            cluster
+                .anchor_embedding
+                .as_deref()
+                .and_then(crate::face_indexer::decode_embedding)
+                .or_else(|| {
+                    mean_embedding(decoded_by_cluster.iter().filter_map(
+                        |(cluster_id, embedding)| {
+                            (*cluster_id == Some(cluster.id)).then_some(embedding)
+                        },
+                    ))
+                });
+        if let Some(centroid) = centroid {
+            seeds.push(ReclusterCentroid {
+                cluster_id: cluster.id,
+                centroid,
+                weight: 8,
+                existing: true,
+            });
+        }
+    }
+    let preserved_clusters = seeds.len();
+    let (assignments, centroids) = recluster_plan(&faces, seeds);
+    if faces.is_empty() {
+        transaction.commit().await.map_err(FaceError::Database)?;
+        return Ok(no_store(Json(ReclusterResponse {
+            faces_reclustered: 0,
+            clusters: 0,
+            preserved_clusters,
+        })));
+    }
+
+    let observation_ids: Vec<i64> = faces.iter().map(|(id, _)| *id).collect();
+    sqlx::query("UPDATE face_observations SET cluster_id = NULL WHERE id = ANY($1::BIGINT[])")
+        .bind(&observation_ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(FaceError::Database)?;
+    sqlx::query(
+        "DELETE FROM face_clusters AS cluster \
+          WHERE cluster.owner_id = $1 AND cluster.label IS NULL AND cluster.auto_merge \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM face_observations AS observation \
+                 WHERE observation.cluster_id = cluster.id \
+            )",
+    )
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+
+    for centroid in centroids.iter().filter(|centroid| !centroid.existing) {
+        sqlx::query(
+            "INSERT INTO face_clusters (id, owner_id, anchor_embedding) VALUES ($1, $2, $3)",
+        )
+        .bind(centroid.cluster_id)
+        .bind(user.id)
+        .bind(crate::face_indexer::encode_embedding(&centroid.centroid))
+        .execute(&mut *transaction)
+        .await
+        .map_err(FaceError::Database)?;
+    }
+    let assignment_ids: Vec<i64> = assignments.iter().map(|(id, _)| *id).collect();
+    let assignment_clusters: Vec<Uuid> = assignments.iter().map(|(_, cluster)| *cluster).collect();
+    sqlx::query(
+        "UPDATE face_observations AS observation \
+            SET cluster_id = assignment.cluster_id \
+           FROM ( \
+                SELECT * FROM unnest($1::BIGINT[], $2::UUID[]) AS assignment(id, cluster_id) \
+           ) AS assignment \
+          WHERE observation.id = assignment.id",
+    )
+    .bind(&assignment_ids)
+    .bind(&assignment_clusters)
+    .execute(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+    for centroid in &centroids {
+        sqlx::query(
+            "UPDATE face_clusters SET anchor_embedding = $2, updated_at = now() WHERE id = $1",
+        )
+        .bind(centroid.cluster_id)
+        .bind(crate::face_indexer::encode_embedding(&centroid.centroid))
+        .execute(&mut *transaction)
+        .await
+        .map_err(FaceError::Database)?;
+    }
+    sqlx::query(
+        "DELETE FROM face_clusters AS cluster \
+          WHERE cluster.owner_id = $1 AND cluster.label IS NULL \
+            AND NOT EXISTS ( \
+                SELECT 1 FROM face_observations AS observation \
+                 WHERE observation.cluster_id = cluster.id \
+            )",
+    )
+    .bind(user.id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+    sqlx::query(
+        "INSERT INTO audit_events (event_type, actor_id, resource_id, details) \
+         VALUES ('face_clusters_reclustered', $1, $2, jsonb_build_object('faces', $3, 'clusters', $4))",
+    )
+    .bind(user.id)
+    .bind(user.id)
+    .bind(i64::try_from(assignments.len()).unwrap_or(i64::MAX))
+    .bind(i64::try_from(centroids.len()).unwrap_or(i64::MAX))
+    .execute(&mut *transaction)
+    .await
+    .map_err(FaceError::Database)?;
+    transaction.commit().await.map_err(FaceError::Database)?;
+
+    let assigned_clusters: HashSet<Uuid> =
+        assignments.iter().map(|(_, cluster)| *cluster).collect();
+    Ok(no_store(Json(ReclusterResponse {
+        faces_reclustered: assignments.len(),
+        clusters: assigned_clusters.len(),
+        preserved_clusters,
+    })))
 }
 
 async fn rename_face(
@@ -733,8 +997,8 @@ impl From<FaceClusterRow> for AdminFaceClusterResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        FaceError, MergeRequest, contains_pattern, normalize_label, page_bounds, search_pattern,
-        validate_merge_request,
+        FaceError, MergeRequest, ReclusterCentroid, contains_pattern, normalize_label, page_bounds,
+        recluster_plan, search_pattern, validate_merge_request,
     };
     use uuid::Uuid;
 
@@ -785,6 +1049,30 @@ mod tests {
             normalize_label(Some("a".repeat(81))),
             Err(FaceError::BadRequest)
         ));
+    }
+
+    #[test]
+    fn recluster_preserves_named_anchor_and_splits_far_faces() {
+        let named_id = Uuid::from_u128(41);
+        let mut named = [0.0_f32; crate::face_indexer::EMBEDDING_DIM];
+        named[0] = 1.0;
+        let mut far = [0.0_f32; crate::face_indexer::EMBEDDING_DIM];
+        far[1] = 1.0;
+        let (assignments, centroids) = recluster_plan(
+            &[(1, named), (2, far), (3, named)],
+            vec![ReclusterCentroid {
+                cluster_id: named_id,
+                centroid: named,
+                weight: 8,
+                existing: true,
+            }],
+        );
+        assert_eq!(assignments[0].1, named_id);
+        assert_ne!(assignments[1].1, named_id);
+        assert_eq!(assignments[2].1, named_id);
+        assert_eq!(centroids.len(), 2);
+        assert_eq!(centroids[0].cluster_id, named_id);
+        assert_eq!(centroids[0].weight, 10);
     }
 
     #[test]

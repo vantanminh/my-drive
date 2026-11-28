@@ -501,6 +501,11 @@ export const api = {
       csrf: true,
       cache: 'no-store'
     }),
+  reclusterFaces: () =>
+    request<{ facesReclustered: number; clusters: number; preservedClusters: number }>(
+      '/api/faces/recluster',
+      { method: 'POST', csrf: true, cache: 'no-store' }
+    ),
   mergeFaceClusters: (targetId: string, sourceIds: string[]) =>
     request<{ targetId: string; mergedClusters: number; movedFaces: number }>('/api/faces/merge', {
       method: 'POST',

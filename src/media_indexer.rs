@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use crate::{
     face_indexer::{
-        self, DEFAULT_MODEL_DIR, EMBEDDING_DIM, FACE_INDEX_RECIPE_VERSION, FaceDetectionError,
-        blend_centroid, cosine_similarity, decode_embedding, encode_embedding,
+        self, DEFAULT_MODEL_DIR, EMBEDDING_DIM, FACE_INDEX_RECIPE_VERSION, FACE_MATCH_THRESHOLD,
+        FaceDetectionError, blend_centroid, cosine_similarity, decode_embedding, encode_embedding,
     },
     storage::{LocalStorage, PreviewStorage, StorageError},
 };
@@ -38,7 +38,6 @@ const VIEWER_MAX_BYTES: usize = 4 * 1024 * 1024;
 const VIDEO_POSTER_MAX_BYTES: usize = 512 * 1024;
 const VIDEO_PREVIEW_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FACE_MATCH_CLUSTERS: i64 = 4_096;
-const FACE_MATCH_THRESHOLD: f32 = 0.45;
 const FACE_CLUSTER_MERGE_THRESHOLD: f32 = 0.50;
 const NAMED_ANCHOR_PRIOR_WEIGHT: usize = 8;
 const MAX_FACE_OBSERVATIONS_PER_FILE: usize = 64;
@@ -395,14 +394,10 @@ async fn claim_one(pool: &PgPool) -> Result<Option<ClaimedJob>, sqlx::Error> {
                     OR (job.state = 'running' AND job.lease_expires_at <= now()) \
                 ) \
                 AND EXISTS (SELECT 1 FROM media_index_control WHERE singleton = TRUE AND paused = FALSE) \
-              ORDER BY CASE job.task \
-                           WHEN 'image_preview' THEN 0 \
-                           WHEN 'video_thumbnail' THEN 1 \
-                           WHEN 'video_preview' THEN 2 \
-                           WHEN 'face_index' THEN 3 \
-                           ELSE 3 \
-                       END, \
-                       COALESCE(job.lease_expires_at, job.available_at), job.id \
+              ORDER BY COALESCE(job.lease_expires_at, job.available_at) \
+                       - CASE WHEN job.task = 'face_index' \
+                              THEN interval '20 seconds' ELSE interval '0 seconds' END, \
+                       job.id \
               LIMIT 1 FOR UPDATE SKIP LOCKED \
          ) \
          UPDATE media_index_jobs AS job \
@@ -706,6 +701,11 @@ async fn process_face_job(
     }
     let mut transaction = pool
         .begin()
+        .await
+        .map_err(|_| retryable("face_index_unavailable"))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(job.owner_id.to_string())
+        .execute(&mut *transaction)
         .await
         .map_err(|_| retryable("face_index_unavailable"))?;
     if detections
@@ -1841,10 +1841,7 @@ fn supports_image_mime(mime: &str) -> bool {
 }
 
 fn supports_ffmpeg_image_mime(mime: &str) -> bool {
-    matches!(
-        mime,
-        "image/gif" | "image/avif" | "image/bmp" | "image/x-icon"
-    )
+    supports_image_mime(mime)
 }
 
 fn supports_video_mime(mime: &str) -> bool {
@@ -2016,10 +2013,10 @@ fn retryable(code: &'static str) -> JobFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClusterCentroid, FACE_MATCH_THRESHOLD, backfill_batch, claim_one, cluster_merge_plan,
-        face_seek_points, matches_magic, matching_cluster, record_failure, retryable, run_once,
-        supports_ffmpeg_image_mime, supports_image_mime, supports_video_mime,
-        validate_metadata_free_webp,
+        ClusterCentroid, FACE_INDEX_RECIPE_VERSION, FACE_MATCH_THRESHOLD, backfill_batch,
+        claim_one, cluster_merge_plan, face_seek_points, matches_magic, matching_cluster,
+        record_failure, retryable, run_once, supports_ffmpeg_image_mime, supports_image_mime,
+        supports_video_mime, validate_metadata_free_webp,
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
     use std::net::SocketAddr;
@@ -2053,7 +2050,11 @@ mod tests {
         for mime in ["image/gif", "image/avif", "image/bmp", "image/x-icon"] {
             assert!(supports_ffmpeg_image_mime(mime), "{mime}");
         }
-        assert!(!supports_ffmpeg_image_mime("image/jpeg"));
+        assert!(supports_ffmpeg_image_mime("image/jpeg"));
+        assert!(supports_ffmpeg_image_mime("image/png"));
+        assert!(supports_ffmpeg_image_mime("image/webp"));
+        assert!(supports_ffmpeg_image_mime("image/tiff"));
+        assert!(supports_ffmpeg_image_mime("image/heic"));
     }
 
     #[test]
@@ -2776,6 +2777,90 @@ mod tests {
             .execute(&pool)
             .await
             .expect("remove move-scope test jobs");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+    async fn face_jobs_receive_bounded_priority_instead_of_strictly_waiting_last() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+        let owner_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, 'test-only-hash', 'owner')",
+        )
+        .bind(owner_id)
+        .bind(format!("media-fair-{owner_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert isolated owner");
+        let photos_root = insert_photos_root(&pool, owner_id).await;
+        let image = insert_backfill_file(
+            &pool,
+            owner_id,
+            Some(photos_root),
+            "fair-image",
+            "image/png",
+            "ready",
+            false,
+        )
+        .await;
+        let face = insert_backfill_file(
+            &pool,
+            owner_id,
+            Some(photos_root),
+            "fair-face",
+            "image/png",
+            "ready",
+            false,
+        )
+        .await;
+        sqlx::query("DELETE FROM media_index_jobs")
+            .execute(&pool)
+            .await
+            .expect("clear scheduler fixture queue");
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version, available_at)              VALUES ($1, 'image_preview', 1, '2000-01-01T00:00:00Z')",
+        )
+        .bind(image.1)
+        .execute(&pool)
+        .await
+        .expect("insert older preview job");
+        sqlx::query(
+            "INSERT INTO media_index_jobs (file_version_id, task, recipe_version, available_at)              VALUES ($1, 'face_index', $2, '2000-01-01T00:00:10Z')",
+        )
+        .bind(face.1)
+        .bind(FACE_INDEX_RECIPE_VERSION)
+        .execute(&pool)
+        .await
+        .expect("insert slightly newer face job");
+
+        let claimed = claim_one(&pool)
+            .await
+            .expect("claim scheduler fixture")
+            .expect("a job is claimable");
+        assert_eq!(claimed.task, "face_index");
+        assert_eq!(claimed.file_version_id, face.1);
+
+        sqlx::query("DELETE FROM media_index_jobs WHERE file_version_id = ANY($1)")
+            .bind(vec![image.1, face.1])
+            .execute(&pool)
+            .await
+            .expect("remove scheduler fixture jobs");
+        sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = ANY($1)")
+            .bind(vec![image.0, face.0])
+            .execute(&pool)
+            .await
+            .expect("deactivate scheduler fixture files");
         pool.close().await;
     }
 

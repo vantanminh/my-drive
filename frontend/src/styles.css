@@ -2406,3 +2406,91 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   cursor: pointer;
 }
 
+
+/* Photos library polish ported from the beauty-plus browsing model: dense
+   justified rows, sticky day context, and a fast horizontal people rail. */
+.density-toggle {
+  display: inline-flex;
+  padding: 3px;
+  background: #eef4f1;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.density-toggle button {
+  min-height: 30px;
+  padding: 0 11px;
+  color: #667780;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+.density-toggle button.active { color: var(--green-dark); background: #fff; box-shadow: 0 1px 4px rgb(28 64 48 / 12%); }
+.people-rail {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  margin: -6px 0 18px;
+  padding: 2px 2px 10px;
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;
+}
+.people-rail::-webkit-scrollbar { display: none; }
+.people-rail::after {
+  content: "";
+  position: sticky;
+  right: 0;
+  flex: 0 0 1px;
+  pointer-events: none;
+}
+.people-rail-person {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  width: 70px;
+  flex: 0 0 auto;
+  padding: 3px;
+  color: #3e535d;
+  background: transparent;
+  border: 0;
+  border-radius: 14px;
+  cursor: pointer;
+  scroll-snap-align: start;
+}
+.people-rail-person:hover, .people-rail-person:focus-visible { background: #fff; outline: 0; }
+.people-rail-person .face-portrait { width: 56px; height: 56px; transition: transform .15s ease, box-shadow .15s ease; }
+.people-rail-person:hover .face-portrait { transform: scale(1.05); box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--green); }
+.people-rail-person span { max-width: 100%; overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.people-rail-person small { margin-top: -2px; color: #84919a; font-size: 10px; font-variant-numeric: tabular-nums; }
+.photo-day h2 {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  width: fit-content;
+  margin: 0 0 8px;
+  padding: 5px 10px;
+  color: #4f626d;
+  background: rgb(247 250 248 / 88%);
+  border: 1px solid rgb(220 228 224 / 70%);
+  border-radius: 999px;
+  box-shadow: 0 3px 12px rgb(28 64 48 / 6%);
+  backdrop-filter: blur(10px);
+}
+.photo-mosaic, .photo-mosaic-row { gap: 6px; }
+.photo-mosaic.compact, .photo-mosaic.compact .photo-mosaic-row { gap: 3px; }
+.photo-mosaic-tile {
+  background: #dfe8e3;
+  border-radius: 6px;
+  transition: filter .16s ease, transform .16s ease;
+}
+.photo-mosaic.compact .photo-mosaic-tile { border-radius: 3px; }
+.photo-mosaic-tile:hover { filter: brightness(1.035); }
+.photo-mosaic-tile img { opacity: 0; transition: opacity .18s ease; }
+.photo-mosaic-tile img[src] { opacity: 1; }
+.photo-mosaic-tile.selected { outline-color: #157a59; }
+@media (prefers-reduced-motion: reduce) {
+  .photo-mosaic-tile, .photo-mosaic-tile img, .people-rail-person .face-portrait { transition: none; }
+}

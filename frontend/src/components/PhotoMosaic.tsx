@@ -16,7 +16,8 @@ export default function PhotoMosaic({
   selectionMode,
   onOpen,
   onSelect,
-  onContextMenu
+  onContextMenu,
+  compact = false
 }: {
   items: MosaicItem[];
   selected?: string[];
@@ -24,6 +25,7 @@ export default function PhotoMosaic({
   onOpen: (id: string) => void;
   onSelect?: (id: string, mode: 'toggle' | 'range') => void;
   onContextMenu?: (event: ReactMouseEvent, id: string) => void;
+  compact?: boolean;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -39,12 +41,15 @@ export default function PhotoMosaic({
     return () => observer.disconnect();
   }, []);
 
-  const targetHeight = width < 560 ? 132 : width < 900 ? 168 : 196;
+  const targetHeight = compact
+    ? width < 560 ? 96 : width < 900 ? 122 : 142
+    : width < 560 ? 132 : width < 900 ? 168 : 196;
+  const gap = compact ? 3 : 6;
   const rows = width > 0
     ? layoutJustified(items.map((item) => ({
       id: item.id,
       aspect: aspects[item.id] ?? (item.aspect && item.aspect > 0 ? item.aspect : 1.4)
-    })), width, targetHeight, 6)
+    })), width, targetHeight, gap)
     : [];
   const placed = new Map(rows.flat().map((tile) => [tile.id, tile]));
 
@@ -65,7 +70,7 @@ export default function PhotoMosaic({
   }
 
   return (
-    <div className={'photo-mosaic' + (selectionMode ? ' selection-active' : '')} ref={frameRef}>
+    <div className={'photo-mosaic' + (selectionMode ? ' selection-active' : '') + (compact ? ' compact' : '')} ref={frameRef}>
       {rows.map((row, index) => {
         const last = index === rows.length - 1;
         return (

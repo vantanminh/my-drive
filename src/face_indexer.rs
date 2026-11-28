@@ -21,6 +21,7 @@ pub(crate) const EMBEDDING_DIM: usize = 512;
 pub(crate) const DESCRIPTOR_LEN: usize = EMBEDDING_DIM * 4;
 pub(crate) const FACE_INDEX_RECIPE_VERSION: i16 = 4;
 pub(crate) const MIN_DET_SCORE: f32 = 0.45;
+pub(crate) const FACE_MATCH_THRESHOLD: f32 = 0.45;
 const DET_INPUT_SIZE: u32 = 640;
 const NMS_IOU_THRESHOLD: f32 = 0.40;
 const ALIGN_SIZE: usize = 112;
