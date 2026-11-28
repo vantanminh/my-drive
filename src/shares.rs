@@ -789,6 +789,7 @@ async fn public_album(
            LEFT JOIN file_versions AS version ON version.id = file.current_version_id \
           WHERE item.album_id = $1 AND idx.owner_id = $2 \
             AND idx.deleted_at IS NULL AND NOT idx.buried \
+            AND idx.entry_id IN (SELECT photos_entry_ids($2)) \
           ORDER BY item.added_at DESC, entry.id \
           LIMIT $3 OFFSET $4",
     )
@@ -1314,6 +1315,7 @@ async fn file_in_share(
                  JOIN entry_index AS idx ON idx.entry_id = item.file_id \
                 WHERE item.album_id = $1 AND item.file_id = $2 AND idx.owner_id = $3 \
                   AND idx.kind = 'file' AND idx.deleted_at IS NULL AND NOT idx.buried \
+                  AND idx.entry_id IN (SELECT photos_entry_ids($3)) \
              )",
         )
         .bind(share_root_id)

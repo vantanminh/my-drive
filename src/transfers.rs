@@ -2283,6 +2283,22 @@ pub(crate) async fn enqueue_media_index_jobs(
     version_id: Uuid,
     mime: Option<&str>,
 ) -> Result<(), sqlx::Error> {
+    let in_photos_scope: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 \
+               FROM file_versions AS version \
+               JOIN drive_entries AS entry ON entry.id = version.file_id \
+              WHERE version.id = $1 \
+                AND entry.deleted_at IS NULL \
+                AND entry.id IN (SELECT photos_entry_ids(entry.owner_id)) \
+         )",
+    )
+    .bind(version_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !in_photos_scope {
+        return Ok(());
+    }
     if let Some((task, recipe_version)) = media_index_task(mime) {
         sqlx::query(
             "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \

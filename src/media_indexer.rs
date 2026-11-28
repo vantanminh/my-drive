@@ -261,6 +261,16 @@ async fn run_once(
 
 async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
+        "DELETE FROM media_index_jobs AS job \
+         USING file_versions AS version, drive_entries AS entry \
+          WHERE version.id = job.file_version_id \
+            AND entry.id = version.file_id \
+            AND job.state IN ('queued', 'retry_wait') \
+            AND entry.id NOT IN (SELECT entry_id FROM photos_entry_pairs())",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "INSERT INTO media_index_jobs (file_version_id, task, recipe_version) \
          SELECT version.id, CASE \
                  WHEN object.mime_detected IN \
@@ -274,6 +284,7 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
            JOIN storage_objects AS object ON object.id = version.storage_object_id \
           WHERE entry.deleted_at IS NULL \
             AND object.state = 'ready' \
+            AND entry.id IN (SELECT entry_id FROM photos_entry_pairs()) \
              AND object.mime_detected IN \
                  ('image/jpeg', 'image/png', 'image/webp', 'image/gif', \
                   'image/avif', 'image/bmp', 'image/x-icon', 'image/tiff', \
@@ -307,6 +318,7 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
            JOIN storage_objects AS object ON object.id = version.storage_object_id \
           WHERE entry.deleted_at IS NULL \
             AND object.state = 'ready' \
+            AND entry.id IN (SELECT entry_id FROM photos_entry_pairs()) \
             AND object.mime_detected IN ( \
                 'video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', \
                 'video/x-msvideo', 'video/ogg', 'video/mpeg', 'video/mp2t', \
@@ -333,6 +345,7 @@ async fn backfill_batch(pool: &PgPool) -> Result<(), sqlx::Error> {
            JOIN storage_objects AS object ON object.id = version.storage_object_id \
           WHERE entry.deleted_at IS NULL \
             AND object.state = 'ready' \
+            AND entry.id IN (SELECT entry_id FROM photos_entry_pairs()) \
             AND object.mime_detected IN ( \
                 'image/jpeg', 'image/png', 'image/gif', 'image/webp', \
                 'image/avif', 'image/bmp', 'image/x-icon', 'image/tiff', \
@@ -2353,16 +2366,17 @@ mod tests {
         .await
         .expect("insert isolated owner");
 
+        let photos_root = insert_photos_root(&pool, owner_id).await;
         let mut candidates = Vec::with_capacity(102);
         for index in 0..102 {
             candidates.push(
                 insert_backfill_file(
                     &pool,
                     owner_id,
+                    Some(photos_root),
                     &format!("candidate-{index}"),
                     "image/png",
                     "ready",
-                    true,
                     false,
                 )
                 .await,
@@ -2392,35 +2406,53 @@ mod tests {
         let deleted_image = insert_backfill_file(
             &pool,
             owner_id,
+            Some(photos_root),
             "deleted",
             "image/webp",
             "ready",
-            true,
             true,
         )
         .await;
         let pending_image = insert_backfill_file(
             &pool,
             owner_id,
+            Some(photos_root),
             "pending",
             "image/jpeg",
             "pending",
-            true,
             false,
         )
         .await;
         let non_image = insert_backfill_file(
             &pool,
             owner_id,
+            Some(photos_root),
             "non-image",
             "application/octet-stream",
             "ready",
-            true,
             false,
         )
         .await;
-        let video =
-            insert_backfill_file(&pool, owner_id, "video", "video/mp4", "ready", true, false).await;
+        let video = insert_backfill_file(
+            &pool,
+            owner_id,
+            Some(photos_root),
+            "video",
+            "video/mp4",
+            "ready",
+            false,
+        )
+        .await;
+        let outside_image = insert_backfill_file(
+            &pool,
+            owner_id,
+            None,
+            "outside-photos",
+            "image/png",
+            "ready",
+            false,
+        )
+        .await;
 
         backfill_batch(&pool)
             .await
@@ -2494,6 +2526,7 @@ mod tests {
             deleted_image.1,
             pending_image.1,
             non_image.1,
+            outside_image.1,
         ])
         .fetch_one(&pool)
         .await
@@ -2518,13 +2551,20 @@ mod tests {
             deleted_image.1,
             pending_image.1,
             non_image.1,
+            outside_image.1,
             video.1,
         ]);
         let mut cleanup_files = candidates
             .iter()
             .map(|candidate| candidate.0)
             .collect::<Vec<_>>();
-        cleanup_files.extend([deleted_image.0, pending_image.0, non_image.0, video.0]);
+        cleanup_files.extend([
+            deleted_image.0,
+            pending_image.0,
+            non_image.0,
+            outside_image.0,
+            video.0,
+        ]);
         sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = ANY($1)")
             .bind(cleanup_files)
             .execute(&pool)
@@ -2536,6 +2576,206 @@ mod tests {
             .await
             .expect("remove jobs created by backfill test");
 
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+    async fn direct_enqueue_only_indexes_media_inside_photos() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let owner_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, 'test-only-hash', 'owner')",
+        )
+        .bind(owner_id)
+        .bind(format!("media-direct-{owner_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert isolated owner");
+        let photos_root = insert_photos_root(&pool, owner_id).await;
+        let inside = insert_backfill_file(
+            &pool,
+            owner_id,
+            Some(photos_root),
+            "inside-direct",
+            "image/png",
+            "ready",
+            false,
+        )
+        .await;
+        let outside = insert_backfill_file(
+            &pool,
+            owner_id,
+            None,
+            "outside-direct",
+            "image/png",
+            "ready",
+            false,
+        )
+        .await;
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .expect("begin inside enqueue transaction");
+        crate::transfers::enqueue_media_index_jobs(&mut transaction, inside.1, Some("image/png"))
+            .await
+            .expect("enqueue inside Photos media");
+        transaction
+            .commit()
+            .await
+            .expect("commit inside enqueue transaction");
+        let mut transaction = pool
+            .begin()
+            .await
+            .expect("begin outside enqueue transaction");
+        crate::transfers::enqueue_media_index_jobs(&mut transaction, outside.1, Some("image/png"))
+            .await
+            .expect("ignore outside Photos media");
+        transaction
+            .commit()
+            .await
+            .expect("commit outside enqueue transaction");
+
+        let inside_tasks: Vec<String> = sqlx::query_scalar(
+            "SELECT task FROM media_index_jobs WHERE file_version_id = $1 ORDER BY task",
+        )
+        .bind(inside.1)
+        .fetch_all(&pool)
+        .await
+        .expect("fetch inside direct enqueue jobs");
+        assert_eq!(inside_tasks, vec!["face_index", "image_preview"]);
+        let outside_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM media_index_jobs WHERE file_version_id = $1")
+                .bind(outside.1)
+                .fetch_one(&pool)
+                .await
+                .expect("count outside direct enqueue jobs");
+        assert_eq!(outside_jobs, 0);
+
+        sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = ANY($1)")
+            .bind(vec![inside.0, outside.0])
+            .execute(&pool)
+            .await
+            .expect("deactivate direct enqueue test files");
+        sqlx::query("DELETE FROM media_index_jobs WHERE file_version_id = ANY($1)")
+            .bind(vec![inside.1, outside.1])
+            .execute(&pool)
+            .await
+            .expect("remove direct enqueue test jobs");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database in TEST_DATABASE_URL"]
+    async fn backfill_discovers_media_moved_into_photos_and_drops_departed_queue() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("set TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect to disposable PostgreSQL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let owner_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, 'test-only-hash', 'owner')",
+        )
+        .bind(owner_id)
+        .bind(format!("media-move-{owner_id}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert isolated owner");
+        let photos_root = insert_photos_root(&pool, owner_id).await;
+        let external_folder = insert_test_folder(&pool, owner_id, None, "external").await;
+        let (file_id, version_id) = insert_backfill_file(
+            &pool,
+            owner_id,
+            Some(external_folder),
+            "nested-media",
+            "image/png",
+            "ready",
+            false,
+        )
+        .await;
+        sqlx::query("UPDATE file_versions SET created_at = '2000-01-01T00:00:00Z' WHERE id = $1")
+            .bind(version_id)
+            .execute(&pool)
+            .await
+            .expect("prioritize scoped fixture in bounded backfill");
+
+        backfill_batch(&pool)
+            .await
+            .expect("backfill before folder enters Photos");
+        let initial_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM media_index_jobs WHERE file_version_id = $1")
+                .bind(version_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count jobs before folder enters Photos");
+        assert_eq!(initial_jobs, 0);
+
+        sqlx::query("UPDATE drive_entries SET parent_id = $1 WHERE id = $2")
+            .bind(photos_root)
+            .bind(external_folder)
+            .execute(&pool)
+            .await
+            .expect("move external folder into Photos");
+        backfill_batch(&pool)
+            .await
+            .expect("backfill after folder enters Photos");
+        let mut tasks: Vec<String> = sqlx::query_scalar(
+            "SELECT task FROM media_index_jobs WHERE file_version_id = $1 ORDER BY task",
+        )
+        .bind(version_id)
+        .fetch_all(&pool)
+        .await
+        .expect("fetch jobs after folder enters Photos");
+        tasks.sort();
+        assert_eq!(tasks, vec!["face_index", "image_preview"]);
+
+        sqlx::query("UPDATE drive_entries SET parent_id = NULL WHERE id = $1")
+            .bind(external_folder)
+            .execute(&pool)
+            .await
+            .expect("move folder back outside Photos");
+        backfill_batch(&pool)
+            .await
+            .expect("backfill after folder leaves Photos");
+        let remaining_pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM media_index_jobs WHERE file_version_id = $1 AND state IN ('queued', 'retry_wait')",
+        )
+        .bind(version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count pending jobs after folder leaves Photos");
+        assert_eq!(remaining_pending, 0);
+
+        sqlx::query("UPDATE drive_entries SET deleted_at = now() WHERE id = ANY($1)")
+            .bind(vec![file_id, external_folder])
+            .execute(&pool)
+            .await
+            .expect("deactivate move-scope fixture");
+        sqlx::query("DELETE FROM media_index_jobs WHERE file_version_id = $1")
+            .bind(version_id)
+            .execute(&pool)
+            .await
+            .expect("remove move-scope test jobs");
         pool.close().await;
     }
 
@@ -2564,13 +2804,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert isolated owner");
+        let photos_root = insert_photos_root(&pool, owner_id).await;
         let (file_id, version_id) = insert_backfill_file(
             &pool,
             owner_id,
+            Some(photos_root),
             "lease-recovery",
             "image/png",
             "ready",
-            true,
             false,
         )
         .await;
@@ -2664,13 +2905,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert isolated owner");
+        let photos_root = insert_photos_root(&pool, owner_id).await;
         let (file_id, version_id) = insert_backfill_file(
             &pool,
             owner_id,
+            Some(photos_root),
             "ssd-disappearance",
             "image/png",
             "ready",
-            true,
             false,
         )
         .await;
@@ -2747,13 +2989,58 @@ mod tests {
         pool.close().await;
     }
 
+    async fn insert_photos_root(pool: &PgPool, owner_id: Uuid) -> Uuid {
+        let folder_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO drive_entries (id, owner_id, kind, name, system_role) \
+             VALUES ($1, $2, 'folder', 'Photos', 'photos')",
+        )
+        .bind(folder_id)
+        .bind(owner_id)
+        .execute(pool)
+        .await
+        .expect("insert system Photos root");
+        sqlx::query("INSERT INTO folders (id) VALUES ($1)")
+            .bind(folder_id)
+            .execute(pool)
+            .await
+            .expect("insert system Photos folder projection");
+        folder_id
+    }
+
+    async fn insert_test_folder(
+        pool: &PgPool,
+        owner_id: Uuid,
+        parent_id: Option<Uuid>,
+        name: &str,
+    ) -> Uuid {
+        let folder_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name) \
+             VALUES ($1, $2, $3, 'folder', $4)",
+        )
+        .bind(folder_id)
+        .bind(owner_id)
+        .bind(parent_id)
+        .bind(format!("{name}-{folder_id}"))
+        .execute(pool)
+        .await
+        .expect("insert test folder entry");
+        sqlx::query("INSERT INTO folders (id) VALUES ($1)")
+            .bind(folder_id)
+            .execute(pool)
+            .await
+            .expect("insert test folder projection");
+        folder_id
+    }
+
     async fn insert_backfill_file(
         pool: &PgPool,
         owner_id: Uuid,
+        parent_id: Option<Uuid>,
         name: &str,
         mime: &str,
         object_state: &str,
-        current: bool,
         deleted: bool,
     ) -> (Uuid, Uuid) {
         let file_id = Uuid::new_v4();
@@ -2761,11 +3048,12 @@ mod tests {
         let version_id = Uuid::new_v4();
         let storage_key = crate::storage::LocalStorage::storage_key(object_id);
         sqlx::query(
-            "INSERT INTO drive_entries (id, owner_id, kind, name, deleted_at) \
-             VALUES ($1, $2, 'file', $3, CASE WHEN $4 THEN now() ELSE NULL END)",
+            "INSERT INTO drive_entries (id, owner_id, parent_id, kind, name, deleted_at) \
+             VALUES ($1, $2, $3, 'file', $4, CASE WHEN $5 THEN now() ELSE NULL END)",
         )
         .bind(file_id)
         .bind(owner_id)
+        .bind(parent_id)
         .bind(format!("{name}-{file_id}"))
         .bind(deleted)
         .execute(pool)
@@ -2797,14 +3085,12 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert backfill file version");
-        if current {
-            sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
-                .bind(version_id)
-                .bind(file_id)
-                .execute(pool)
-                .await
-                .expect("set current backfill file version");
-        }
+        sqlx::query("UPDATE files SET current_version_id = $1 WHERE id = $2")
+            .bind(version_id)
+            .bind(file_id)
+            .execute(pool)
+            .await
+            .expect("set current backfill file version");
         (file_id, version_id)
     }
 

@@ -1,7 +1,7 @@
 #[test]
 fn embedded_migration_contains_the_metadata_and_security_schema() {
     let migrator = sqlx::migrate!("./migrations");
-    assert_eq!(migrator.iter().len(), 22);
+    assert_eq!(migrator.iter().len(), 23);
 
     let migration = include_str!("../migrations/0001_initial.sql");
     for table in [
@@ -113,4 +113,10 @@ fn embedded_migration_contains_the_metadata_and_security_schema() {
     assert!(teams_and_accounts.contains("CREATE TABLE teams"));
     assert!(teams_and_accounts.contains("CREATE TABLE team_members"));
     assert!(teams_and_accounts.contains("is_workspace_service"));
+
+    let photos_scope = include_str!("../migrations/0023_photos_media_scope.sql");
+    assert!(photos_scope.contains("CREATE FUNCTION photos_entry_ids"));
+    assert!(photos_scope.contains("CREATE FUNCTION photos_entry_pairs"));
+    assert!(photos_scope.contains("system_role = 'photos'"));
+    assert!(photos_scope.contains("WITH RECURSIVE tree"));
 }

@@ -598,6 +598,7 @@ async fn list_cluster_media(
            JOIN entry_index AS idx ON idx.entry_id = entry.id \
           WHERE observation.cluster_id = $1 AND entry.owner_id = $2 \
             AND idx.deleted_at IS NULL AND NOT idx.buried \
+            AND entry.id IN (SELECT photos_entry_ids($2)) \
           ORDER BY entry.created_at DESC, entry.id DESC \
           LIMIT $3 OFFSET $4",
     )
@@ -626,6 +627,7 @@ async fn list_photos(
            FROM entry_index AS idx \
           WHERE idx.owner_id = $1 AND idx.deleted_at IS NULL AND NOT idx.buried \
             AND idx.category IN ('image', 'video') \
+            AND idx.entry_id IN (SELECT photos_entry_ids($1)) \
             AND ($2::timestamptz IS NULL OR idx.created_at < $2 \
                  OR (idx.created_at = $2 AND idx.entry_id < $3)) \
           ORDER BY idx.created_at DESC, idx.entry_id DESC \
@@ -706,12 +708,14 @@ async fn list_albums(
                    JOIN entry_index AS cover_index ON cover_index.entry_id = cover.file_id \
                   WHERE cover.album_id = album.id \
                     AND cover_index.deleted_at IS NULL AND NOT cover_index.buried \
+                    AND cover_index.entry_id IN (SELECT photos_entry_ids($1)) \
                   ORDER BY cover.added_at DESC, cover.file_id DESC \
                   LIMIT 1) AS cover_file_id \
            FROM albums AS album \
            LEFT JOIN album_items AS item ON item.album_id = album.id \
            LEFT JOIN entry_index AS idx ON idx.entry_id = item.file_id \
                 AND idx.deleted_at IS NULL AND NOT idx.buried \
+                AND idx.entry_id IN (SELECT photos_entry_ids($1)) \
           WHERE album.owner_id = $1 \
           GROUP BY album.id \
           ORDER BY album.updated_at DESC, album.id DESC",
@@ -825,6 +829,7 @@ async fn list_album_items(
            JOIN drive_entries AS entry ON entry.id = item.file_id \
           WHERE item.album_id = $1 AND idx.owner_id = $2 \
             AND idx.deleted_at IS NULL AND NOT idx.buried \
+            AND idx.entry_id IN (SELECT photos_entry_ids($2)) \
           ORDER BY item.added_at DESC, entry.id DESC \
           LIMIT $3 OFFSET $4",
     )
@@ -884,7 +889,8 @@ async fn mutate_album_items(
         let eligible: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM entry_index \
               WHERE owner_id = $1 AND entry_id = ANY($2) AND kind = 'file' \
-                AND category IN ('image', 'video') AND deleted_at IS NULL AND NOT buried",
+                AND category IN ('image', 'video') AND deleted_at IS NULL AND NOT buried \
+                AND entry_id IN (SELECT photos_entry_ids($1))",
         )
         .bind(user.id)
         .bind(&unique)
@@ -951,12 +957,14 @@ async fn fetch_album(
                    JOIN entry_index AS cover_index ON cover_index.entry_id = cover.file_id \
                   WHERE cover.album_id = album.id \
                     AND cover_index.deleted_at IS NULL AND NOT cover_index.buried \
+                    AND cover_index.entry_id IN (SELECT photos_entry_ids($2)) \
                   ORDER BY cover.added_at DESC, cover.file_id DESC \
                   LIMIT 1) AS cover_file_id \
            FROM albums AS album \
            LEFT JOIN album_items AS item ON item.album_id = album.id \
            LEFT JOIN entry_index AS idx ON idx.entry_id = item.file_id \
                 AND idx.deleted_at IS NULL AND NOT idx.buried \
+                AND idx.entry_id IN (SELECT photos_entry_ids($2)) \
           WHERE album.id = $1 AND album.owner_id = $2 \
           GROUP BY album.id",
     )

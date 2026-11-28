@@ -2,7 +2,7 @@
 
 [Overview](/docs/index.md) · [Uploads](/docs/uploads.md)
 
-Drive and Photos have separate entry points. Photos uploads are stored in the user's protected system Photos folder. Recognized images and videos uploaded anywhere in Drive are also visible in Photos after indexing. The timeline is a view over your media, so it does not duplicate file storage.
+Drive and Photos have separate entry points. Photos uploads are stored in the user's protected system Photos folder. Only recognized images and videos inside that Photos folder (including nested folders later moved or copied into it) are indexed and visible in Photos. Media elsewhere in Drive remains ordinary files. The timeline is a view over your media, so it does not duplicate file storage.
 
 All paths are relative to `/api/v1`.
 

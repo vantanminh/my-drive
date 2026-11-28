@@ -771,6 +771,50 @@ async fn developer_api_keys_scope_upload_logs_and_independent_share_lifecycle() 
     .await;
     let jobs:i64=sqlx::query_scalar("SELECT count(*) FROM media_index_jobs j JOIN file_versions v ON v.id=j.file_version_id WHERE v.file_id=$1").bind(photo_file["file_id"].as_str().unwrap().parse::<Uuid>().unwrap()).fetch_one(&pool).await.unwrap();
     assert!(jobs > 0, "API uploads must enqueue media indexing");
+
+    let outside_photo = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/uploads",
+        token,
+        Some(json!({"filename":"outside-photo.png","expected_size":68,"parent_id":folder_id})),
+    )
+    .await;
+    assert_eq!(outside_photo.status(), StatusCode::CREATED);
+    let outside_upload_id = response_json(outside_photo).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let outside_png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=").unwrap();
+    let outside_chunk = Request::builder()
+        .method(Method::PATCH)
+        .uri(format!("/api/v1/uploads/{outside_upload_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/offset+octet-stream")
+        .header("upload-offset", "0")
+        .body(Body::from(outside_png))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(outside_chunk).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    let outside_file = response_json(
+        api_send(
+            &app,
+            Method::POST,
+            &format!("/api/v1/uploads/{outside_upload_id}/finalize"),
+            token,
+            None,
+        )
+        .await,
+    )
+    .await;
+    let outside_jobs:i64=sqlx::query_scalar("SELECT count(*) FROM media_index_jobs j JOIN file_versions v ON v.id=j.file_version_id WHERE v.file_id=$1").bind(outside_file["file_id"].as_str().unwrap().parse::<Uuid>().unwrap()).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        outside_jobs, 0,
+        "ordinary Drive uploads outside Photos must not be indexed"
+    );
+
     let timeline =
         response_json(api_send(&app, Method::GET, "/api/v1/photos", token, None).await).await;
     assert!(
@@ -780,6 +824,71 @@ async fn developer_api_keys_scope_upload_logs_and_independent_share_lifecycle() 
             .iter()
             .any(|p| p["id"] == photo_file["file_id"])
     );
+    assert!(
+        !timeline["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == outside_file["file_id"])
+    );
+
+    assert_eq!(
+        send(&app, Method::GET, "/api/faces", Some(&session), None, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let album_response = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/albums",
+        token,
+        Some(json!({"name":"Scoped album"})),
+    )
+    .await;
+    assert_eq!(album_response.status(), StatusCode::CREATED);
+    let album_id = response_json(album_response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let outside_album_add = api_send(
+        &app,
+        Method::POST,
+        &format!("/api/v1/albums/{album_id}/items"),
+        token,
+        Some(json!({"file_ids":[outside_file["file_id"]]})),
+    )
+    .await;
+    assert_eq!(outside_album_add.status(), StatusCode::BAD_REQUEST);
+    let inside_album_add = api_send(
+        &app,
+        Method::POST,
+        &format!("/api/v1/albums/{album_id}/items"),
+        token,
+        Some(json!({"file_ids":[photo_file["file_id"]]})),
+    )
+    .await;
+    assert_eq!(inside_album_add.status(), StatusCode::OK);
+    let album_items = response_json(
+        api_send(
+            &app,
+            Method::GET,
+            &format!("/api/v1/albums/{album_id}/items"),
+            token,
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        album_items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == photo_file["file_id"])
+    );
+
     let photos_parent: Uuid =
         sqlx::query_scalar("SELECT target_parent_id FROM upload_sessions WHERE id=$1")
             .bind(photo_id.parse::<Uuid>().unwrap())

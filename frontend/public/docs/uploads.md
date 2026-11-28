@@ -29,4 +29,4 @@ curl -X PATCH https://YOUR_DOMAIN/api/v1/uploads/UPLOAD_UUID \
 | GET, HEAD | /files/{id}/preview | drive:read |
 | GET, HEAD | /files/{id}/thumbnail | drive:read |
 
-Download supports HTTP Range requests. Preview availability depends on detected MIME type, media indexing and configured document preview service. Thumbnails may be unavailable while indexing runs. Uploading images or videos to Drive automatically queues media indexing and makes recognized media discoverable in Photos; do not upload a second copy for Photos.
+Download supports HTTP Range requests. Preview availability depends on detected MIME type, media indexing and configured document preview service. Thumbnails may be unavailable while indexing runs. Images and videos uploaded inside the system Photos folder automatically queue media indexing and become discoverable in Photos; media uploaded elsewhere in Drive is not indexed for Photos.

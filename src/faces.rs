@@ -193,6 +193,7 @@ async fn list_faces(
             named: query.named,
             hide_empty_unlabeled: true,
             people_order: true,
+            photos_only: true,
             limit,
             offset,
         },
@@ -225,6 +226,7 @@ async fn list_admin_faces(
             named: None,
             hide_empty_unlabeled: false,
             people_order: false,
+            photos_only: false,
             limit,
             offset,
         },
@@ -258,6 +260,7 @@ async fn get_face(
             named: None,
             hide_empty_unlabeled: false,
             people_order: false,
+            photos_only: true,
             limit: 1,
             offset: 0,
         },
@@ -276,6 +279,7 @@ struct ClusterQuery<'a> {
     named: Option<bool>,
     hide_empty_unlabeled: bool,
     people_order: bool,
+    photos_only: bool,
     limit: u16,
     offset: u32,
 }
@@ -300,6 +304,7 @@ async fn fetch_clusters(
            LEFT JOIN file_versions AS version ON version.id = observation.file_version_id \
            LEFT JOIN drive_entries AS entry ON entry.id = version.file_id \
                 AND entry.deleted_at IS NULL AND entry.kind = 'file' \
+                AND (NOT $9::BOOL OR entry.id IN (SELECT photos_entry_ids($1))) \
            LEFT JOIN LATERAL ( \
                 SELECT representative_version.file_id, representative_observation.box_left, \
                        representative_observation.box_top, representative_observation.box_width, \
@@ -311,6 +316,7 @@ async fn fetch_clusters(
                     ON representative_entry.id = representative_version.file_id \
                    AND representative_entry.deleted_at IS NULL \
                    AND representative_entry.kind = 'file' \
+                   AND (NOT $9::BOOL OR representative_entry.id IN (SELECT photos_entry_ids($1))) \
                  WHERE representative_observation.cluster_id = cluster.id \
                  ORDER BY representative_observation.confidence DESC, \
                           (representative_observation.box_width * representative_observation.box_height) DESC, \
@@ -340,6 +346,7 @@ async fn fetch_clusters(
     .bind(query.named)
     .bind(query.hide_empty_unlabeled)
     .bind(query.people_order)
+    .bind(query.photos_only)
     .fetch_all(pool)
     .await
     .map_err(FaceError::Database)

@@ -140,6 +140,7 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
   const pagingFaces = useRef(false);
   const peopleGeneration = useRef(0);
   const renameSkip = useRef<string | null>(null);
+  const ensuredPhotosRoot = useRef(false);
 
   function setNotice(message: string, action: NoticeAction | null = null) {
     setNoticeMessage(message);
@@ -171,6 +172,11 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
     anchor.current = null;
     const load = async () => {
       try {
+        if (!ensuredPhotosRoot.current) {
+          ensuredPhotosRoot.current = await api.ensurePhotosFolder()
+            .then(() => true)
+            .catch(() => false);
+        }
         if (tab === 'albums' && !albumId) {
           const page = await api.listAlbums(controller.signal);
           if (!controller.signal.aborted) setAlbums(page.albums);
@@ -661,7 +667,7 @@ export default function PhotosPage({ tab, albumId, personId, fileId, onNavigate 
             <div>
               <span className="eyebrow">PHOTOS</span>
               <h1>Library</h1>
-              <p>Images and videos from your drive, newest first. Originals uploaded from an album live in the Photos folder.</p>
+              <p>Images and videos inside your Photos folder, newest first. Originals uploaded from an album live there too.</p>
             </div>
             <button className={'button button-secondary' + (selectionMode ? ' is-active' : '')} type="button" aria-pressed={selectionMode} onClick={() => { setSelectionMode((value) => !value); if (selectionMode) setSelected([]); }}>Select</button>
           </header>
